@@ -56,8 +56,22 @@ Repo GitHub: `https://github.com/WiktoriaRebeka/Trading_Bot`
 ✅ Wszystkie biblioteki zainstalowane  
 🕓 Prace nad logiką BOTa trwają
 
-💬 Dalsze zadania:
-- [ ] Utworzenie pliku `webhook.py` z logiką odbierania alertów
-- [ ] Implementacja logiki porównywania alertów
-- [ ] Połączenie z Bybit API
-- [ ] Testy symulacyjne
+### 🧩 webhook.py
+Obsługuje webhooki z TradingView i zapisuje alerty do pliku:
+
+- `POST /webhook` – zapisuje alert JSON do `alerts_log.jsonl`
+- `GET /webhook` – wyświetla ostatnie 50 alertów w przeglądarce
+- Działa lokalnie na `localhost:8000` lub `0.0.0.0:8000`
+- Format: JSON alert + znacznik czasu `received_at`
+
+
+### 🔁 state_manager.py
+Zarządza przechowywaniem ostatnich alertów z TradingView w pamięci (RAM), oddzielnie dla każdego symbolu (np. AVAXUSDT.P):
+
+- 🟩 `TOP_GREEN_CHANGE` i 🟥 `BOTTOM_RED_CHANGE`: 5 ostatnich
+- 🟦 `OrderBlock` (MarketStructure): 2 ostatnie
+- Bufory są automatycznie nadpisywane
+- Funkcje:
+  - `update_alert(alert)` – dodaje alert do bufora
+  - `get_last_heatmap(symbol, type)` – zwraca listę ostatnich alertów Heatmapy
+  - `get_last_orderblocks(symbol)` – zwraca 2 ostatnie orderblocki
