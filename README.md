@@ -16,7 +16,7 @@ Stworzenie BOTa działającego 24/7, który:
 - TradingView: alerty webhook JSON (Market Structure & Heatmap)
 - Baza danych: SQLite (`alerts.db`)
 
-📥 Wejścia:
+📅 Wejścia:
 1. **Alerty TradingView** w formacie JSON, z dwóch wskaźników:
    - Market Structure (`OrderBlock`, `entry`, `stoploss`, `direction`)
    - Liquidity Heatmap (`TOP_GREEN_CHANGE`, `BOTTOM_RED_CHANGE`)
@@ -39,7 +39,7 @@ Stworzenie BOTa działającego 24/7, który:
 8. Pozycje nieaktywne usuwa, gdy warunki nie są już spełnione.
 9. Wszystko jest logowane do terminala (na razie), później może do pliku archiwum.
 
-🧾 Dodatkowo:
+📟 Dodatkowo:
 - Bot działa 24/7 w Google Cloud Run lub innej chmurze
 
 📦 Biblioteki:
@@ -55,7 +55,7 @@ GitHub: `https://github.com/WiktoriaRebeka/Trading_Bot`
 
 ---
 
-### 🧩 webhook_sqlite.php
+### 🧹 webhook_sqlite.php
 - Obsługuje `POST` (TradingView) i zapisuje alert do `alerts.db`
 - Obsługuje `GET` (HTML i JSON)
 - Zamienia `timestamp` na `Europe/Warsaw`
@@ -73,3 +73,17 @@ GitHub: `https://github.com/WiktoriaRebeka/Trading_Bot`
 - Wykrywa nowe alerty po `id`
 - Zapisuje do `alerts_sqlite.jsonl`
 - Przekazuje alerty do `process_alert()`
+
+### 💡 bot_logic.py
+- Sprawdza warunki wejścia LONG i SHORT
+- Porównuje alerty OrderBlock i Heatmap
+- Pobiera cenę z Bybit
+- Obsługuje statusy: `planned`, `opened`, `cancelled`, `closed`
+
+### 📃 positions_logger.py
+- Zapisuje wszystkie pozycje do `positions_log.jsonl`
+- Rejestruje moment planowania, otwarcia, zamknięcia i wynik (`WIN` / `LOST`)
+
+### 📊 main.py
+- Uruchamia `fetch_from_sqlite.py` w tle (jako wątek)
+- W pętli uruchamia analizę warunków wejścia (co 15 sekund)
