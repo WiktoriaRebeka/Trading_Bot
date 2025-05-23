@@ -49,3 +49,21 @@ def print_debug():
             print(f"{group}: {len(alerts)} alert(s)")
             for a in alerts:
                 print(f"  -> {a.get('timestamp', '')} | {a.get('event', a.get('type'))}")
+def process_alert(alert: dict):
+    """
+    Procesuje nowy alert JSON.
+    - Sprawdza, czy zawiera niezbędne pola
+    - Aktualizuje bufory w data_store
+    """
+    if not isinstance(alert, dict):
+        print("[❌] Alert nie jest dict:", alert)
+        return
+
+    symbol = alert.get("symbol") or alert.get("ticker")
+    event = alert.get("event") or alert.get("type")
+    if not symbol or not event:
+        print("[⚠️] Alert bez symbolu lub eventu:", alert)
+        return
+
+    update_alert(alert)
+    print(f"[✅] Zarejestrowano alert: {symbol} | {event}")

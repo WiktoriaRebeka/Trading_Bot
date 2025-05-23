@@ -75,3 +75,38 @@ Zarządza przechowywaniem ostatnich alertów z TradingView w pamięci (RAM), odd
   - `update_alert(alert)` – dodaje alert do bufora
   - `get_last_heatmap(symbol, type)` – zwraca listę ostatnich alertów Heatmapy
   - `get_last_orderblocks(symbol)` – zwraca 2 ostatnie orderblocki
+
+🌐 fetch_from_php.py
+Pomost między webhook.php (PHP) a webhook.py (Python).
+Co minutę pobiera nową wersję pliku alerts_log.txt i zapisuje go jako alerts_log.jsonl, jeżeli wykryje zmianę.
+
+Ścieżka: app/fetch_from_php.py
+
+Wykorzystuje: requests, hashlib, time, json
+
+Wykrywa zmiany na podstawie hasha zawartości
+
+Każda linia w pliku musi być poprawnym JSON-em
+
+🧠 process_alert(alert: dict)
+Funkcja z state_manager.py, która:
+
+Waliduje strukturę alertu
+
+Inicjalizuje symbol, jeśli nie istnieje
+
+Przypisuje alert do odpowiedniego bufora (TOP_GREEN_CHANGE, BOTTOM_RED_CHANGE, OrderBlock)
+
+Loguje debugowo dodany alert
+
+🔍 Jak BOT analizuje alerty?
+Obecnie BOT:
+
+Wczytuje alerty z alerts_log.jsonl (pobrane przez fetch_from_php.py)
+
+Dla każdego nowego alertu uruchamia process_alert()
+
+Alert jest trafia do RAM-u (bufor state_manager.py)
+
+Można debugować stan przez print_debug()
+(np. state_manager.print_debug() pokazuje 5/2 ostatnich alertów per symbol)
