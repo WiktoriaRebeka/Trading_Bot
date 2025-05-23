@@ -3,7 +3,7 @@
 from collections import deque
 from typing import Dict, Deque
 
-# Konfiguracja ile alertow pamietac
+# Konfiguracja ile alertów pamiętać
 MAX_HEATMAP_ALERTS = 5
 MAX_OB_ALERTS = 2
 
@@ -34,13 +34,11 @@ def update_alert(alert: dict):
     elif event_type == "OrderBlock":
         data_store[symbol]["OrderBlock"].append(alert)
 
-
 def get_last_heatmap(symbol: str, event_type: str) -> Deque[dict]:
     return data_store.get(symbol, {}).get(event_type, deque())
 
 def get_last_orderblocks(symbol: str) -> Deque[dict]:
     return data_store.get(symbol, {}).get("OrderBlock", deque())
-
 
 def print_debug():
     for symbol, groups in data_store.items():
@@ -49,6 +47,7 @@ def print_debug():
             print(f"{group}: {len(alerts)} alert(s)")
             for a in alerts:
                 print(f"  -> {a.get('timestamp', '')} | {a.get('event', a.get('type'))}")
+
 def process_alert(alert: dict):
     """
     Procesuje nowy alert JSON.
