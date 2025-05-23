@@ -37,7 +37,7 @@ Stworzenie BOTa działającego 24/7, który:
 6. BOT ustawia pozycję Limit + Stop Loss + TP + lewar (obliczany ze SL).
 7. Monitoruje cenę aktywnej pozycji.
 8. Pozycje nieaktywne usuwa, gdy warunki nie są już spełnione.
-9. Wszystko jest logowane.
+9. Wszystko jest logowane do terminala (na razie), później może do pliku archiwum.
 
 🧾 Dodatkowo:
 - Bot działa 24/7 w Google Cloud Run lub innej chmurze
@@ -73,4 +73,3 @@ GitHub: `https://github.com/WiktoriaRebeka/Trading_Bot`
 - Wykrywa nowe alerty po `id`
 - Zapisuje do `alerts_sqlite.jsonl`
 - Przekazuje alerty do `process_alert()`
-
