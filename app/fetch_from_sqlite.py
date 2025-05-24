@@ -5,12 +5,11 @@ import json
 import os
 import sys
 
-# Umożliwienie importu z folderu 'app'
 sys.path.append(os.path.dirname(__file__))
 from state_manager import process_alert
 
 SQLITE_WEBHOOK_URL = "https://trading-bot-webhook-pdh3.onrender.com/webhook?format=json"
-FETCH_INTERVAL = 60  # seconds
+FETCH_INTERVAL = 60
 MAX_LINES = 500
 LOG_FILE = "alerts_sqlite.jsonl"
 last_received_id: int = 0
@@ -20,11 +19,24 @@ print("[BOT] Start pobierania alertów z SQLite webhook...")
 while True:
     try:
         response = requests.get(SQLITE_WEBHOOK_URL, timeout=10)
-        if response.status_code == 200:
-            alerts = response.json()
-            alerts = sorted(alerts, key=lambda x: x["id"])
 
+        if response.status_code == 200:
+            if not response.content.strip():
+                print("[!] Pusta odpowiedź z webhooka.")
+                time.sleep(FETCH_INTERVAL)
+                continue
+
+            try:
+                alerts = response.json()
+            except Exception as e:
+                print(f"[!] Błąd parsowania JSON: {e}")
+                print(f"[!] Surowa odpowiedź:\n{response.text[:200]}")
+                time.sleep(FETCH_INTERVAL)
+                continue
+
+            alerts = sorted(alerts, key=lambda x: x["id"])
             new_alerts = [a for a in alerts if a["id"] > last_received_id]
+
             if new_alerts:
                 with open(LOG_FILE, "a", encoding="utf-8") as f:
                     for alert in new_alerts:
@@ -35,8 +47,6 @@ while True:
                             "received_at": alert.get("received_at")
                         }
                         f.write(json.dumps(data) + "\n")
-
-                        # 🔁 przekazujemy do RAM
                         process_alert(payload)
 
                 last_received_id = new_alerts[-1]["id"]
@@ -44,7 +54,6 @@ while True:
             else:
                 print("[=] Brak nowych alertów.")
 
-            # 📉 skracanie logu
             if os.path.exists(LOG_FILE):
                 with open(LOG_FILE, "r", encoding="utf-8") as f:
                     lines = f.readlines()
@@ -53,6 +62,7 @@ while True:
                         f.writelines(lines[-MAX_LINES:])
         else:
             print(f"[!] Błąd HTTP: {response.status_code}")
+
     except Exception as e:
         print(f"[!] Wyjątek podczas pobierania: {e}")
 
