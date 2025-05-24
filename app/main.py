@@ -3,6 +3,7 @@
 import threading
 import time
 import subprocess
+import sys
 from app import bot_logic
 from app.state_manager import data_store
 
@@ -20,7 +21,7 @@ def bot_loop():
 
 # ▶️ Uruchamia pobieranie alertów z webhook_sqlite.php
 def run_fetch_loop():
-    subprocess.run(["python", "app/fetch_from_sqlite.py"])
+    subprocess.run([sys.executable, "app/fetch_from_sqlite.py"])
 
 if __name__ == "__main__":
     threading.Thread(target=run_fetch_loop, daemon=True).start()
