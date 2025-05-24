@@ -3,12 +3,14 @@ import time
 import requests
 import json
 from typing import List
+import os
 
 SQLITE_WEBHOOK_URL = "https://ekoenergiadomowa.com/webhook_sqlite.php?format=json"
 FETCH_INTERVAL = 60  # seconds
+MAX_LINES = 500
 
 LOG_FILE = "alerts_sqlite.jsonl"
-last_received_ids: List[int] = []
+last_received_id: int = 0
 
 print("[BOT] Start pobierania alertów z SQLite webhook...")
 
@@ -17,21 +19,13 @@ while True:
         response = requests.get(SQLITE_WEBHOOK_URL, timeout=10)
         if response.status_code == 200:
             alerts = response.json()
-            new_alerts = [a for a in alerts if a["id"] not in last_received_ids]
+            alerts = sorted(alerts, key=lambda x: x["id"])  # sort by ID rosnąco
 
+            new_alerts = [a for a in alerts if a["id"] > last_received_id]
             if new_alerts:
                 with open(LOG_FILE, "a", encoding="utf-8") as f:
                     for alert in new_alerts:
-                        payload = alert.get("payload", alert)  # fallback na surowy JSON
-
-                        # Sprawdź czy dane są kompletne
-                        symbol = payload.get("symbol") or payload.get("ticker")
-                        event = payload.get("event") or payload.get("type")
-
-                        if not symbol or not event:
-                            print(f"[⚠️] Pominięto alert bez symbolu lub eventu: {payload}")
-                            continue
-
+                        payload = alert.get("payload", alert)
                         data = {
                             "id": alert["id"],
                             "payload": payload,
@@ -39,10 +33,19 @@ while True:
                         }
                         f.write(json.dumps(data) + "\n")
 
-                last_received_ids = [a["id"] for a in alerts[-10:]]  # remember last 10 IDs
+                last_received_id = new_alerts[-1]["id"]
                 print(f"[+] Zapisano {len(new_alerts)} nowych alertów.")
             else:
                 print("[=] Brak nowych alertów.")
+
+            # trim file to last MAX_LINES
+            if os.path.exists(LOG_FILE):
+                with open(LOG_FILE, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+                if len(lines) > MAX_LINES:
+                    with open(LOG_FILE, "w", encoding="utf-8") as f:
+                        f.writelines(lines[-MAX_LINES:])
+
         else:
             print(f"[!] Błąd HTTP: {response.status_code}")
 
