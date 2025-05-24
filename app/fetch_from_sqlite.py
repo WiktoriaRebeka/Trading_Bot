@@ -3,7 +3,11 @@ import time
 import requests
 import json
 import os
-from app.state_manager import process_alert
+import sys
+
+# Umożliwienie importu z folderu 'app'
+sys.path.append(os.path.dirname(__file__))
+from state_manager import process_alert
 
 SQLITE_WEBHOOK_URL = "https://ekoenergiadomowa.com/webhook_sqlite.php?format=json"
 FETCH_INTERVAL = 60  # seconds
