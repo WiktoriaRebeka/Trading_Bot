@@ -5,7 +5,7 @@ from typing import Dict, Deque
 from time import time
 
 # Konfiguracja
-MAX_OB_ALERTS = 100  # OrderBlocky trzymamy długo
+MAX_OB_ALERTS = 3  # Przechowuj 3 ostatnie OrderBlocki
 HEATMAP_TTL = 120  # sekundy
 
 # Bufory per symbol
@@ -46,7 +46,6 @@ def update_alert(alert: dict):
     if event_type == "OrderBlock":
         data_store[symbol]["OrderBlock"].append(alert)
     elif event_type in ("TOP_GREEN_CHANGE", "BOTTOM_RED_CHANGE"):
-        # tylko jeśli istnieje pasujący OrderBlock
         ob_list = data_store[symbol]["OrderBlock"]
         if not ob_list:
             return
