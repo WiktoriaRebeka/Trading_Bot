@@ -1,89 +1,89 @@
 # Trading BOT using Liquidity Heatmap and Market Structure
 
-🧠 Projekt: BOT Tradingowy oparty o alerty z TradingView
+🧠 **Project**: Automated Trading Bot using TradingView Alerts
 
-🔍 Cel:
-Stworzenie BOTa działającego 24/7, który:
-- odbiera alerty z TradingView (Market Structure & Liquidity Heatmap),
-- analizuje dane, porównuje poziomy cen ze wskaźników,
-- automatycznie podejmuje decyzje tradingowe przez API Bybit (wejście i wyjście z pozycji).
+🔍 **Goal**:
+Develop a 24/7 trading bot that:
+- Receives alerts from TradingView (Market Structure & Liquidity Heatmap),
+- Analyzes price levels from those indicators,
+- Automatically opens/closes positions via Bybit API (entry, stop-loss, take-profit).
 
-🌐 Architektura:
-- Backend: Python (Flask + pybit + dotenv + requests + sqlite3)
-- Frontend: HTML / TailwindCSS / jsPDF
-- Webhook: `https://ekoenergiadomowa.com/webhook_sqlite.php`
-- API giełdy: Bybit REST API (via pybit)
-- TradingView: alerty webhook JSON (Market Structure & Heatmap)
-- Baza danych: SQLite (`alerts.db`)
+🌐 **Architecture**:
+- **Backend**: Python (Flask, pybit, dotenv, requests, sqlite3)
+- **Frontend**: HTML / TailwindCSS / jsPDF
+- **Webhook**: `https://ekoenergiadomowa.com/webhook_sqlite.php`
+- **Exchange API**: Bybit REST API (via pybit)
+- **Alert Source**: TradingView JSON webhook alerts
+- **Database**: SQLite (`alerts.db`)
 
-📅 Wejścia:
-1. **Alerty TradingView** w formacie JSON, z dwóch wskaźników:
+📅 **Input**:
+1. **TradingView Alerts** in JSON format from two indicators:
    - Market Structure (`OrderBlock`, `entry`, `stoploss`, `direction`)
    - Liquidity Heatmap (`TOP_GREEN_CHANGE`, `BOTTOM_RED_CHANGE`)
-2. Alerty zawierają dane:
-   - symbol (np. BTCUSDT),
-   - timestamp (w strefie Europe/Warsaw),
-   - poziomy cen (`entry`, `sl`, `TP`, `levelHigh`, `levelLow`)
+2. Alert data includes:
+   - `symbol` (e.g. BTCUSDT),
+   - `timestamp` (Europe/Warsaw time zone),
+   - price levels: `entry`, `sl`, `TP`, `levelHigh`, `levelLow`
 
-⚙️ Logika BOTa:
-1. TradingView wysyła alert JSON do webhooka PHP.
-2. Webhook `webhook_sqlite.php` zapisuje alert do bazy `alerts.db`.
-3. Skrypt `fetch_from_sqlite.py` co 60 sek. pobiera nowe alerty jako JSON z endpointu PHP.
-4. Każdy alert przetwarzany przez `process_alert()` i zapisany w RAM (`state_manager.py`).
-5. BOT porównuje alerty:
-   - Jeśli `entry` z OrderBlock znajduje się w pobliżu topGreen / bottomRed:
-     - LONG: TOP_GREEN w zakresie OrderBlocku
-     - SHORT: BOTTOM_RED w zakresie OrderBlocku
-6. BOT ustawia pozycję Limit + Stop Loss + TP + lewar (obliczany ze SL).
-7. Monitoruje cenę aktywnej pozycji.
-8. Pozycje nieaktywne usuwa, gdy warunki nie są już spełnione.
-9. Wszystko jest logowane do terminala (na razie), później może do pliku archiwum.
+⚙️ **Bot Logic**:
+1. TradingView sends JSON alert to a PHP webhook.
+2. The webhook `webhook_sqlite.php` logs it into SQLite `alerts.db`.
+3. The `fetch_from_sqlite.py` script fetches new alerts every 60 seconds from the PHP endpoint.
+4. Each alert is processed via `process_alert()` and stored in RAM (`state_manager.py`).
+5. The bot compares:
+   - If OrderBlock `entry` aligns with topGreen / bottomRed zones:
+     - **LONG**: if `TOP_GREEN` is within OrderBlock range
+     - **SHORT**: if `BOTTOM_RED` is within OrderBlock range
+6. The bot places Limit Order + Stop Loss + Take Profit with calculated leverage.
+7. It monitors live price action for active positions.
+8. It cancels plans if price conditions invalidate.
+9. Logs all operations to the terminal (for now, archiving planned).
 
-📟 Dodatkowo:
-- Bot działa 24/7 w Google Cloud Run lub innej chmurze
+📟 **Additionally**:
+- Bot runs 24/7 (can be deployed in Google Cloud Run or other cloud infra)
 
-📦 Biblioteki:
-Python: `flask`, `requests`, `python-dotenv`, `pybit`, `reportlab`, `sqlite3`  
-Node: `axios`, `tailwindcss`, `jspdf`  
+📦 **Libraries**:
+Python: `flask`, `requests`, `python-dotenv`, `pybit`, `reportlab`, `sqlite3`
+Node: `axios`, `tailwindcss`, `jspdf`
 GitHub: `https://github.com/WiktoriaRebeka/Trading_Bot`
 
-🛠 Status:
-✅ Projekt rozpoczęty  
-✅ Repo aktywne  
-✅ Baza działa w SQLite  
-🧠 Integracja i analiza alertów w toku
+🛠 **Project Status**:
+✅ Project started
+✅ Repo is active
+✅ SQLite database working
+🧠 Integrating and analyzing alerts in progress
 
 ---
 
-### 🧹 webhook_sqlite.php
-- Obsługuje `POST` (TradingView) i zapisuje alert do `alerts.db`
-- Obsługuje `GET` (HTML i JSON)
-- Zamienia `timestamp` na `Europe/Warsaw`
+### 🧹 `webhook_sqlite.php`
+- Handles `POST` (TradingView) → saves alert to `alerts.db`
+- Handles `GET` (HTML and JSON view)
+- Converts `timestamp` to `Europe/Warsaw`
 
-### 🔁 state_manager.py
-- Bufory RAM:
-  - Heatmapa: 5 alertów (`TOP_GREEN_CHANGE`, `BOTTOM_RED_CHANGE`)
-  - MarketStructure: 2 `OrderBlock`
-- Funkcje:
-  - `update_alert(alert)` – buforowanie
-  - `print_debug()` – diagnostyka
+### 🔁 `state_manager.py`
+- RAM buffers:
+  - Heatmap: 5 alerts (`TOP_GREEN_CHANGE`, `BOTTOM_RED_CHANGE`)
+  - MarketStructure: 2 `OrderBlock` alerts
+- Functions:
+  - `update_alert(alert)` → buffering
+  - `print_debug()` → diagnostics
 
-### 🔄 fetch_from_sqlite.py
-- Odczyt JSON z `webhook_sqlite.php?format=json`
-- Wykrywa nowe alerty po `id`
-- Zapisuje do `alerts_sqlite.jsonl`
-- Przekazuje alerty do `process_alert()`
+### 🔄 `fetch_from_sqlite.py`
+- Reads JSON from `webhook_sqlite.php?format=json`
+- Detects new alerts by `id`
+- Writes them to `alerts_sqlite.jsonl`
+- Passes each alert to `process_alert()`
 
-### 💡 bot_logic.py
-- Sprawdza warunki wejścia LONG i SHORT
-- Porównuje alerty OrderBlock i Heatmap
-- Pobiera cenę z Bybit
-- Obsługuje statusy: `planned`, `opened`, `cancelled`, `closed`
+### 💡 `bot_logic.py`
+- Checks entry conditions for LONG and SHORT
+- Matches OrderBlock with Heatmap levels
+- Gets real-time price from Bybit
+- Handles statuses: `planned`, `opened`, `cancelled`, `closed`
 
-### 📃 positions_logger.py
-- Zapisuje wszystkie pozycje do `positions_log.jsonl`
-- Rejestruje moment planowania, otwarcia, zamknięcia i wynik (`WIN` / `LOST`)
+### 📃 `positions_logger.py`
+- Logs all positions to `positions_log.jsonl`
+- Tracks planning, opening, closing, and result (`WIN` / `LOST`)
 
-### 📊 main.py
-- Uruchamia `fetch_from_sqlite.py` w tle (jako wątek)
-- W pętli uruchamia analizę warunków wejścia (co 15 sekund)
+### 📊 `main.py`
+- Runs `fetch_from_sqlite.py` in a background thread
+- Every 15s, analyzes conditions and makes trading decisions
