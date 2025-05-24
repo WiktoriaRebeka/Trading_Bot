@@ -9,7 +9,7 @@ import sys
 sys.path.append(os.path.dirname(__file__))
 from state_manager import process_alert
 
-SQLITE_WEBHOOK_URL = "https://ekoenergiadomowa.com/webhook_sqlite.php?format=json"
+SQLITE_WEBHOOK_URL = "https://trading-bot-webhook-pdh3.onrender.com/webhook?format=json"
 FETCH_INTERVAL = 60  # seconds
 MAX_LINES = 500
 LOG_FILE = "alerts_sqlite.jsonl"
