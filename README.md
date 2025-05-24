@@ -11,7 +11,7 @@ Develop a 24/7 trading bot that:
 🌐 **Architecture**:
 - **Backend**: Python (Flask, pybit, dotenv, requests, sqlite3)
 - **Frontend**: HTML / TailwindCSS / jsPDF
-- **Webhook**: `https://ekoenergiadomowa.com/webhook_sqlite.php`
+- **Webhook**: `https://your-render-url.onrender.com/webhook`
 - **Exchange API**: Bybit REST API (via pybit)
 - **Alert Source**: TradingView JSON webhook alerts
 - **Database**: SQLite (`alerts.db`)
@@ -26,9 +26,9 @@ Develop a 24/7 trading bot that:
    - price levels: `entry`, `sl`, `TP`, `levelHigh`, `levelLow`
 
 ⚙️ **Bot Logic**:
-1. TradingView sends JSON alert to a PHP webhook.
-2. The webhook `webhook_sqlite.php` logs it into SQLite `alerts.db`.
-3. The `fetch_from_sqlite.py` script fetches new alerts every 60 seconds from the PHP endpoint.
+1. TradingView sends JSON alert to a **Flask webhook** hosted on Render.
+2. The webhook logs the alert to SQLite `alerts.db` and local file `alerts_log.jsonl`.
+3. The `fetch_from_sqlite.py` script fetches new alerts every 60 seconds from `/webhook` (GET).
 4. Each alert is processed via `process_alert()` and stored in RAM (`state_manager.py`).
 5. The bot compares:
    - If OrderBlock `entry` aligns with topGreen / bottomRed zones:
@@ -40,7 +40,7 @@ Develop a 24/7 trading bot that:
 9. Logs all operations to the terminal (for now, archiving planned).
 
 📟 **Additionally**:
-- Bot runs 24/7 (can be deployed in Google Cloud Run or other cloud infra)
+- Bot runs 24/7 (deployed on Render, but can be ported to GCP/VPS)
 
 📦 **Libraries**:
 Python: `flask`, `requests`, `python-dotenv`, `pybit`, `reportlab`, `sqlite3`
@@ -48,28 +48,28 @@ Node: `axios`, `tailwindcss`, `jspdf`
 GitHub: `https://github.com/WiktoriaRebeka/Trading_Bot`
 
 🛠 **Project Status**:
-✅ Project started
-✅ Repo is active
-✅ SQLite database working
-🧠 Integrating and analyzing alerts in progress
+✅ Project started  
+✅ Repo is active  
+✅ SQLite + Flask webhook working  
+🧠 Alert processing logic in progress
 
 ---
 
-### 🧹 `webhook_sqlite.php`
-- Handles `POST` (TradingView) → saves alert to `alerts.db`
-- Handles `GET` (HTML and JSON view)
-- Converts `timestamp` to `Europe/Warsaw`
+### 🛰️ `app/webhook.py`
+- Python Flask server (Render deployment)
+- Handles `POST` (TradingView) → saves JSON to `alerts.db` and `.jsonl`
+- Handles `GET` → view last 50 alerts in HTML format
 
 ### 🔁 `state_manager.py`
 - RAM buffers:
   - Heatmap: 5 alerts (`TOP_GREEN_CHANGE`, `BOTTOM_RED_CHANGE`)
-  - MarketStructure: 2 `OrderBlock` alerts
+  - MarketStructure: 3 `OrderBlock` alerts
 - Functions:
   - `update_alert(alert)` → buffering
   - `print_debug()` → diagnostics
 
 ### 🔄 `fetch_from_sqlite.py`
-- Reads JSON from `webhook_sqlite.php?format=json`
+- Reads JSON alerts from `https://your-render-url.onrender.com/webhook`
 - Detects new alerts by `id`
 - Writes them to `alerts_sqlite.jsonl`
 - Passes each alert to `process_alert()`
@@ -87,3 +87,12 @@ GitHub: `https://github.com/WiktoriaRebeka/Trading_Bot`
 ### 📊 `main.py`
 - Runs `fetch_from_sqlite.py` in a background thread
 - Every 15s, analyzes conditions and makes trading decisions
+
+---
+
+📝 **Deploy URL**:  
+TradingView Webhook: `https://trading-bot-webhook-xxxx.onrender.com/webhook`
+
+📤 **To send alerts**:
+- In TradingView Alert → set webhook URL to `/webhook`
+- Ensure JSON body structure is valid
