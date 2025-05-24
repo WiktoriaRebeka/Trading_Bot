@@ -22,10 +22,20 @@ while True:
             if new_alerts:
                 with open(LOG_FILE, "a", encoding="utf-8") as f:
                     for alert in new_alerts:
+                        payload = alert.get("payload", alert)  # fallback na surowy JSON
+
+                        # Sprawdź czy dane są kompletne
+                        symbol = payload.get("symbol") or payload.get("ticker")
+                        event = payload.get("event") or payload.get("type")
+
+                        if not symbol or not event:
+                            print(f"[⚠️] Pominięto alert bez symbolu lub eventu: {payload}")
+                            continue
+
                         data = {
                             "id": alert["id"],
-                            "payload": alert["payload"],
-                            "received_at": alert["received_at"]
+                            "payload": payload,
+                            "received_at": alert.get("received_at")
                         }
                         f.write(json.dumps(data) + "\n")
 
@@ -35,7 +45,7 @@ while True:
                 print("[=] Brak nowych alertów.")
         else:
             print(f"[!] Błąd HTTP: {response.status_code}")
-    
+
     except Exception as e:
         print(f"[!] Wyjątek podczas pobierania: {e}")
 
