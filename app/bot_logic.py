@@ -3,10 +3,10 @@
 import requests
 from typing import Optional
 from app import state_manager
+from app.positions_logger import log_new_position
 
 BYBIT_TICKER_URL = "https://api.bybit.com/v2/public/tickers"
 
-# Pobiera aktualna cene waloru (last_price) z API Bybit
 def get_current_price(symbol: str) -> Optional[float]:
     try:
         response = requests.get(BYBIT_TICKER_URL)
@@ -18,7 +18,6 @@ def get_current_price(symbol: str) -> Optional[float]:
         print(f"[BŁĄD] get_current_price({symbol}): {e}")
     return None
 
-# Główna funkcja analizy alertów i ustawiania pozycji (LONG)
 def check_long_entry(symbol: str):
     price = get_current_price(symbol)
     if price is None:
@@ -46,10 +45,10 @@ def check_long_entry(symbol: str):
     if stoploss < top_green < entry:
         print(f"[✅] WARUNEK LONG TRUE: {symbol} | Cena: {price}")
         print(f"[INFO] ENTRY: {entry} | SL: {stoploss} | TP: {target}")
+        log_new_position(symbol, "long", entry, stoploss, target)
     else:
         print(f"[⛔] WARUNEK LONG FALSE: {symbol} | Cena: {price} | TOP GREEN: {top_green}")
 
-# Główna funkcja analizy alertów i ustawiania pozycji (SHORT)
 def check_short_entry(symbol: str):
     price = get_current_price(symbol)
     if price is None:
@@ -77,5 +76,6 @@ def check_short_entry(symbol: str):
     if stoploss > bottom_red > entry:
         print(f"[✅] WARUNEK SHORT TRUE: {symbol} | Cena: {price}")
         print(f"[INFO] ENTRY: {entry} | SL: {stoploss} | TP: {target}")
+        log_new_position(symbol, "short", entry, stoploss, target)
     else:
         print(f"[⛔] WARUNEK SHORT FALSE: {symbol} | Cena: {price} | BOTTOM RED: {bottom_red}")
