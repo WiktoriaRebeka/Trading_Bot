@@ -47,7 +47,7 @@ def webhook():
 
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT id, payload, received_at FROM alerts ORDER BY received_at DESC LIMIT 50")
+    c.execute("SELECT id, payload, received_at FROM alerts ORDER BY received_at DESC LIMIT 500")
     rows = c.fetchall()
     conn.close()
 
