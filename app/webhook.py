@@ -78,3 +78,11 @@ def save_to_supabase(data):
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000)
+
+
+
+print("[DEBUG] SUPABASE_HOST:", os.getenv("SUPABASE_HOST"))
+print("[DEBUG] SUPABASE_PORT:", os.getenv("SUPABASE_PORT"))
+print("[DEBUG] SUPABASE_DB:", os.getenv("SUPABASE_DB"))
+print("[DEBUG] SUPABASE_USER:", os.getenv("SUPABASE_USER"))
+print("[DEBUG] SUPABASE_PASSWORD:", os.getenv("SUPABASE_PASSWORD"))
