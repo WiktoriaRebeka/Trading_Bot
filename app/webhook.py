@@ -1,26 +1,22 @@
-# app/webhook.py
 from flask import Flask, request, jsonify, Response
 from datetime import datetime
 import os
 import json
-import sqlite3
+import psycopg2
+from dotenv import load_dotenv
+
+load_dotenv()
 
 app = Flask(__name__)
-DB_PATH = os.path.join(os.path.dirname(__file__), "../alerts.db")
-LOG_FILE = "alerts_log.jsonl"
 
-# Tworzenie bazy jeśli nie istnieje
-conn = sqlite3.connect(DB_PATH)
-c = conn.cursor()
-c.execute("""
-CREATE TABLE IF NOT EXISTS alerts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    payload TEXT NOT NULL,
-    received_at DATETIME DEFAULT CURRENT_TIMESTAMP
-)
-""")
-conn.commit()
-conn.close()
+def get_conn():
+    return psycopg2.connect(
+        host=os.getenv("SUPABASE_HOST"),
+        port=os.getenv("SUPABASE_PORT"),
+        dbname=os.getenv("SUPABASE_DB"),
+        user=os.getenv("SUPABASE_USER"),
+        password=os.getenv("SUPABASE_PASSWORD")
+    )
 
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
@@ -30,48 +26,55 @@ def webhook():
         except Exception:
             return jsonify({"error": "Invalid JSON"}), 400
 
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("INSERT INTO alerts (payload) VALUES (?)", [json.dumps(data)])
-        conn.commit()
-        conn.close()
+        save_to_supabase(data)
+        return jsonify({"status": "✅ Alert zapisany do Supabase"}), 200
 
-        data["received_at"] = datetime.now().isoformat()
-        with open(LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(data) + "\n")
-
-        return jsonify({"status": "✅ Alert zapisany"}), 200
-
-    # GET: domyślnie HTML lub ?format=json
-    is_json = request.args.get("format") == "json"
-
-    conn = sqlite3.connect(DB_PATH)
+    # GET
+    conn = get_conn()
     c = conn.cursor()
-    c.execute("SELECT id, payload, received_at FROM alerts ORDER BY received_at DESC LIMIT 500")
+    c.execute("SELECT id, symbol, event, value, direction, entry, stoploss, target, timestamp, received_at FROM alerts ORDER BY received_at DESC LIMIT 100")
     rows = c.fetchall()
     conn.close()
 
-    if is_json:
-        output = []
-        for row_id, payload, received_at in rows:
-            try:
-                parsed = json.loads(payload)
-                parsed["id"] = row_id
-                parsed["received_at"] = received_at
-                output.append(parsed)
-            except Exception:
-                continue
-        return jsonify(output)
+    output = []
+    for row in rows:
+        output.append({
+            "id": row[0],
+            "symbol": row[1],
+            "event": row[2],
+            "value": row[3],
+            "direction": row[4],
+            "entry": row[5],
+            "stoploss": row[6],
+            "target": row[7],
+            "timestamp": row[8].isoformat() if row[8] else None,
+            "received_at": row[9].isoformat() if row[9] else None,
+        })
 
-    html = "<h2>📬 Ostatnie alerty (SQLite)</h2><pre style='background:#f5f5f5;padding:1em;'>"
-    for _, payload, received_at in rows:
-        try:
-            obj = json.loads(payload)
-            html += f"[{received_at}] {json.dumps(obj, ensure_ascii=False)}\n"
-        except Exception:
-            html += f"[{received_at}] {payload}\n"
-    html += "</pre>"
-    return Response(html, mimetype="text/html")
+    return jsonify(output)
+
+def save_to_supabase(data):
+    try:
+        conn = get_conn()
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO alerts (symbol, event, value, direction, entry, stoploss, target, timestamp)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            data.get("symbol") or data.get("ticker"),
+            data.get("event") or data.get("type"),
+            float(data.get("value", 0)) if data.get("value") else None,
+            data.get("direction"),
+            float(data.get("entry", 0)) if data.get("entry") else None,
+            float(data.get("stoploss", 0)) if data.get("stoploss") else None,
+            float(data.get("TP", 0)) if data.get("TP") else None,
+            data.get("timestamp")
+        ))
+        conn.commit()
+        conn.close()
+        print(f"[✅] Zapisano alert: {data.get('symbol')} | {data.get('event')}")
+    except Exception as e:
+        print(f"[❌] Błąd zapisu do Supabase: {e}")
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000)
