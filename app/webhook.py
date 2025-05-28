@@ -6,7 +6,11 @@ import psycopg2
 from dotenv import load_dotenv
 
 load_dotenv()
-
+print("[DEBUG] SUPABASE_HOST:", os.getenv("SUPABASE_HOST"))
+print("[DEBUG] SUPABASE_PORT:", os.getenv("SUPABASE_PORT"))
+print("[DEBUG] SUPABASE_DB:", os.getenv("SUPABASE_DB"))
+print("[DEBUG] SUPABASE_USER:", os.getenv("SUPABASE_USER"))
+print("[DEBUG] SUPABASE_PASSWORD:", os.getenv("SUPABASE_PASSWORD"))
 app = Flask(__name__)
 
 def get_conn():
@@ -81,8 +85,4 @@ if __name__ == "__main__":
 
 
 
-print("[DEBUG] SUPABASE_HOST:", os.getenv("SUPABASE_HOST"))
-print("[DEBUG] SUPABASE_PORT:", os.getenv("SUPABASE_PORT"))
-print("[DEBUG] SUPABASE_DB:", os.getenv("SUPABASE_DB"))
-print("[DEBUG] SUPABASE_USER:", os.getenv("SUPABASE_USER"))
-print("[DEBUG] SUPABASE_PASSWORD:", os.getenv("SUPABASE_PASSWORD"))
+
