@@ -43,6 +43,5 @@ def fetch_new_alerts():
         print(f"[❌] Wyjątek podczas fetchu: {e}")
 
 if __name__ == "__main__":
-    while True:
-        fetch_new_alerts()
-        time.sleep(60)
+    fetch_new_alerts()
+
