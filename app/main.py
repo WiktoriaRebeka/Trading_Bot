@@ -21,7 +21,7 @@ def bot_loop():
 
 # ▶️ Uruchamia pobieranie alertów z webhook_sqlite.php
 def run_fetch_loop():
-    subprocess.run([sys.executable, "app/fetch_from_sqlite.py"])
+    subprocess.run([sys.executable, "app/fetch_from_supabase.py"])
 
 if __name__ == "__main__":
     threading.Thread(target=run_fetch_loop, daemon=True).start()
