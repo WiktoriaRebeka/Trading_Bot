@@ -1,88 +1,47 @@
-from flask import Flask, request, jsonify, Response
+from flask import Flask, request, jsonify
 from datetime import datetime
 import os
 import json
-import psycopg2
+import requests
 from dotenv import load_dotenv
 
 load_dotenv()
-print("[DEBUG] SUPABASE_HOST:", os.getenv("SUPABASE_HOST"))
-print("[DEBUG] SUPABASE_PORT:", os.getenv("SUPABASE_PORT"))
-print("[DEBUG] SUPABASE_DB:", os.getenv("SUPABASE_DB"))
-print("[DEBUG] SUPABASE_USER:", os.getenv("SUPABASE_USER"))
-print("[DEBUG] SUPABASE_PASSWORD:", os.getenv("SUPABASE_PASSWORD"))
+
+SUPABASE_URL = "https://cceowvpxutqxnaypnopr.supabase.co"
+SUPABASE_API_KEY = os.getenv("SUPABASE_ANON_KEY")  # dodaj to do .env
+TABLE_NAME = "alerts"
+
 app = Flask(__name__)
 
-def get_conn():
-    return psycopg2.connect(
-        host=os.getenv("SUPABASE_HOST"),
-        port=os.getenv("SUPABASE_PORT"),
-        dbname=os.getenv("SUPABASE_DB"),
-        user=os.getenv("SUPABASE_USER"),
-        password=os.getenv("SUPABASE_PASSWORD")
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    try:
+        data = request.get_json(force=True)
+    except Exception:
+        return jsonify({"error": "Invalid JSON"}), 400
+
+    # Dodaj znacznik czasu
+    data["received_at"] = datetime.utcnow().isoformat()
+
+    headers = {
+        "apikey": SUPABASE_API_KEY,
+        "Authorization": f"Bearer {SUPABASE_API_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "return=representation"
+    }
+
+    response = requests.post(
+        f"{SUPABASE_URL}/rest/v1/{TABLE_NAME}",
+        headers=headers,
+        data=json.dumps(data)
     )
 
-@app.route("/webhook", methods=["GET", "POST"])
-def webhook():
-    if request.method == "POST":
-        try:
-            data = request.get_json(force=True)
-        except Exception:
-            return jsonify({"error": "Invalid JSON"}), 400
-
-        save_to_supabase(data)
-        return jsonify({"status": "✅ Alert zapisany do Supabase"}), 200
-
-    # GET
-    conn = get_conn()
-    c = conn.cursor()
-    c.execute("SELECT id, symbol, event, value, direction, entry, stoploss, target, timestamp, received_at FROM alerts ORDER BY received_at DESC LIMIT 100")
-    rows = c.fetchall()
-    conn.close()
-
-    output = []
-    for row in rows:
-        output.append({
-            "id": row[0],
-            "symbol": row[1],
-            "event": row[2],
-            "value": row[3],
-            "direction": row[4],
-            "entry": row[5],
-            "stoploss": row[6],
-            "target": row[7],
-            "timestamp": row[8].isoformat() if row[8] else None,
-            "received_at": row[9].isoformat() if row[9] else None,
-        })
-
-    return jsonify(output)
-
-def save_to_supabase(data):
-    try:
-        conn = get_conn()
-        c = conn.cursor()
-        c.execute("""
-            INSERT INTO alerts (symbol, event, value, direction, entry, stoploss, target, timestamp)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        """, (
-            data.get("symbol") or data.get("ticker"),
-            data.get("event") or data.get("type"),
-            float(data.get("value", 0)) if data.get("value") else None,
-            data.get("direction"),
-            float(data.get("entry", 0)) if data.get("entry") else None,
-            float(data.get("stoploss", 0)) if data.get("stoploss") else None,
-            float(data.get("TP", 0)) if data.get("TP") else None,
-            data.get("timestamp")
-        ))
-        conn.commit()
-        conn.close()
-        print(f"[✅] Zapisano alert: {data.get('symbol')} | {data.get('event')}")
-    except Exception as e:
-        print(f"[❌] Błąd zapisu do Supabase: {e}")
+    if response.status_code in [200, 201]:
+        print(f"[✅] Zapisano do Supabase: {data.get('symbol')} | {data.get('event')}")
+        return jsonify({"status": "success"}), 200
+    else:
+        print(f"[❌] Błąd zapisu: {response.status_code} | {response.text}")
+        return jsonify({"error": "Supabase error"}), 500
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000)
-
-
-
-
