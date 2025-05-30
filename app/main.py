@@ -4,6 +4,11 @@ import threading
 import time
 import subprocess
 import sys
+import os
+
+# Dodaj folder główny do sys.path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 from app import bot_logic
 from app.state_manager import data_store
 
@@ -19,7 +24,7 @@ def bot_loop():
 
         time.sleep(15)
 
-# ▶️ Uruchamia pobieranie alertów z webhook_sqlite.php
+# ▶️ Uruchamia pobieranie alertów z Supabase
 def run_fetch_loop():
     subprocess.run([sys.executable, "app/fetch_from_supabase.py"])
 
