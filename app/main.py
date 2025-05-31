@@ -4,93 +4,93 @@ import time
 import sys
 import os
 
-# Dodaj folder główny do sys.path - kluczowe dla uruchamiania `python app/main.py`
-# z katalogu `trading_bot/`
-current_dir = os.path.dirname(os.path.abspath(__file__))
-parent_dir = os.path.abspath(os.path.join(current_dir, ".."))
+# Dodaj folder główny do sys.path
+current_dir = os.path.dirname(os.path.abspath(__file__)) # app/
+parent_dir = os.path.abspath(os.path.join(current_dir, "..")) # trading_bot/
 if parent_dir not in sys.path:
     sys.path.append(parent_dir)
 
 # Importy modułów z 'app' dopiero po modyfikacji sys.path
-from app import bot_logic, state_manager # state_manager też tu potrzebny
-from app.fetch_from_supabase import fetcher_loop
-from app.constants import SUPABASE_API_KEY, BOT_LOOP_INTERVAL_SECONDS
+from app import bot_logic, state_manager
+from app.fetch_from_firestore import fetcher_loop # <<< ZMIANA TUTAJ
+from app.constants import BOT_LOOP_INTERVAL_SECONDS # Usunięto SUPABASE_API_KEY
 
 def trading_bot_main_loop():
     print("[BOT_LOOP] Pętla logiki bota uruchomiona.")
-    startup_delay_passed = False # Daj fetcherowi chwilę na start i pobranie danych
+    startup_delay_passed = False
 
     while True:
         if not startup_delay_passed and not state_manager.get_all_alert_symbols():
             print("[BOT_LOOP] Czekam na pierwsze dane od fetchera...")
-            time.sleep(BOT_LOOP_INTERVAL_SECONDS) # Czekaj krócej na początku
+            time.sleep(BOT_LOOP_INTERVAL_SECONDS / 2) # Można dać mniejszy interwał na początku
             continue
         startup_delay_passed = True
         
-        # Pobierz symbole, dla których mamy alerty LUB aktywne pozycje
         alert_symbols = set(state_manager.get_all_alert_symbols())
         position_symbols = set(state_manager.get_all_position_symbols())
         symbols_to_monitor = sorted(list(alert_symbols | position_symbols))
 
         if not symbols_to_monitor:
-            # print("[BOT_LOOP] Brak symboli do monitorowania. Czekam...") # Loguj rzadziej
+            # print("[BOT_LOOP] Brak symboli do monitorowania. Czekam...")
             pass
         else:
-            print(f"[BOT_LOOP] Monitorowane symbole: {symbols_to_monitor}")
+            # print(f"[BOT_LOOP] Monitorowane symbole: {symbols_to_monitor}") # Może być zbyt gadatliwe
+            pass # Zmieniono z print na pass, aby zmniejszyć liczbę logów
 
         for symbol in symbols_to_monitor:
-            # print(f"--- Analiza symbolu: {symbol} ---") # Loguj rzadziej
-            
-            # 1. Sprawdź warunki dla nowych wejść
             bot_logic.check_new_long_entries(symbol)
             bot_logic.check_new_short_entries(symbol)
-
-            # 2. Monitoruj zaplanowane pozycje
             bot_logic.monitor_planned_positions(symbol)
-
-            # 3. Monitoruj otwarte pozycje
             bot_logic.monitor_opened_positions(symbol)
-            # print(f"--- Koniec analizy dla: {symbol} ---") # Loguj rzadziej
-
-        # Okresowe podsumowanie stanu (np. co kilka pętli)
-        # if time.monotonic() % (BOT_LOOP_INTERVAL_SECONDS * 10) < BOT_LOOP_INTERVAL_SECONDS : # Co ~10 iteracji
-        # state_manager.print_state_summary()
-
+        
         time.sleep(BOT_LOOP_INTERVAL_SECONDS)
 
 if __name__ == "__main__":
-    print("[MAIN] Uruchamianie Trading Bota...")
-    if not SUPABASE_API_KEY:
-        print("[MAIN_ERROR] Klucz SUPABASE_ANON_KEY nie został załadowany. Sprawdź plik .env i app/constants.py.")
+    print("[MAIN] Uruchamianie Trading Bota (Firestore mode)...") # <<< ZMIANA W OPISIE
+
+    # Sprawdź, czy GOOGLE_APPLICATION_CREDENTIALS jest ustawione
+    google_creds = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+    if not google_creds: # <<< ZMIANA WARUNKU
+        print("[MAIN_ERROR] Zmienna środowiskowa GOOGLE_APPLICATION_CREDENTIALS nie jest ustawiona!")
+        print("Upewnij się, że plik .env zawiera poprawną ścieżkę do pliku klucza serwisowego Firebase.")
         sys.exit(1)
     else:
-        print("[MAIN] Klucz Supabase załadowany poprawnie.")
+        print(f"[MAIN] Znaleziono zmienną GOOGLE_APPLICATION_CREDENTIALS: {google_creds}")
+        # Dodatkowa weryfikacja, czy plik faktycznie istnieje
+        cred_path_check = google_creds
+        # Jeśli ścieżka w .env nie jest absolutna, zbuduj ją względem katalogu projektu
+        if not os.path.isabs(cred_path_check):
+            # parent_dir to katalog TRADING_BOT/
+            cred_path_check = os.path.join(parent_dir, cred_path_check)
+        
+        if not os.path.exists(cred_path_check):
+            print(f"[MAIN_ERROR] Plik klucza serwisowego nie istnieje pod ścieżką: {cred_path_check}")
+            print(f"Oczekiwano na podstawie GOOGLE_APPLICATION_CREDENTIALS i katalogu projektu.")
+            sys.exit(1)
+        else:
+            print(f"[MAIN] Plik klucza serwisowego Firebase znaleziony: {cred_path_check}")
 
-    # Uruchomienie pętli pobierania alertów w osobnym wątku
-    fetcher_thread = threading.Thread(target=fetcher_loop, daemon=True)
-    fetcher_thread.setName("FetcherThread")
+
+    fetcher_thread = threading.Thread(target=fetcher_loop, name="FetcherThreadFirestore", daemon=True) # <<< ZMIANA NAZWY WĄTKU
+    # Usunięcie .setName() - użyj argumentu `name=` w konstruktorze Thread
     fetcher_thread.start()
-    print("[MAIN] Wątek fetchera uruchomiony.")
+    print("[MAIN] Wątek fetchera (Firestore) uruchomiony.")
 
-    # Uruchomienie głównej pętli logiki bota
-    bot_main_thread = threading.Thread(target=trading_bot_main_loop, daemon=True)
-    bot_main_thread.setName("BotLogicThread")
+    bot_main_thread = threading.Thread(target=trading_bot_main_loop, name="BotLogicThread", daemon=True)
+    # Usunięcie .setName()
     bot_main_thread.start()
     print("[MAIN] Wątek logiki bota uruchomiony.")
     
     try:
         while True:
-            # Główny wątek może np. sprawdzać stan innych wątków
             if not fetcher_thread.is_alive():
-                print("[MAIN_ERROR] Wątek fetchera przestał działać!")
-                # Można próbować restartować lub zakończyć program
+                print("[MAIN_ERROR] Wątek fetchera (Firestore) przestał działać!")
                 break 
             if not bot_main_thread.is_alive():
                 print("[MAIN_ERROR] Wątek logiki bota przestał działać!")
                 break
-            time.sleep(30) # Sprawdzaj co 30 sekund
+            time.sleep(30)
     except KeyboardInterrupt:
         print("[MAIN] Zatrzymywanie bota przez użytkownika (Ctrl+C)...")
     finally:
         print("[MAIN] Bot zakończył działanie.")
-        # Tutaj można dodać logikę czyszczenia, jeśli potrzebna

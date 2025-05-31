@@ -7,3 +7,5 @@ node_modules/
 # System
 .DS_Store
 .env
+.firebase_key.json
+

@@ -1,7 +1,7 @@
 # trading_bot/app/positions_logger.py
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Literal
 from app.constants import POSITIONS_LOG_FILE # Użyj stałej
 
@@ -9,7 +9,7 @@ PositionStatus = Literal["planned", "opened", "closed", "cancelled"]
 
 def get_timestamp() -> str:
     # Użyj UTC dla spójności
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S %Z")
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S") + " UTC"
 
 def log_new_position(symbol: str, direction: str, entry: float, stoploss: float, target: float, position_id: str):
     position = {
