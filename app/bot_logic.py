@@ -11,8 +11,20 @@ from app.constants import (
     MAX_ALERT_AGE_SECONDS
 )
 
-def get_current_price(symbol: str) -> Optional[float]:
-    params = {"category": BYBIT_DEFAULT_CATEGORY, "symbol": symbol}
+
+def get_bybit_compatible_symbol(tv_symbol: str) -> str:
+    """Konwertuje symbol z TradingView na format akceptowany przez Bybit API V5."""
+    if tv_symbol.endswith(".P"):
+        return tv_symbol[:-2] # Usuń ostatnie dwa znaki (".P")
+    # Możesz dodać tu inne reguły, jeśli masz inne formaty symboli z TV
+    return tv_symbol
+
+def get_current_price(raw_symbol: str) -> Optional[float]: # Zmieniłem nazwę parametru na raw_symbol dla jasności
+    # lub jeśli wolisz zostawić `symbol` jako parametr:
+    # def get_current_price(symbol: str) -> Optional[float]:
+    
+    cleaned_symbol = get_bybit_compatible_symbol(raw_symbol) # Lub get_bybit_compatible_symbol(symbol) jeśli parametr to symbol
+    params = {"category": BYBIT_DEFAULT_CATEGORY, "symbol": cleaned_symbol} # Użyj oczyszczonego symbolu tutaj
     try:
         response = requests.get(BYBIT_API_URL_V5_TICKERS, params=params, timeout=5)
         response.raise_for_status()
@@ -23,17 +35,19 @@ def get_current_price(symbol: str) -> Optional[float]:
                 return float(tickers_list[0]['lastPrice'])
         else:
             ret_msg = data.get('retMsg', 'Brak wiadomości zwrotnej')
-            print(f"[PRICE_ERROR] get_current_price({symbol}): Niepoprawna odpowiedź API Bybit - {ret_msg}")
+            # W logach użyj oczyszczonego symbolu, bo to on był wysłany do Bybit
+            print(f"[PRICE_ERROR] get_current_price({cleaned_symbol}): Niepoprawna odpowiedź API Bybit - {ret_msg}")
     except requests.exceptions.HTTPError as http_err:
-        print(f"[PRICE_ERROR] HTTP dla {symbol}: {http_err.response.status_code} - {http_err.response.text if http_err.response else 'Brak response'}")
+        # W logach użyj oczyszczonego symbolu
+        print(f"[PRICE_ERROR] HTTP dla {cleaned_symbol}: {http_err.response.status_code} - {http_err.response.text if http_err.response else 'Brak response'}")
+    # ... i tak dalej dla pozostałych printów w tej funkcji, używaj cleaned_symbol
     except requests.exceptions.RequestException as req_err:
-        print(f"[PRICE_ERROR] Sieciowy dla {symbol}: {req_err}")
+        print(f"[PRICE_ERROR] Sieciowy dla {cleaned_symbol}: {req_err}")
     except (KeyError, IndexError, ValueError) as e:
-        print(f"[PRICE_ERROR] Parsowania dla {symbol}: Błąd przetwarzania odpowiedzi API - {e}")
+        print(f"[PRICE_ERROR] Parsowania dla {cleaned_symbol}: Błąd przetwarzania odpowiedzi API - {e}")
     except Exception as e:
-        print(f"[PRICE_ERROR] Ogólny dla {symbol}: {e}")
+        print(f"[PRICE_ERROR] Ogólny dla {cleaned_symbol}: {e}")
     return None
-
 def is_alert_recent(alert: dict, max_age_sec: int = MAX_ALERT_AGE_SECONDS) -> bool:
     ts_str = alert.get("timestamp") or alert.get("received_at")
     if not ts_str:

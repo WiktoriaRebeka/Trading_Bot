@@ -6,123 +6,134 @@
 Develop a 24/7 trading bot that:
 - Receives alerts from TradingView (Market Structure & Liquidity Heatmap),
 - Analyzes price levels from those indicators,
-- Automatically opens/closes positions via Bybit API (entry, stop-loss, take-profit).
+- Automatically opens/closes positions via Bybit API (entry, stop-loss, take-profit) - *future functionality*.
 
 🌐 **Architecture**:
-- **Backend**: Python (Flask, pybit, dotenv, requests, PostgreSQL via Supabase)
-- **Frontend**: HTML / TailwindCSS / jsPDF
-- **Webhook**: `https://your-render-url.onrender.com/webhook`
-- **Exchange API**: Bybit REST API (via pybit)
+- **Backend**: Python (Flask, firebase-admin, python-dotenv, requests)
+- **Webhook**: Flask application deployed on Render.com (`https://trading-bot-webhook-pdh3.onrender.com/webhook` - *aktualny URL*)
+- **Exchange API for Price Tickers**: Bybit REST API V5 (public endpoint)
 - **Alert Source**: TradingView JSON webhook alerts
-- **Database**: PostgreSQL (Supabase)
+- **Database for Alerts**: Cloud Firestore (Firebase)
 
 📅 **Input**:
-1. **TradingView Alerts** in JSON format from two indicators:
-   - Market Structure (`OrderBlock`, `entry`, `stoploss`, `direction`)
-   - Liquidity Heatmap (`TOP_GREEN_CHANGE`, `BOTTOM_RED_CHANGE`)
-2. Alert data includes:
-   - `symbol` (e.g. BTCUSDT),
-   - `timestamp` (ISO 8601),
-   - price levels: `entry`, `sl`, `TP`, `levelHigh`, `levelLow`
+1.  **TradingView Alerts** in JSON format from two indicators:
+    *   Market Structure (generates `OrderBlock` type alerts)
+    *   Liquidity Heatmap (generates `TOP_GREEN_CHANGE` or `BOTTOM_RED_CHANGE` event alerts)
+2.  Alert data typically includes:
+    *   `symbol` (e.g., BTCUSDT, SUIUSDT.P) or `ticker`
+    *   `timestamp` (ISO 8601 UTC - original alert time from TradingView)
+    *   `type` or `event` (e.g., "OrderBlock", "TOP_GREEN_CHANGE")
+    *   Price levels for OrderBlocks: `entry`, `sl`, `tp`, `levelHigh`, `levelLow`, `direction`
+    *   Price level for LiquidityHeatmap: `value`
 
-⚙️ **Bot Logic**:
-1. TradingView sends JSON alert to a **Flask webhook** hosted on Render.
-2. The webhook logs the alert directly to **Supabase PostgreSQL**.
-3. The `fetch_from_sqlite.py` script (or Supabase client) fetches new alerts regularly.
-4. Each alert is processed via `process_alert()` and stored in RAM (`state_manager.py`).
-5. The bot compares:
-   - If OrderBlock `entry` aligns with topGreen / bottomRed zones:
-     - **LONG**: if `TOP_GREEN` is within OrderBlock range
-     - **SHORT**: if `BOTTOM_RED` is within OrderBlock range
-6. The bot places Limit Order + Stop Loss + Take Profit with calculated leverage.
-7. It monitors live price action for active positions.
-8. It cancels planned entries if price conditions are no longer valid.
-9. Logs all operations to the terminal and `positions_log.jsonl`.
+⚙️ **Bot Logic & Data Flow**:
+1.  TradingView sends a JSON alert via `POST` request to a **Flask webhook** hosted on Render.com.
+2.  The webhook (`app/webhook.py`):
+    *   Authenticates with Firebase using Admin SDK and a service account key (managed as a Secret File on Render).
+    *   Adds a `received_at` server timestamp (Firestore Timestamp type).
+    *   Converts the `timestamp` from TradingView (if present and valid ISO string) to Firestore Timestamp type.
+    *   Saves the alert as a new document in the **`alerts` collection in Cloud Firestore**.
+3.  A locally running Python bot (`app/main.py`):
+    *   A dedicated thread (`app/fetch_from_firestore.py`) regularly queries Cloud Firestore for new alerts (since the last processed `received_at` timestamp). It authenticates using Firebase Admin SDK and a local service account key.
+    *   Each new alert is processed by `app/state_manager.py` and its relevant details are stored in RAM (in-memory deques) per symbol.
+    *   The main bot loop (`app/bot_logic.py` via `app/main.py`):
+        *   Compares the latest OrderBlock alert with the latest relevant LiquidityHeatmap alert for each symbol.
+        *   **LONG Entry Condition**: Fresh `OrderBlock` (LONG) + fresh `LiquidityHeatmap` (TOP\_GREEN\_CHANGE) where heatmap `value` is between OrderBlock's `sl` and `entry`.
+        *   **SHORT Entry Condition**: Fresh `OrderBlock` (SHORT) + fresh `LiquidityHeatmap` (BOTTOM\_RED\_CHANGE) where heatmap `value` is between OrderBlock's `entry` and `sl`.
+        *   If conditions are met, a position is "planned".
+        *   *(Future: Bot will place Limit Order + SL/TP on Bybit via API).*
+        *   Monitors live price action (via Bybit public API) for planned positions to decide on opening, and for open positions to decide on closing (SL/TP hit).
+        *   Cancels planned entries if market conditions invalidate the setup.
+4.  All significant operations and position status changes (`planned`, `opened`, `cancelled`, `closed`) are logged to the terminal and to a local file `positions_log.jsonl` (`app/positions_logger.py`).
 
 📟 **Additionally**:
-- Bot runs 24/7 (deployed on Render, optionally on VPS or GCP)
+- The local bot is intended to run 24/7 on a local machine (Windows).
 
-📦 **Libraries**:
-Python:  
-- `flask`  
-- `requests`  
-- `python-dotenv`  
-- `psycopg2-binary`  
-- `pybit`  
-- `reportlab`
+📦 **Key Python Libraries**:
+- `Flask`: For the webhook server.
+- `firebase-admin`: For interacting with Cloud Firestore.
+- `requests`: For making HTTP requests (e.g., to Bybit API).
+- `python-dotenv`: For managing environment variables.
+- `gunicorn`: Used by Render.com to serve the Flask application.
 
-Node:  
-- `axios`  
-- `tailwindcss`  
-- `jspdf`
+*(Frontend (HTML/Tailwind/jsPDF) and Node-related libraries mentioned in the old README are not currently part of the core bot/webhook backend described).*
 
-📁 **Repository**:  
+📁 **Repository**:
 GitHub: [`https://github.com/WiktoriaRebeka/Trading_Bot`](https://github.com/WiktoriaRebeka/Trading_Bot)
 
-🛠 **Project Status**:
-✅ Project started  
-✅ Repo is active  
-✅ Supabase + Flask webhook working  
-✅ Alert processing logic working  
-✅ Realtime entry check integrated
+🛠 **Project Status (as of Firestore Migration & Webhook Test)**:
+✅ Project started, initial version with Supabase developed.
+✅ Migrated alert storage backend from Supabase to Cloud Firestore.
+✅ Flask webhook (`app/webhook.py`) successfully deployed on Render.com.
+    ✅ Webhook receives test POST requests.
+    ✅ Webhook authenticates with Firebase Admin SDK using a service account key.
+    ✅ Webhook successfully writes alert data to Cloud Firestore, including `received_at` and converted `timestamp` fields.
+✅ Local bot (`app/main.py` & `app/fetch_from_firestore.py`):
+    ✅ Successfully initializes Firebase Admin SDK using a local service account key.
+    ✅ Successfully fetches new alerts from Cloud Firestore.
+✅ Core alert processing logic (`app/state_manager.py`, `app/bot_logic.py`) in place.
+✅ Position logging to `positions_log.jsonl` implemented.
+⏳ **Current Focus:** Testing end-to-end flow with live TradingView alerts, verifying bot's decision-making logic, and debugging price fetching from Bybit API (symbol format issues).
 
 ---
 
 ### 🛰️ `app/webhook.py`
-- Flask server (Render deployment)
-- Handles `POST` (TradingView JSON alert) → saves directly to Supabase
-- Handles `GET` → returns last 100 alerts in JSON format
+- Flask server deployed on Render.com.
+- Handles `POST` requests from TradingView (JSON alert) → authenticates with Firebase, adds `received_at` timestamp, converts `timestamp` field, and saves the alert to Cloud Firestore's `alerts` collection.
+- Responds with `HTTP 405 Method Not Allowed` for `GET` requests to `/webhook` (as expected).
 
-### 🔁 `state_manager.py`
-- RAM buffers per `symbol`
-  - Heatmap: 5 latest (`TOP_GREEN_CHANGE`, `BOTTOM_RED_CHANGE`)
-  - OrderBlock: 2 latest entries
-- Handles:
-  - `update_alert(alert)` → updates buffers
-  - `get_last_heatmap(symbol, type)`  
-  - `get_last_orderblocks(symbol)`  
-  - `print_debug()`  
+### 🔁 `app/state_manager.py`
+- Manages in-memory (RAM) buffers for recent alerts, per `symbol`:
+  - LiquidityHeatmap: Stores the latest N alerts (e.g., 5) for `TOP_GREEN_CHANGE` and `BOTTOM_RED_CHANGE` events.
+  - OrderBlock: Stores the latest M alerts (e.g., 2).
+- Provides functions to retrieve the latest alerts for `bot_logic.py`.
+- Manages in-memory state for `planned` and `opened` positions.
 
-### 🔄 `fetch_from_sqlite.py` *(legacy fallback)*
-- Previously fetched alerts from local Flask SQLite endpoint
-- Can be modified to fetch from Supabase via REST or Python client
+### 🔄 `app/fetch_from_firestore.py`
+- Runs in a separate thread in the local bot.
+- Periodically queries the `alerts` collection in Cloud Firestore for new documents based on the `received_at` field (since the last processed timestamp).
+- Authenticates using Firebase Admin SDK and a local service account key.
+- Passes new alerts to `state_manager.process_alert()`.
 
-### 💡 `bot_logic.py`
-- Core decision logic:
-  - Matches Market Structure with Liquidity Levels
-  - Verifies `entry`, `stoploss`, `target`
-  - Uses real-time Bybit price via REST API
-  - Validates if alert is "recent" (max 120s old)
-  - Logs planned positions
+### 💡 `app/bot_logic.py`
+- Contains the core decision-making logic.
+- `get_current_price(raw_tv_symbol)`: Fetches current market price from Bybit API V5, includes logic (`get_bybit_compatible_symbol`) to convert TradingView symbol format (e.g., `SUIUSDT.P`) to Bybit API compatible format (e.g., `SUIUSDT`).
+- `is_alert_recent()`: Checks if an alert is within a defined freshness window (e.g., 120 seconds).
+- `_check_and_plan_position()`: Evaluates conditions for LONG/SHORT entries based on OrderBlock and LiquidityHeatmap data from `state_manager`.
+- `monitor_planned_positions()`: Checks if planned positions can be opened or should be cancelled.
+- `monitor_opened_positions()`: Checks if open positions hit SL/TP.
 
-### 📃 `positions_logger.py`
-- Logs each position to `positions_log.jsonl`
-- Tracks statuses: `planned`, `opened`, `cancelled`, `closed`
-- Adds timestamps and optional `result` field
+### 📃 `app/positions_logger.py`
+- Logs details of each position (ID, symbol, direction, entry, SL, TP, etc.) and its status changes (`planned`, `opened`, `cancelled`, `closed`) to a local JSONL file (`positions_log.jsonl`).
+- Includes timestamps for each status change.
 
-### 📊 `main.py`
-- Starts alert fetcher (via threading)
-- Every 15 seconds:
-  - Loops through active `symbols`
-  - Evaluates logic for long/short entry
-  - Logs and prints results
+### 📊 `app/main.py`
+- Main entry point for the local bot.
+- Initializes and starts the `fetch_from_firestore` thread.
+- Runs the main bot loop, which periodically (e.g., every 15 seconds):
+  - Iterates through symbols активных in `state_manager`.
+  - Calls functions from `bot_logic.py` to check for new entries and monitor existing positions.
+- Handles `KeyboardInterrupt` for graceful shutdown.
 
 ---
 
-📝 **Deploy URL**:  
-TradingView Webhook: `https://trading-bot-webhook-xxxx.onrender.com/webhook`
+📝 **Deploy URL**:
+TradingView Webhook: `https://trading-bot-webhook-pdh3.onrender.com/webhook` *(Actual and tested URL)*
 
-📤 **To send alerts**:
-1. In TradingView → Create Alert
-2. Paste your webhook URL
-3. Use **JSON body** like:
+📤 **To send alerts (Example TradingView JSON body for OrderBlock)**:
+1.  In TradingView → Create Alert.
+2.  Webhook URL: `https://trading-bot-webhook-pdh3.onrender.com/webhook`
+3.  Message (JSON body):
 ```json
 {
-  "symbol": "BTCUSDT",
+  "source": "MarketStructure",
   "type": "OrderBlock",
-  "entry": 12345.67,
-  "stoploss": 12200.00,
-  "TP": 12700.00,
+  "symbol": "BTCUSDT.P", 
   "direction": "LONG",
-  "timestamp": "2025-05-28T19:42:00Z"
+  "entry": {{plot("EntryPrice")}},
+  "sl": {{plot("StopLoss")}},
+  "tp": {{plot("TakeProfit")}},
+  "levelHigh": {{plot("LevelHigh")}},
+  "levelLow": {{plot("LevelLow")}},
+  "timestamp": "{{time}}"
 }
