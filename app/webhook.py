@@ -139,5 +139,4 @@ if __name__ == "__main__":
 
 
 
-    #Test dla Render
-    
+    #Test dla Render, 2.0
