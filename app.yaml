@@ -1,0 +1,6 @@
+runtime: python310  # Sprawdź, czy używasz Pythona 3.10. Jeśli np. 3.11, zmień na python311.
+instance_class: F1
+entrypoint: python -m app.main
+
+manual_scaling:
+  instances: 1

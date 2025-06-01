@@ -12,8 +12,8 @@ if parent_dir not in sys.path:
 
 # Importy modułów z 'app' dopiero po modyfikacji sys.path
 from app import bot_logic, state_manager
-from app.fetch_from_firestore import fetcher_loop # <<< ZMIANA TUTAJ
-from app.constants import BOT_LOOP_INTERVAL_SECONDS # Usunięto SUPABASE_API_KEY
+from app.fetch_from_firestore import fetcher_loop, db as firestore_db_client # Importuj db, aby sprawdzić inicjalizację
+from app.constants import BOT_LOOP_INTERVAL_SECONDS
 
 def trading_bot_main_loop():
     print("[BOT_LOOP] Pętla logiki bota uruchomiona.")
@@ -21,8 +21,12 @@ def trading_bot_main_loop():
 
     while True:
         if not startup_delay_passed and not state_manager.get_all_alert_symbols():
-            print("[BOT_LOOP] Czekam na pierwsze dane od fetchera...")
-            time.sleep(BOT_LOOP_INTERVAL_SECONDS / 2) # Można dać mniejszy interwał na początku
+            # Czekaj, aż fetcher coś pobierze LUB jeśli db nie jest dostępne, to też czekaj
+            if not firestore_db_client:
+                 print("[BOT_LOOP] Klient Firestore nie jest jeszcze dostępny. Czekam...")
+            else:
+                print("[BOT_LOOP] Czekam na pierwsze dane od fetchera...")
+            time.sleep(BOT_LOOP_INTERVAL_SECONDS / 2)
             continue
         startup_delay_passed = True
         
@@ -30,12 +34,11 @@ def trading_bot_main_loop():
         position_symbols = set(state_manager.get_all_position_symbols())
         symbols_to_monitor = sorted(list(alert_symbols | position_symbols))
 
-        if not symbols_to_monitor:
-            # print("[BOT_LOOP] Brak symboli do monitorowania. Czekam...")
-            pass
-        else:
-            # print(f"[BOT_LOOP] Monitorowane symbole: {symbols_to_monitor}") # Może być zbyt gadatliwe
-            pass # Zmieniono z print na pass, aby zmniejszyć liczbę logów
+        # Usunięto gadatliwe logi
+        # if not symbols_to_monitor:
+        #     pass
+        # else:
+        #     pass
 
         for symbol in symbols_to_monitor:
             bot_logic.check_new_long_entries(symbol)
@@ -46,38 +49,29 @@ def trading_bot_main_loop():
         time.sleep(BOT_LOOP_INTERVAL_SECONDS)
 
 if __name__ == "__main__":
-    print("[MAIN] Uruchamianie Trading Bota (Firestore mode)...") # <<< ZMIANA W OPISIE
+    print("[MAIN] Uruchamianie Trading Bota (Firestore mode)...")
 
-    # Sprawdź, czy GOOGLE_APPLICATION_CREDENTIALS jest ustawione
-    google_creds = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-    if not google_creds: # <<< ZMIANA WARUNKU
-        print("[MAIN_ERROR] Zmienna środowiskowa GOOGLE_APPLICATION_CREDENTIALS nie jest ustawiona!")
-        print("Upewnij się, że plik .env zawiera poprawną ścieżkę do pliku klucza serwisowego Firebase.")
+    # --- SEKCJA SPRAWDZANIA GOOGLE_APPLICATION_CREDENTIALS JEST TERAZ OBSŁUGIWANA W fetch_from_firestore.py ---
+    # --- Można ją całkowicie usunąć lub zostawić zakomentowaną dla celów historycznych ---
+    # print("[MAIN] Inicjalizacja Firebase jest teraz obsługiwana w module fetch_from_firestore.")
+    # print("[MAIN] W środowisku App Engine używane są domyślne credentials.")
+    # print("[MAIN] Lokalnie, fetch_from_firestore spróbuje użyć GOOGLE_APPLICATION_CREDENTIALS z .env.")
+
+    # Sprawdzenie, czy klient DB został zainicjowany w fetch_from_firestore
+    # To ważne, bo bez tego bot nie ma sensu
+    if not firestore_db_client:
+        print("[MAIN_CRITICAL_ERROR] Klient Firestore (db) nie został zainicjowany w module fetch_from_firestore.")
+        print("[MAIN_CRITICAL_ERROR] Bot nie może kontynuować. Sprawdź logi z inicjalizacji Firebase.")
         sys.exit(1)
     else:
-        print(f"[MAIN] Znaleziono zmienną GOOGLE_APPLICATION_CREDENTIALS: {google_creds}")
-        # Dodatkowa weryfikacja, czy plik faktycznie istnieje
-        cred_path_check = google_creds
-        # Jeśli ścieżka w .env nie jest absolutna, zbuduj ją względem katalogu projektu
-        if not os.path.isabs(cred_path_check):
-            # parent_dir to katalog TRADING_BOT/
-            cred_path_check = os.path.join(parent_dir, cred_path_check)
-        
-        if not os.path.exists(cred_path_check):
-            print(f"[MAIN_ERROR] Plik klucza serwisowego nie istnieje pod ścieżką: {cred_path_check}")
-            print(f"Oczekiwano na podstawie GOOGLE_APPLICATION_CREDENTIALS i katalogu projektu.")
-            sys.exit(1)
-        else:
-            print(f"[MAIN] Plik klucza serwisowego Firebase znaleziony: {cred_path_check}")
+        print("[MAIN] Klient Firestore wydaje się być poprawnie zainicjowany.")
 
 
-    fetcher_thread = threading.Thread(target=fetcher_loop, name="FetcherThreadFirestore", daemon=True) # <<< ZMIANA NAZWY WĄTKU
-    # Usunięcie .setName() - użyj argumentu `name=` w konstruktorze Thread
+    fetcher_thread = threading.Thread(target=fetcher_loop, name="FetcherThreadFirestore", daemon=True)
     fetcher_thread.start()
     print("[MAIN] Wątek fetchera (Firestore) uruchomiony.")
 
     bot_main_thread = threading.Thread(target=trading_bot_main_loop, name="BotLogicThread", daemon=True)
-    # Usunięcie .setName()
     bot_main_thread.start()
     print("[MAIN] Wątek logiki bota uruchomiony.")
     

@@ -1,69 +1,105 @@
 # trading_bot/app/positions_logger.py
-import json
-import os
+import json # Może być przydatny do fallback logów lub debugowania
+import os # Potrzebny do os.getenv()
 from datetime import datetime, timezone
 from typing import Optional, Literal
-from app.constants import POSITIONS_LOG_FILE # Użyj stałej
+
+# Importuj klienta 'db' zainicjowanego w app.fetch_from_firestore
+try:
+    from app.fetch_from_firestore import db as firestore_db_client
+    # Zaimportuj również sam moduł firestore, aby mieć dostęp do firestore.SERVER_TIMESTAMP
+    from firebase_admin import firestore as firebase_firestore_module
+except ImportError:
+    print("[POS_LOGGER_CRITICAL] Nie można zaimportować klienta Firestore 'db' lub modułu 'firebase_admin.firestore'. Logowanie pozycji do Firestore nie będzie działać.")
+    firestore_db_client = None
+    firebase_firestore_module = None
+
+# Nazwa kolekcji w Firestore dla logów pozycji
+# Możesz ją przenieść do app/constants.py jeśli chcesz
+POSITIONS_COLLECTION_FIRESTORE = "trading_positions"
 
 PositionStatus = Literal["planned", "opened", "closed", "cancelled"]
 
-def get_timestamp() -> str:
-    # Użyj UTC dla spójności
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S") + " UTC"
+def get_firestore_server_timestamp_or_fallback():
+    """Zwraca firestore.SERVER_TIMESTAMP jeśli dostępne, w przeciwnym razie czas klienta UTC."""
+    if firestore_db_client and firebase_firestore_module:
+        return firebase_firestore_module.SERVER_TIMESTAMP
+    else:
+        print("[POS_LOGGER_WARN] firestore.SERVER_TIMESTAMP niedostępny, używam datetime.now(timezone.utc).")
+        return datetime.now(timezone.utc)
 
 def log_new_position(symbol: str, direction: str, entry: float, stoploss: float, target: float, position_id: str):
-    position = {
-        "position_id": position_id, # Dodaj ID dla łatwiejszego śledzenia
+    if not firestore_db_client:
+        print(f"[LOGGER_ERROR] Klient Firestore niedostępny. Nie można zalogować nowej pozycji {position_id} do Firestore.")
+        # Fallback log do konsoli, jeśli Firestore jest niedostępny
+        fallback_log_data = {
+            "type": "NEW_PLANNED_FALLBACK", "position_id": position_id, "symbol": symbol,
+            "direction": direction, "entry": entry, "sl": stoploss, "tp": target,
+            "timestamp_utc": datetime.now(timezone.utc).isoformat()
+        }
+        print(f"[FALLBACK_CONSOLE_LOG] {json.dumps(fallback_log_data)}")
+        return
+
+    position_doc = {
+        # position_id będzie ID dokumentu Firestore
         "symbol": symbol,
         "direction": direction,
-        "entry_price": entry, # Zmiana nazwy dla spójności
-        "stop_loss": stoploss, # Zmiana nazwy dla spójności
-        "take_profit": target, # Zmiana nazwy dla spójności
+        "entry_price": entry,
+        "stop_loss": stoploss,
+        "take_profit": target,
         "status": "planned",
-        "planned_at": get_timestamp(),
+        "planned_at": get_firestore_server_timestamp_or_fallback(),
         "opened_at": None,
         "closed_at": None,
         "cancelled_at": None,
-        "result_reason": None # Zmiana nazwy
+        "result_reason": None,
+        # Opcjonalnie: identyfikator instancji App Engine, która utworzyła/zaktualizowała pozycję
+        "gae_instance_id": os.getenv("GAE_INSTANCE", "local_or_unknown")
     }
     try:
-        with open(POSITIONS_LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(position) + "\n")
+        firestore_db_client.collection(POSITIONS_COLLECTION_FIRESTORE).document(position_id).set(position_doc)
+        print(f"[LOGGER_FIRESTORE] Zalogowano nową pozycję {position_id} do Firestore.")
     except Exception as e:
-        print(f"[LOGGER_ERROR] Błąd zapisu nowej pozycji: {e}")
+        print(f"[LOGGER_ERROR_FIRESTORE] Błąd zapisu nowej pozycji {position_id} do Firestore: {e}")
+        fallback_log_data = {
+            "type": "ERROR_LOGGING_NEW_FIRESTORE", "position_id": position_id, "data": position_doc,
+            "error": str(e), "timestamp_utc": datetime.now(timezone.utc).isoformat()
+        }
+        print(f"[FALLBACK_CONSOLE_LOG] {json.dumps(fallback_log_data, default=str)}") # default=str dla SERVER_TIMESTAMP
 
 def update_position_status(position_id: str, status: PositionStatus, result_reason: Optional[str] = None):
-    if not os.path.exists(POSITIONS_LOG_FILE):
-        print(f"[LOGGER_WARN] Plik logu {POSITIONS_LOG_FILE} nie istnieje. Nie można zaktualizować statusu.")
+    if not firestore_db_client:
+        print(f"[LOGGER_ERROR] Klient Firestore niedostępny. Nie można zaktualizować statusu pozycji {position_id} w Firestore.")
+        fallback_log_data = {
+            "type": "UPDATE_STATUS_FALLBACK", "position_id": position_id, "new_status": status,
+            "reason": result_reason, "timestamp_utc": datetime.now(timezone.utc).isoformat()
+        }
+        print(f"[FALLBACK_CONSOLE_LOG] {json.dumps(fallback_log_data)}")
         return
 
-    updated_lines = []
-    found_and_updated = False
+    doc_ref = firestore_db_client.collection(POSITIONS_COLLECTION_FIRESTORE).document(position_id)
+    update_data = {
+        "status": status,
+        "gae_instance_id": os.getenv("GAE_INSTANCE", "local_or_unknown") # Aktualizuj też ID instancji
+    }
+    timestamp_field = status + "_at" # np. "opened_at", "closed_at"
+    update_data[timestamp_field] = get_firestore_server_timestamp_or_fallback()
+    
+    if result_reason:
+        update_data["result_reason"] = result_reason
+    
     try:
-        with open(POSITIONS_LOG_FILE, "r", encoding="utf-8") as f:
-            for line in f:
-                try:
-                    pos = json.loads(line)
-                    if pos.get("position_id") == position_id and pos.get("status") in ["planned", "opened"]:
-                        pos["status"] = status
-                        timestamp_field = status + "_at" # np. "opened_at", "closed_at"
-                        pos[timestamp_field] = get_timestamp()
-                        if result_reason:
-                            pos["result_reason"] = result_reason
-                        updated_lines.append(json.dumps(pos))
-                        found_and_updated = True
-                    else:
-                        updated_lines.append(line.strip()) # Zapisz oryginalną linię bez zmian
-                except json.JSONDecodeError:
-                    updated_lines.append(line.strip()) # Zachowaj uszkodzoną linię
-        
-        if found_and_updated:
-            with open(POSITIONS_LOG_FILE, "w", encoding="utf-8") as f:
-                for updated_line in updated_lines:
-                    f.write(updated_line + "\n")
-            print(f"[LOGGER] Zaktualizowano status pozycji {position_id} na {status}.")
-        else:
-            print(f"[LOGGER_WARN] Nie znaleziono pozycji {position_id} do aktualizacji lub miała już status finalny.")
-
-    except Exception as e:
-        print(f"[LOGGER_ERROR] Błąd aktualizacji statusu pozycji: {e}")
+        # Sprawdź, czy dokument istnieje, zanim go zaktualizujesz, aby uniknąć niepotrzebnych błędów
+        # lub po prostu wykonaj update, a Firestore zgłosi błąd, jeśli nie istnieje
+        # Dla uproszczenia, wykonujemy update. Jeśli chcesz, możesz dodać doc_ref.get().exists()
+        doc_ref.update(update_data) # Rzuci błąd, jeśli dokument nie istnieje
+        print(f"[LOGGER_FIRESTORE] Zaktualizowano status pozycji {position_id} na {status} w Firestore.")
+    except Exception as e: # Można bardziej szczegółowo łapać błędy Firestore, np. exceptions.NotFound
+        print(f"[LOGGER_ERROR_FIRESTORE] Błąd aktualizacji statusu pozycji {position_id} na {status} w Firestore: {e}")
+        # Jeśli dokument nie został znaleziony, może to być normalne w niektórych scenariuszach,
+        # ale tutaj logujemy jako błąd.
+        fallback_log_data = {
+            "type": "ERROR_UPDATING_STATUS_FIRESTORE", "position_id": position_id, "update_data": update_data,
+            "error": str(e), "timestamp_utc": datetime.now(timezone.utc).isoformat()
+        }
+        print(f"[FALLBACK_CONSOLE_LOG] {json.dumps(fallback_log_data, default=str)}")
