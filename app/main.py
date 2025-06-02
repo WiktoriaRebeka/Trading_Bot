@@ -1,90 +1,67 @@
-# trading_bot/app/main.py
-import threading
+# TRADING_BOT/app/main.py (TYMCZASOWY PLIK DO TESTU URUCHOMIENIA)
 import time
-import sys
 import os
+import sys
+import traceback # Dodaj ten import
 
-# Dodaj folder główny do sys.path
-current_dir = os.path.dirname(os.path.abspath(__file__)) # app/
-parent_dir = os.path.abspath(os.path.join(current_dir, "..")) # trading_bot/
-if parent_dir not in sys.path:
-    sys.path.append(parent_dir)
+print(f"[MAIN_SIMPLIFIED_TEST] Uruchamianie uproszczonego main.py w App Engine. Wersja testowa: 1.0") # Dodaj wersję testową dla łatwiejszej identyfikacji
+print(f"[MAIN_SIMPLIFIED_TEST] GAE_INSTANCE: {os.getenv('GAE_INSTANCE')}")
+print(f"[MAIN_SIMPLIFIED_TEST] GAE_ENV: {os.getenv('GAE_ENV')}")
+print(f"[MAIN_SIMPLIFIED_TEST] Python version: {sys.version}")
+print(f"[MAIN_SIMPLIFIED_TEST] Bieżący katalog: {os.getcwd()}")
 
-# Importy modułów z 'app' dopiero po modyfikacji sys.path
-from app import bot_logic, state_manager
-from app.fetch_from_firestore import fetcher_loop, db as firestore_db_client # Importuj db, aby sprawdzić inicjalizację
-from app.constants import BOT_LOOP_INTERVAL_SECONDS
-
-def trading_bot_main_loop():
-    print("[BOT_LOOP] Pętla logiki bota uruchomiona.")
-    startup_delay_passed = False
-
-    while True:
-        if not startup_delay_passed and not state_manager.get_all_alert_symbols():
-            # Czekaj, aż fetcher coś pobierze LUB jeśli db nie jest dostępne, to też czekaj
-            if not firestore_db_client:
-                 print("[BOT_LOOP] Klient Firestore nie jest jeszcze dostępny. Czekam...")
-            else:
-                print("[BOT_LOOP] Czekam na pierwsze dane od fetchera...")
-            time.sleep(BOT_LOOP_INTERVAL_SECONDS / 2)
-            continue
-        startup_delay_passed = True
-        
-        alert_symbols = set(state_manager.get_all_alert_symbols())
-        position_symbols = set(state_manager.get_all_position_symbols())
-        symbols_to_monitor = sorted(list(alert_symbols | position_symbols))
-
-        # Usunięto gadatliwe logi
-        # if not symbols_to_monitor:
-        #     pass
-        # else:
-        #     pass
-
-        for symbol in symbols_to_monitor:
-            bot_logic.check_new_long_entries(symbol)
-            bot_logic.check_new_short_entries(symbol)
-            bot_logic.monitor_planned_positions(symbol)
-            bot_logic.monitor_opened_positions(symbol)
-        
-        time.sleep(BOT_LOOP_INTERVAL_SECONDS)
-
-if __name__ == "__main__":
-    print("[MAIN] Uruchamianie Trading Bota (Firestore mode)...")
-
-    # --- SEKCJA SPRAWDZANIA GOOGLE_APPLICATION_CREDENTIALS JEST TERAZ OBSŁUGIWANA W fetch_from_firestore.py ---
-    # --- Można ją całkowicie usunąć lub zostawić zakomentowaną dla celów historycznych ---
-    # print("[MAIN] Inicjalizacja Firebase jest teraz obsługiwana w module fetch_from_firestore.")
-    # print("[MAIN] W środowisku App Engine używane są domyślne credentials.")
-    # print("[MAIN] Lokalnie, fetch_from_firestore spróbuje użyć GOOGLE_APPLICATION_CREDENTIALS z .env.")
-
-    # Sprawdzenie, czy klient DB został zainicjowany w fetch_from_firestore
-    # To ważne, bo bez tego bot nie ma sensu
-    if not firestore_db_client:
-        print("[MAIN_CRITICAL_ERROR] Klient Firestore (db) nie został zainicjowany w module fetch_from_firestore.")
-        print("[MAIN_CRITICAL_ERROR] Bot nie może kontynuować. Sprawdź logi z inicjalizacji Firebase.")
-        sys.exit(1)
-    else:
-        print("[MAIN] Klient Firestore wydaje się być poprawnie zainicjowany.")
+# Sprawdźmy, czy katalog 'app' jest widoczny z perspektywy main.py uruchamianego jako moduł
+# Jeśli entrypoint to "python -m app.main", to cwd powinno być katalogiem nadrzędnym 'app' (czyli TRADING_BOT)
+# a pliki z 'app' powinny być dostępne przez 'app.nazwa_pliku'
+# Jednak dla os.listdir('.') zobaczymy zawartość TRADING_BOT
+# Spróbujmy wylistować zawartość katalogu, w którym jest ten plik (app/)
+current_file_dir = os.path.dirname(os.path.abspath(__file__))
+print(f"[MAIN_SIMPLIFIED_TEST] Katalog pliku main.py: {current_file_dir}")
+if os.path.exists(current_file_dir) and os.path.isdir(current_file_dir):
+    print(f"[MAIN_SIMPLIFIED_TEST] Zawartość katalogu '{current_file_dir}': {os.listdir(current_file_dir)}")
+else:
+    print(f"[MAIN_SIMPLIFIED_TEST] Nie można wylistować katalogu '{current_file_dir}'.")
 
 
-    fetcher_thread = threading.Thread(target=fetcher_loop, name="FetcherThreadFirestore", daemon=True)
-    fetcher_thread.start()
-    print("[MAIN] Wątek fetchera (Firestore) uruchomiony.")
-
-    bot_main_thread = threading.Thread(target=trading_bot_main_loop, name="BotLogicThread", daemon=True)
-    bot_main_thread.start()
-    print("[MAIN] Wątek logiki bota uruchomiony.")
+# Spróbuj zaimportować coś, co może być problematyczne, np. Firebase
+try:
+    print("[MAIN_SIMPLIFIED_TEST] Próba importu firebase_admin...")
+    import firebase_admin
+    from firebase_admin import credentials # Dodaj import credentials
+    from firebase_admin import firestore
+    print("[MAIN_SIMPLIFIED_TEST] firebase_admin zaimportowany pomyślnie.")
     
-    try:
-        while True:
-            if not fetcher_thread.is_alive():
-                print("[MAIN_ERROR] Wątek fetchera (Firestore) przestał działać!")
-                break 
-            if not bot_main_thread.is_alive():
-                print("[MAIN_ERROR] Wątek logiki bota przestał działać!")
-                break
-            time.sleep(30)
-    except KeyboardInterrupt:
-        print("[MAIN] Zatrzymywanie bota przez użytkownika (Ctrl+C)...")
-    finally:
-        print("[MAIN] Bot zakończył działanie.")
+    # Minimalna inicjalizacja Firebase (bez credentials, polega na domyślnych w App Engine)
+    if not firebase_admin._apps:
+        print("[MAIN_SIMPLIFIED_TEST] Inicjalizacja Firebase Admin SDK...")
+        # W App Engine Standard, initialize_app() bez argumentów powinno działać
+        firebase_admin.initialize_app() 
+        db_test = firestore.client()
+        print("[MAIN_SIMPLIFIED_TEST] Firebase Admin SDK zainicjowane, klient Firestore uzyskany.")
+        
+        # Prosta operacja na Firestore (opcjonalnie, tylko do testu)
+        print("[MAIN_SIMPLIFIED_TEST] Próba testowego zapisu do Firestore...")
+        doc_ref = db_test.collection("startup_tests").document("simplified_main_test_v1_0") # Użyj unikalnej nazwy dokumentu
+        doc_ref.set({
+            "timestamp": firestore.SERVER_TIMESTAMP, 
+            "message": "Uproszczony main.py działa! Wersja testowa 1.0",
+            "gae_instance": os.getenv('GAE_INSTANCE', 'N/A')
+        })
+        print("[MAIN_SIMPLIFIED_TEST] Testowy zapis do Firestore wykonany.")
+    else:
+        print("[MAIN_SIMPLIFIED_TEST] Firebase Admin SDK było już zainicjowane.")
+
+except ImportError as e_imp:
+    print(f"[MAIN_SIMPLIFIED_TEST_ERROR] Błąd importu: {e_imp}")
+    traceback.print_exc()
+except Exception as e_init:
+    print(f"[MAIN_SIMPLIFIED_TEST_ERROR] Błąd podczas inicjalizacji lub testu Firebase: {type(e_init).__name__} - {e_init}")
+    traceback.print_exc()
+
+print(f"[MAIN_SIMPLIFIED_TEST] Uproszczony main.py pozostanie aktywny i będzie logował co minutę.")
+
+count = 0
+while True: # Pętla, aby utrzymać proces przy życiu
+   count += 1
+   print(f"[MAIN_SIMPLIFIED_TEST] Pętla podtrzymująca ({count}). Instancja działa. Czas: {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}")
+   time.sleep(60) # Loguj co 60 sekund
