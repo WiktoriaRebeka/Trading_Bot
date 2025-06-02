@@ -1,15 +1,8 @@
 runtime: python310
 service: default 
 instance_class: F1
-entrypoint: gunicorn -b :$PORT app.main:flask_app # Wskazuje na obiekt flask_app w app.main
+entrypoint: gunicorn -b :$PORT app.main:flask_app 
 
 automatic_scaling:
   min_instances: 1
   max_instances: 1
-
-# Możesz zostawić lub usunąć health checki, Gunicorn powinien odpowiadać na domyślne
-# liveness_check:
-#   path: "/" 
-# readiness_check:
-#   path: "/"
-#   app_start_timeout_sec: 300
