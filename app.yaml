@@ -1,7 +1,7 @@
 runtime: python311
 service: default
 instance_class: F1
-entrypoint: gunicorn -b :$PORT main:app # Jawny entrypoint dla Gunicorna
+entrypoint: gunicorn -b :$PORT main:app 
 
 automatic_scaling:
   min_instances: 1
