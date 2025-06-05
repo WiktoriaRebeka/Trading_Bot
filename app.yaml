@@ -1,13 +1,14 @@
 runtime: python311
 service: default
 instance_class: F1
-entrypoint: gunicorn -b :$PORT main:app 
+entrypoint: python simple_test_script.py # Zmieniony entrypoint
 
 automatic_scaling:
   min_instances: 1
   max_instances: 1
 
-readiness_check:
-  path: "/"
-liveness_check:
-  path: "/"
+# Tymczasowo usuńmy health checks, aby nie zakłócały
+# readiness_check:
+#   path: "/"
+# liveness_check:
+#   path: "/"
