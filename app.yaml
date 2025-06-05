@@ -1,8 +1,10 @@
 runtime: python310
 service: default
 instance_class: F1
-entrypoint: python simple_grpc_test.py # Uruchamiamy bezpośrednio skrypt
+entrypoint: python simple_grpc_test.py
 
 automatic_scaling:
-  min_instances: 1
+  min_instances: 1 # Utrzyma instancję aktywną po wykonaniu skryptu, aby można było sprawdzić logi.
+                   # Skrypt wykona się raz przy starcie instancji.
   max_instances: 1
+# app_start_timeout_sec: 600 # Można zostawić
