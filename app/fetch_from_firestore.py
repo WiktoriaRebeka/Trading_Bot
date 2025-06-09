@@ -1,82 +1,70 @@
-# trading_bot/app/fetch_from_firestore.py
-import firebase_admin
-from firebase_admin import credentials, firestore # credentials potrzebne do fallbacku lokalnego
+# TRADING_BOT/app/fetch_from_firestore.py
+import firebase_admin # Nadal może być potrzebny dla firebase_admin.exceptions lub typów
+from firebase_admin import firestore # Dla firestore.FieldFilter, firestore.Query
 import time
 import os
 from datetime import datetime, timezone, timedelta
+import traceback # Przeniesione z main.py dla spójności
+import sys # Dla logowania do stderr w razie problemów
 
-from app import state_manager
-from app.constants import (
-    # LAST_PROCESSED_TIMESTAMP_FILE, # Usunięte, nie używamy już pliku
+# Importuj obiekt 'db_client' (lub 'db') z app.main
+# LUB przekaż go jako argument do funkcji, które go potrzebują.
+# Dla uproszczenia na razie, spróbujmy zaimportować go z app.main
+# To stworzy cykliczną zależność importu, jeśli main importuje fetch_from_firestore, a ten próbuje importować z main.
+# Lepszym rozwiązaniem jest stworzenie dedykowanego modułu np. app/firebase_setup.py, który inicjuje db
+# i jest importowany przez oba moduły.
+
+# === POCZĄTEK ZMIAN DLA CENTRALNEJ INICJALIZACJI ===
+# Zakładamy, że db_client będzie zainicjowany w app/main.py i przekazany tutaj
+# lub (mniej idealnie) zaimportowany.
+# Na razie usuniemy globalną zmienną 'db' z tego modułu, aby uniknąć konfliktów.
+# Funkcje będą musiały przyjmować 'db_client' jako argument.
+
+# Globalna zmienna db zostanie usunięta lub zainicjowana z app.main
+# db = None 
+# --- KONIEC SEKCJI INICJALIZACJI FIREBASE W TYM PLIKU ---
+
+# Zmodyfikujmy funkcje, aby przyjmowały 'db_client' jako argument
+# lub polegały na globalnym 'db' zainicjowanym w app.main.py
+
+# Importy modułów Twojego bota
+from . import state_manager # Używamy importu relatywnego
+from .constants import (    # Używamy importu relatywnego
     FETCH_INTERVAL_SECONDS,
-    FIRESTORE_COLLECTION_ALERTS
+    FIRESTORE_COLLECTION_ALERTS,
+    BOT_CONFIG_COLLECTION,
+    LAST_FETCH_STATE_DOC_ID,
+    LAST_PROCESSED_TS_FIELD
 )
 
-# Stałe dla przechowywania stanu w Firestore
-BOT_CONFIG_COLLECTION = "bot_config"  # Możesz przenieść do app/constants.py
-LAST_FETCH_STATE_DOC_ID = "last_fetch_state" # Możesz przenieść do app/constants.py
-LAST_PROCESSED_TS_FIELD = "last_processed_firestore_timestamp" # Możesz przenieść do app/constants.py
+# Zmienna 'db' będzie teraz odnosić się do tej zaimportowanej z app.main lub przekazanej
+# Jeśli importujesz z app.main, musisz uważać na cykliczne zależności.
+# Lepsze rozwiązanie: stwórz app/firebase.py, który inicjuje db,
+# i oba moduły importują z app/firebase.py.
+# Na razie spróbujmy z globalną zmienną db, którą ustawi app.main.py
+# i ten moduł będzie jej używał.
 
-db = None # Zdefiniuj db na początku, aby było dostępne globalnie w module
+# Aby to zadziałało, 'db' musi być dostępne globalnie w tym module,
+# a 'app/main.py' musi je ustawić po inicjalizacji.
+# To nie jest najlepsza praktyka. Lepsze jest przekazywanie 'db_client'.
 
-# --- POCZĄTEK SEKCJI INICJALIZACJI FIREBASE ---
-IS_APP_ENGINE_ENVIRONMENT = os.getenv('GAE_ENV', '').startswith('standard')
+# Dla tego testu, zróbmy tak, że funkcje będą używać globalnej zmiennej 'db',
+# a app/main.py ją zainicjuje i ustawi w tym module.
+# To jest trochę "hackish", ale pozwoli nam przetestować.
 
-if IS_APP_ENGINE_ENVIRONMENT:
-    print("[FETCHER_FIRESTORE] Wykryto środowisko App Engine. Próba inicjalizacji z domyślnymi credentials.")
-    try:
-        if not firebase_admin._apps:
-            firebase_admin.initialize_app()
-        db = firestore.client()
-        print("[FETCHER_FIRESTORE] Pomyślnie zainicjowano Firebase Admin SDK w App Engine.")
-    except Exception as e:
-        print(f"[FETCHER_FIRESTORE_ERROR_APP_ENGINE] Błąd inicjalizacji Firebase Admin SDK w App Engine: {e}")
-        # W App Engine błąd tutaj jest krytyczny, instancja może nie działać poprawnie.
-else:
-    print("[FETCHER_FIRESTORE] Nie wykryto środowiska App Engine. Próba inicjalizacji lokalnej z GOOGLE_APPLICATION_CREDENTIALS.")
-    try:
-        cred_path_env = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-        if not cred_path_env:
-            raise ValueError("LOKALNIE: Zmienna środowiskowa GOOGLE_APPLICATION_CREDENTIALS nie jest ustawiona.")
-        
-        actual_cred_path = cred_path_env
-        if not os.path.isabs(actual_cred_path):
-            # Dla testów lokalnych, zakładamy, że .env jest w głównym katalogu projektu (TRADING_BOT)
-            # a ścieżka w .env jest relatywna do tego katalogu
-            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__))) # TRADING_BOT/
-            actual_cred_path = os.path.join(base_dir, actual_cred_path)
-
-        if not os.path.exists(actual_cred_path):
-            raise ValueError(f"LOKALNIE: Plik klucza serwisowego nie został znaleziony pod ścieżką: {actual_cred_path}")
-
-        cred = credentials.Certificate(actual_cred_path)
-        if not firebase_admin._apps: # Tylko jeśli nie zainicjowano wcześniej (np. przez App Engine path, choć tu nie powinno)
-            firebase_admin.initialize_app(cred)
-        else: # Jeśli _apps istnieje, ale my jesteśmy w ścieżce lokalnej, mogło być zainicjowane bez credentials
-            # To jest mało prawdopodobny scenariusz, ale dla bezpieczeństwa
-            try:
-                firebase_admin.get_app() # Sprawdź, czy domyślna aplikacja ma credentials
-            except ValueError: # Jeśli domyślna aplikacja nie ma credentials, a my mamy
-                 print("[FETCHER_FIRESTORE_WARN] Domyślna aplikacja Firebase istnieje, ale może nie mieć credentials. Próba użycia podanej ścieżki.")
-                 # Można rozważyć inicjalizację z unikalną nazwą aplikacji, ale to komplikuje
-                 # Na razie zakładamy, że jeśli _apps istnieje, to jest OK lub App Engine path zawiodło.
-
-        db = firestore.client()
-        print(f"[FETCHER_FIRESTORE] Pomyślnie zainicjowano Firebase Admin SDK LOKALNIE z kluczem: {actual_cred_path}")
-    except Exception as e:
-        print(f"[FETCHER_FIRESTORE_ERROR_LOCAL] Błąd inicjalizacji Firebase Admin SDK LOKALNIE: {e}")
-
-if not db:
-    print("[FETCHER_FIRESTORE_CRITICAL] Klient Firestore (db) nie został zainicjowany! Fetcher nie będzie działać poprawnie.")
-# --- KONIEC SEKCJI INICJALIZACJI FIREBASE ---
-
+def set_firestore_client(client):
+    """Funkcja pomocnicza do ustawienia klienta Firestore z app/main.py"""
+    global db
+    db = client
+    sys.stderr.write(f"[FETCHER_FIRESTORE] Klient Firestore ustawiony z app.main: {db}\n")
+    sys.stderr.flush()
 
 def load_last_processed_timestamp() -> str:
-    """Wczytuje ostatni przetworzony timestamp z dedykowanego dokumentu w Firestore."""
-    if not db:
-        print("[FETCHER_WARN] Klient Firestore niedostępny w load_last_processed_timestamp. Używam domyślnego.")
+    if not db: # Teraz db powinno być ustawione przez app/main.py
+        sys.stderr.write("[FETCHER_WARN] Klient Firestore (db) niedostępny w load_last_processed_timestamp. Używam domyślnego.\n")
+        sys.stderr.flush()
         return (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
-        
+    # ... reszta funkcji bez zmian ...
     try:
         doc_ref = db.collection(BOT_CONFIG_COLLECTION).document(LAST_FETCH_STATE_DOC_ID)
         doc = doc_ref.get()
@@ -99,13 +87,12 @@ def load_last_processed_timestamp() -> str:
     
     return (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
 
-
 def save_last_processed_timestamp(timestamp_str: str):
-    """Zapisuje ostatni przetworzony timestamp do dedykowanego dokumentu w Firestore."""
     if not db:
-        print(f"[FETCHER_ERROR] Klient Firestore niedostępny w save_last_processed_timestamp. Nie można zapisać {timestamp_str}.")
+        sys.stderr.write(f"[FETCHER_ERROR] Klient Firestore (db) niedostępny w save_last_processed_timestamp. Nie można zapisać {timestamp_str}.\n")
+        sys.stderr.flush()
         return
-        
+    # ... reszta funkcji bez zmian ...
     try:
         ts_dt = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
         if ts_dt.tzinfo is None or ts_dt.tzinfo.utcoffset(ts_dt) is None: # Upewnij się, że jest świadomy strefy
@@ -120,14 +107,16 @@ def save_last_processed_timestamp(timestamp_str: str):
 
 
 def fetch_new_alerts_since(last_ts_str: str):
+    if not db:
+        sys.stderr.write("[FETCHER_ERROR] Klient Firestore (db) niedostępny w fetch_new_alerts_since.\n")
+        sys.stderr.flush()
+        # Zwracamy pustą listę i oryginalny timestamp, żeby nie zepsuć logiki dalej
+        return [], last_ts_str 
+    # ... reszta funkcji bez zmian ...
     new_alerts_list = []
     max_ts_in_batch_dt = datetime.fromisoformat(last_ts_str.replace("Z", "+00:00"))
     if max_ts_in_batch_dt.tzinfo is None: # Upewnij się, że jest świadomy UTC
         max_ts_in_batch_dt = max_ts_in_batch_dt.replace(tzinfo=timezone.utc)
-
-    if not db:
-        print("[FETCHER_ERROR] Klient Firestore niedostępny w fetch_new_alerts_since.")
-        return new_alerts_list, max_ts_in_batch_dt.isoformat()
 
     try:
         last_ts_dt = datetime.fromisoformat(last_ts_str.replace("Z", "+00:00"))
@@ -168,32 +157,32 @@ def fetch_new_alerts_since(last_ts_str: str):
         print(f"[FETCHER_FIRESTORE_ERROR] Błąd Firebase: {fb_err}")
     except Exception as e:
         print(f"[FETCHER_FIRESTORE_ERROR] Inny błąd podczas pobierania: {e}")
-        import traceback
         traceback.print_exc()
 
     return new_alerts_list, max_ts_in_batch_dt.isoformat()
 
 
-def fetcher_loop():
-    if not db: # Sprawdź, czy db zostało poprawnie zainicjowane na poziomie modułu
-        print("[FETCHER_FIRESTORE_CRITICAL] Klient Firestore (db) nie jest dostępny na początku fetcher_loop. Pętla nie może wystartować.")
+def fetcher_loop(): # Ta funkcja będzie używać globalnego 'db'
+    if not db: 
+        sys.stderr.write("[FETCHER_FIRESTORE_CRITICAL] Klient Firestore (db) nie jest dostępny na początku fetcher_loop. Pętla nie może wystartować.\n")
+        sys.stderr.flush()
         return
-    # Sprawdzenie _apps jest bardziej ogólne, ale db jest tym, czego bezpośrednio używamy
-    if not firebase_admin._apps:
-        print("[FETCHER_FIRESTORE_ERROR] Firebase Admin SDK nie zostało zainicjowane. Pętla fetchera nie może wystartować.")
+    if not firebase_admin._apps: # To sprawdzenie może być redundantne, jeśli db jest OK
+        sys.stderr.write("[FETCHER_FIRESTORE_ERROR] Firebase Admin SDK nie zostało zainicjowane. Pętla fetchera nie może wystartować.\n")
+        sys.stderr.flush()
         return
-
+    # ... reszta funkcji fetcher_loop bez zmian, używając globalnego 'db' ...
     current_last_processed_ts = load_last_processed_timestamp()
     print(f"[FETCHER_FIRESTORE] Pętla fetchera (Firestore) uruchomiona. Początkowy timestamp: {current_last_processed_ts}")
     
-    while True:
+    while True: # Pamiętaj, że ta pętla nieskończona jest problematyczna w App Engine, jeśli jest w głównym wątku
         try:
             newly_fetched_alerts, new_max_ts_from_batch_str = fetch_new_alerts_since(current_last_processed_ts)
 
             if newly_fetched_alerts:
                 print(f"[FETCHER_FIRESTORE] Przetwarzanie {len(newly_fetched_alerts)} alertów...")
                 for alert_data in newly_fetched_alerts:
-                    state_manager.process_alert(alert_data) 
+                    state_manager.process_alert(alert_data) # Zakładamy, że state_manager jest zaimportowany
                 
                 if new_max_ts_from_batch_str > current_last_processed_ts:
                     current_last_processed_ts = new_max_ts_from_batch_str
@@ -202,7 +191,9 @@ def fetcher_loop():
 
         except Exception as e:
             print(f"[FETCHER_FIRESTORE_ERROR] Nieoczekiwany błąd w pętli fetchera: {e}")
-            import traceback
             traceback.print_exc()
 
         time.sleep(FETCH_INTERVAL_SECONDS)
+
+sys.stderr.write("[FETCHER_FIRESTORE] Moduł fetch_from_firestore.py (wersja z centralną inicjalizacją db) załadowany.\n")
+sys.stderr.flush()
