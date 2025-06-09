@@ -1,34 +1,13 @@
-runtime: python310 # Zacznijmy od python310, bo wiemy, że z nim "Hello World" działał
+runtime: python310
 service: default
-entrypoint: gunicorn -b :$PORT app.main:app # Wskazuje na app/main.py i obiekt 'app' w nim
+entrypoint: gunicorn -b :$PORT app.main:app # Wskazuje na app/main.py
 
 instance_class: F1
 automatic_scaling:
   min_instances: 1
-  max_instances: 1 # Dla stabilności i kontroli kosztów na początku
-
-# Readiness i Liveness checks można dodać później, gdy potwierdzimy, że aplikacja startuje
-# readiness_check:
-#   path: /_ah/warmup # lub / dla health_check
-#   check_interval_sec: 30
-#   timeout_sec: 4
-#   failure_threshold: 2
-#   success_threshold: 2
-#   app_start_timeout_sec: 300
-
-# liveness_check:
-#   path: /_ah/warmup # lub /
-#   check_interval_sec: 300
-#   timeout_sec: 4
-#   failure_threshold: 4
-#   success_threshold: 2
-#   initial_delay_sec: 300
+  max_instances: 1
 
 env_variables:
-  # GOOGLE_APPLICATION_CREDENTIALS: "" # Nie ustawiaj tego, App Engine użyje domyślnych
-  FETCH_INTERVAL_SECONDS: "60" # Przykład, jeśli odczytujesz w constants.py
-  BOT_LOOP_INTERVAL_SECONDS: "15" # Przykład
-  # Dodaj tutaj inne zmienne środowiskowe, które Twój bot potrzebuje,
-  # a które wcześniej miałaś w pliku .env
-  # Np. jeśli masz klucze API do Bybit (choć nie widzę ich użycia w kodzie),
-  # to jest miejsce, aby je bezpiecznie przekazać.
+  FETCH_INTERVAL_SECONDS: "60"
+  BOT_LOOP_INTERVAL_SECONDS: "15"
+  # Upewnij się, że żadne inne zmienne nie są absolutnie krytyczne dla samego startu
