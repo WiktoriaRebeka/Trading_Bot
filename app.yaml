@@ -1,10 +1,7 @@
-# app.yaml
-runtime: python310 # Zacznijmy od python310, jest bardziej "sprawdzony"
+runtime: python310
 service: default
-entrypoint: gunicorn -b :$PORT hello_main:app # Standardowy entrypoint dla Flaska
+entrypoint: gunicorn -b :$PORT hello_main:app 
 
-# Możesz zostawić te domyślne lub dodać:
-# instance_class: F1
-# automatic_scaling:
-#   min_instances: 1 
-# To nie powinno mieć wpływu na sam fakt logowania "Hello World"
+instance_class: F1 
+automatic_scaling:
+  min_instances: 1
