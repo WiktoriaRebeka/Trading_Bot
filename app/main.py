@@ -8,10 +8,10 @@ import sys
 import time
 
 # Zakomentowane importy bota:
-# from . import fetch_from_firestore 
-# from . import state_manager
+from . import fetch_from_firestore 
+from . import state_manager
 # from . import bot_logic
-# from . import constants
+from . import constants
 
 logging.basicConfig(stream=sys.stdout, 
                     level=logging.INFO, 
