@@ -1,63 +1,63 @@
 # TRADING_BOT/app/main.py
 from flask import Flask, jsonify
 import firebase_admin
-from firebase_admin import firestore
+from firebase_admin import firestore # Importujemy, bo używamy firestore.client()
 import logging
 import os
 import sys
 import time
-import threading 
+# import threading # Na razie nie używamy wątków w tle dla pętli bota
 
 # Importy modułów Twojego bota
 from . import fetch_from_firestore
 from . import state_manager
-from . import bot_logic # <--- ODKOMENTOWANE (tak jak w mojej poprzedniej odpowiedzi)
+from . import bot_logic             # <--- ODKOMENTOWANE
 from . import constants
+from . import positions_logger      # <--- ODKOMENTOWANE (lub dodane, jeśli nie było)
 
 logging.basicConfig(stream=sys.stdout, 
                     level=logging.INFO, 
-                    format='%(asctime)s - %(name)s - %(levelname)s - [TRADING_BOT_FULL_LOGIC] - %(message)s') # Zmieniony prefix dla tego testu
-logger = logging.getLogger(__name__) # Poprawione na __name__
+                    format='%(asctime)s - %(name)s - %(levelname)s - [BOT_LOGIC_FIXPOS] - %(message)s') # Nowy prefix
+logger = logging.getLogger(__name__)
 
-logger.info(f"--- SCRIPT app/main.py (FULL_LOGIC_TEST) LOADED ---")
+logger.info(f"--- SCRIPT app/main.py (BOT_LOGIC_FIXPOS_TEST) LOADED ---")
 
 firebase_initialized_successfully = False
-db_client = None
+db_client = None # Główny klient Firestore inicjowany tutaj
 try:
     if not firebase_admin._apps:
-        logger.info("[INIT_FULL_LOGIC] Próba inicjalizacji Firebase Admin SDK...")
+        logger.info("[INIT_BOT_LOGIC_FIXPOS] Próba inicjalizacji Firebase Admin SDK...")
         firebase_admin.initialize_app()
-        logger.info("[INIT_FULL_LOGIC] Inicjalizacja Firebase Admin SDK ZAKOŃCZONA SUKCESEM.")
+        logger.info("[INIT_BOT_LOGIC_FIXPOS] Inicjalizacja Firebase Admin SDK ZAKOŃCZONA SUKCESEM.")
     else:
-        logger.info("[INIT_FULL_LOGIC] Firebase Admin SDK już zainicjowane.")
+        logger.info("[INIT_BOT_LOGIC_FIXPOS] Firebase Admin SDK już zainicjowane.")
     
-    db_client = firestore.client()
-    logger.info("[INIT_FULL_LOGIC] Połączenie z Firestore ZAKOŃCZONE SUKCESEM.")
+    db_client = firestore.client() # Inicjujemy klienta tutaj
+    logger.info("[INIT_BOT_LOGIC_FIXPOS] Połączenie z Firestore ZAKOŃCZONE SUKCESEM.")
     
+    # Ustawiamy klienta Firestore w innych modułach
     fetch_from_firestore.set_firestore_client(db_client)
-    # Również dla positions_logger, jeśli go używasz i potrzebuje db_client
-    # from . import positions_logger # Upewnij się, że jest importowany, jeśli set_firestore_client ma być na nim wywołane
-    # positions_logger.set_firestore_client(db_client) # Odkomentuj, jeśli positions_logger tego wymaga
+    positions_logger.set_firestore_client_for_logger(db_client) # <--- USTAWIAMY KLIENTA DLA POSITIONS_LOGGER
 
     firebase_initialized_successfully = True
 except Exception as e:
-    logger.error(f"[INIT_FULL_LOGIC_ERROR] BŁĄD Firebase/Firestore: {e}", exc_info=True)
+    logger.error(f"[INIT_BOT_LOGIC_FIXPOS_ERROR] BŁĄD Firebase/Firestore: {e}", exc_info=True)
     firebase_initialized_successfully = False # Poprawione
 
-app = Flask(__name__) # Poprawione na __name__
-logger.info("Instancja Flask 'app' (FULL_LOGIC_TEST) utworzona.")
+app = Flask(__name__)
+logger.info("Instancja Flask 'app' (BOT_LOGIC_FIXPOS_TEST) utworzona.")
 
 @app.route('/')
-def health_check_full_logic():
-    logger.info(f"Żądanie na / (health_check_full_logic)")
+def health_check_bot_logic_fixpos():
+    logger.info(f"Żądanie na / (health_check_bot_logic_fixpos)")
     if firebase_initialized_successfully:
-        return "Trading Bot App (FULL_LOGIC_TEST) is running! Firebase init OK.", 200
+        return "Trading Bot App (BOT_LOGIC_FIXPOS_TEST) is running! Firebase init OK.", 200
     else:
-        return "Trading Bot App (FULL_LOGIC_TEST) is running! Firebase init FAILED.", 500
+        return "Trading Bot App (BOT_LOGIC_FIXPOS_TEST) is running! Firebase init FAILED.", 500
 
 @app.route('/_ah/warmup')
-def warmup_full_logic():
-    logger.info("Obsługa żądania /_ah/warmup (FULL_LOGIC_TEST)")
+def warmup_bot_logic_fixpos():
+    logger.info("Obsługa żądania /_ah/warmup (BOT_LOGIC_FIXPOS_TEST)")
     if firebase_initialized_successfully:
         try:
             logger.info(f"Warmup: Próba odczytu timestampa: {fetch_from_firestore.load_last_processed_timestamp()}")
@@ -66,15 +66,15 @@ def warmup_full_logic():
     return '', 200
 
 @app.route('/run-bot-cycle', methods=['GET', 'POST'])
-def run_bot_cycle_endpoint_full_logic():
-    logger.info("Odebrano żądanie na /run-bot-cycle (FULL_LOGIC_TEST - PEŁNA LOGIKA AKTYWNA)")
+def run_bot_cycle_endpoint_bot_logic_fixpos():
+    logger.info("Odebrano żądanie na /run-bot-cycle (BOT_LOGIC_FIXPOS_TEST - PEŁNA LOGIKA AKTYWNA)")
 
     if not firebase_initialized_successfully or not db_client:
         logger.error("Nie można uruchomić cyklu bota: Firebase/Firestore nie jest zainicjowane.")
         return jsonify({"status": "error", "message": "Firestore not initialized"}), 500
 
     try:
-        logger.info("--- ROZPOCZĘCIE CYKLU BOTA (FULL_LOGIC_TEST) ---")
+        logger.info("--- ROZPOCZĘCIE CYKLU BOTA (BOT_LOGIC_FIXPOS_TEST) ---")
         
         current_last_ts = fetch_from_firestore.load_last_processed_timestamp()
         logger.info(f"Aktualny ostatni przetworzony timestamp: {current_last_ts}")
@@ -102,24 +102,24 @@ def run_bot_cycle_endpoint_full_logic():
         # === LOGIKA BOTA JEST TERAZ AKTYWNA ===
         for symbol in active_symbols:
             logger.info(f"Przetwarzanie logiki dla symbolu: {symbol}")
-            bot_logic.check_new_long_entries(symbol)    # ODKOMENTOWANE
-            bot_logic.check_new_short_entries(symbol)   # ODKOMENTOWANE
-            bot_logic.monitor_planned_positions(symbol) # ODKOMENTOWANE
-            bot_logic.monitor_opened_positions(symbol)  # ODKOMENTOWANE
+            bot_logic.check_new_long_entries(symbol)
+            bot_logic.check_new_short_entries(symbol)
+            bot_logic.monitor_planned_positions(symbol)
+            bot_logic.monitor_opened_positions(symbol)
         # =====================================
         
         state_manager.print_state_summary()
 
-        logger.info("--- ZAKOŃCZENIE CYKLU BOTA (FULL_LOGIC_TEST) ---")
+        logger.info("--- ZAKOŃCZENIE CYKLU BOTA (BOT_LOGIC_FIXPOS_TEST) ---")
         return jsonify({
             "status": "success", 
-            "message": "Bot cycle (FULL LOGIC ACTIVE) completed.",
+            "message": "Bot cycle (BOT_LOGIC_FIXPOS_TEST - FULL LOGIC ACTIVE) completed.",
             "alerts_processed": alerts_processed_count,
             "active_symbols_processed": list(active_symbols)
         }), 200
 
     except Exception as e:
-        logger.error(f"Błąd podczas wykonywania cyklu bota (FULL_LOGIC_TEST): {e}", exc_info=True)
-        return jsonify({"status": "error", "message": f"Error during bot cycle (FULL LOGIC ACTIVE): {e}"}), 500
+        logger.error(f"Błąd podczas wykonywania cyklu bota (BOT_LOGIC_FIXPOS_TEST): {e}", exc_info=True)
+        return jsonify({"status": "error", "message": f"Error during bot cycle (BOT_LOGIC_FIXPOS_TEST): {e}"}), 500
     
-logger.info("--- END OF SCRIPT app/main.py (FULL_LOGIC_TEST) DEFINITIONS ---")
+logger.info("--- END OF SCRIPT app/main.py (BOT_LOGIC_FIXPOS_TEST) DEFINITIONS ---")
