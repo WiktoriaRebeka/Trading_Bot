@@ -4,15 +4,12 @@ import logging
 import sys
 import os # Dodajemy os do odczytu zmiennych środowiskowych
 
-# --- NOWE PODEJŚCIE DO IMPORTÓW I INICJALIZACJI ---
-from .firebase_client import initialize_firebase, get_db # TYLKO TEN IMPORT NA RAZIE
-
-# Zakomentuj inne importy na razie
+from .firebase_client import initialize_firebase, get_db
+from . import constants
+from . import state_manager
 from . import fetch_from_firestore
-# from . import state_manager
-# from . import bot_logic
-# from . import positions_logger 
-from . import constants # constants są teraz prawdopodobnie importowane przez inne moduły, więc na razie zostawmy
+from . import positions_logger 
+from . import bot_logic 
 
 # Konfiguracja logowania
 logging.basicConfig(
