@@ -11,7 +11,7 @@ from .firebase_client import initialize_firebase, get_db # TYLKO TEN IMPORT NA R
 from . import fetch_from_firestore
 # from . import state_manager
 # from . import bot_logic
-from . import positions_logger 
+# from . import positions_logger 
 from . import constants # constants są teraz prawdopodobnie importowane przez inne moduły, więc na razie zostawmy
 
 # Konfiguracja logowania
