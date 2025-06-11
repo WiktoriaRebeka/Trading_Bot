@@ -1,5 +1,5 @@
 # TRADING_BOT/app/main.py
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 import logging
 import sys
 import os
