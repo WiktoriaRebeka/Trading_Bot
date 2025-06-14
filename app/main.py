@@ -1,5 +1,5 @@
 # TRADING_BOT/app/main.py
-from flask import Flask, jsonify, request # Upewnij się, że 'request' jest zaimportowany
+from flask import Flask, jsonify, request
 import logging
 import sys
 import os
@@ -14,36 +14,33 @@ from . import positions_logger
 from . import bot_logic
 
 # --- Konfiguracja Logowania ---
+# ZMIANA: Poziom DEBUG, aby widzieć wszystkie szczegółowe logi z innych modułów
 logging.basicConfig(
     stream=sys.stdout, 
-    level=logging.INFO, # Możesz zmienić na logging.DEBUG, aby zobaczyć więcej logów z modułów
+    level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger("app.main") 
 
 # --- Inicjalizacja Aplikacji i Firebase ---
 logger.info(f"--- ŁADOWANIE app/main.py (Wersja: {os.getenv('GAE_VERSION', 'Lokalna')}) ---")
-logger.info(f"GAE_ENV: {os.getenv('GAE_ENV')}")
 
 firebase_initialized = False
 try:
     logger.info("Wywołuję initialize_firebase() z firebase_client...")
     if initialize_firebase(): 
         firebase_initialized = True
-        logger.info("initialize_firebase() zakończone sukcesem (zwróciło True).")
-        # Testowe pobranie klienta DB
+        logger.info("initialize_firebase() zakończone sukcesem.")
         test_db = get_db()
         if test_db:
             logger.info("get_db() pomyślnie zwróciło klienta Firestore.")
-            # Wywołanie set_firestore_client_for_logger NIE JEST JUŻ POTRZEBNE
-            # jeśli positions_logger.py używa get_db()
         else:
             logger.error("KRYTYCZNY BŁĄD: initialize_firebase() zwróciło True, ale get_db() zwróciło None!")
             firebase_initialized = False 
     else:
-        logger.error("KRYTYCZNY BŁĄD: initialize_firebase() zwróciło False. Sprawdź logi z firebase_client.py.")
+        logger.error("KRYTYCZNY BŁĄD: initialize_firebase() zwróciło False.")
 except Exception as e_init:
-    logger.error(f"KRYTYCZNY BŁĄD: Wyjątek podczas wywoływania initialize_firebase() lub get_db() w app/main.py: {e_init}", exc_info=True)
+    logger.error(f"KRYTYCZNY BŁĄD: Wyjątek podczas inicjalizacji w app/main.py: {e_init}", exc_info=True)
     firebase_initialized = False
 
 # Tworzymy instancję Flask
@@ -55,9 +52,8 @@ logger.info("Instancja Flask 'app' utworzona.")
 
 @app.route('/')
 def health_check():
-    logger.info("Odebrano żądanie na / (health_check)")
+    logger.debug("Odebrano żądanie na / (health_check)")
     status_message = "Firebase OK" if firebase_initialized else "Firebase FAILED"
-    # Dodajemy wersję GAE dla łatwiejszej identyfikacji
     gae_version = os.getenv('GAE_VERSION', 'N/A')
     return f"Trading Bot App (App Engine - Wersja: {gae_version}) is running! {status_message}. UTC: {datetime.utcnow().isoformat()}", 200
 
@@ -70,16 +66,15 @@ def warmup():
     
     try:
         if get_db(): 
-            get_db().collection(constants.BOT_CONFIG_COLLECTION).limit(1).get() # Używamy constants
+            get_db().collection(constants.BOT_CONFIG_COLLECTION).limit(1).get()
             logger.info("Warmup: Pomyślnie wykonano testowe zapytanie do Firestore.")
     except Exception as e_warmup:
         logger.error(f"Warmup: Błąd podczas testowego zapytania do Firestore: {e_warmup}", exc_info=True)
     return '', 200
 
+
 @app.route('/run-bot-cycle', methods=['GET', 'POST'])
 def run_bot_cycle_endpoint():
-    is_scheduler_request = request.headers.get('X-CloudScheduler', type=bool) # Upewnij się, że 'request' jest zaimportowany
-    # Uproszczone logowanie źródła na razie
     source_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
     logger.info(f"--- ROZPOCZĘCIE CYKLU BOTA (Żądanie od: {source_ip}) ---")
 
@@ -88,24 +83,32 @@ def run_bot_cycle_endpoint():
         return jsonify({"status": "error", "message": "Firestore not initialized properly"}), 500
 
     try:
-        current_last_ts = fetch_from_firestore.load_last_processed_timestamp()
-        logger.info(f"Aktualny ostatni przetworzony timestamp: {current_last_ts}")
+        # ===============================================================
+        # === POPRAWIONA LOGIKA POBIERANIA I AKTUALIZACJI TIMESTAMP ===
+        # ===============================================================
         
-        newly_fetched_alerts, new_max_ts_iso = fetch_from_firestore.fetch_new_alerts_since(current_last_ts)
+        # 1. Odczytaj ostatni timestamp jako obiekt datetime
+        current_last_ts_dt = fetch_from_firestore.load_last_processed_timestamp()
+        
+        # 2. Pobierz nowe alerty i najnowszy timestamp (również jako datetime)
+        newly_fetched_alerts, new_max_ts_dt = fetch_from_firestore.fetch_new_alerts_since(current_last_ts_dt)
         
         alerts_processed_count = 0
         if newly_fetched_alerts:
-            logger.info(f"Pobrano {len(newly_fetched_alerts)} nowych alertów. Przetwarzanie...")
+            alerts_processed_count = len(newly_fetched_alerts)
+            logger.info(f"Przetwarzanie {alerts_processed_count} nowych alertów...")
             for alert_data in newly_fetched_alerts:
                 state_manager.process_alert(alert_data) 
-            alerts_processed_count = len(newly_fetched_alerts)
             
-            if new_max_ts_iso > current_last_ts:
-                fetch_from_firestore.save_last_processed_timestamp(new_max_ts_iso)
-                logger.info(f"Zaktualizowano ostatni przetworzony timestamp na: {new_max_ts_iso}")
-        else:
-            logger.info("Brak nowych alertów do przetworzenia.")
+            # 3. Zapisz nowy timestamp, jeśli jest nowszy od starego.
+            # Porównanie obiektów datetime jest bezpieczne i niezawodne.
+            if new_max_ts_dt > current_last_ts_dt:
+                fetch_from_firestore.save_last_processed_timestamp(new_max_ts_dt)
 
+        # ===============================================================
+        # === GŁÓWNA LOGIKA BOTA (BEZ ZMIAN) ===
+        # ===============================================================
+        
         active_alert_symbols = state_manager.get_all_alert_symbols()
         active_position_symbols = state_manager.get_all_position_symbols() 
         all_active_symbols = set(active_alert_symbols) | set(active_position_symbols)
@@ -120,16 +123,17 @@ def run_bot_cycle_endpoint():
         if all_active_symbols:
             all_current_prices = bot_logic.get_all_prices_for_category()
             if not all_current_prices:
-                logger.warning("Nie udało się pobrać aktualnych cen. Logika bota może nie działać poprawnie dla niektórych symboli.")
+                logger.warning("Nie udało się pobrać aktualnych cen. Logika bota może nie działać poprawnie.")
         
         logger.info("--- Faza 1: Sprawdzanie nowych setupów ---")
-        for symbol in all_active_symbols: # Iteruj po wszystkich, check_for_new_setups sama sprawdzi, czy są relevantne alerty
+        for symbol in all_active_symbols:
             bot_logic.check_for_new_setups(symbol) 
         
         logger.info("--- Faza 2: Monitorowanie istniejących pozycji ---")
         bot_logic.monitor_positions(all_current_prices) 
         
-        if os.getenv('GAE_ENV') != 'standard': # Tylko lokalnie lub w trybie debug
+        # Opcjonalne podsumowanie stanu (tylko lokalnie)
+        if os.getenv('GAE_ENV') != 'standard':
             state_manager.print_state_summary() 
 
         logger.info("--- ZAKOŃCZENIE CYKLU BOTA ---")
@@ -143,6 +147,7 @@ def run_bot_cycle_endpoint():
     except Exception as e:
         logger.error(f"Krytyczny błąd podczas wykonywania cyklu bota: {e}", exc_info=True)
         return jsonify({"status": "error", "message": f"Critical error during bot cycle: {e}"}), 500
+
 
 if __name__ == '__main__':
     logger.info("Uruchamianie serwera Flask lokalnie (dla testów)...")
