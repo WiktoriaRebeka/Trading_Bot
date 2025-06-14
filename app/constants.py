@@ -19,7 +19,7 @@ BYBIT_DEFAULT_CATEGORY = "linear"
 # Ustawienia bota
 FETCH_INTERVAL_SECONDS = int(os.getenv("FETCH_INTERVAL_SECONDS", 60))
 BOT_LOOP_INTERVAL_SECONDS = int(os.getenv("BOT_LOOP_INTERVAL_SECONDS", 15))
-MAX_ALERT_AGE_SECONDS = int(os.getenv("MAX_ALERT_AGE_SECONDS", 120))
+MAX_ALERT_AGE_SECONDS = int(os.getenv("MAX_ALERT_AGE_SECONDS", 70))
 
 # Opcjonalne klucze API (zakomentowane, jeśli nie używasz)
 # BYBIT_API_KEY = os.getenv("BYBIT_API_KEY")
