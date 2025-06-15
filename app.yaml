@@ -14,7 +14,5 @@ env_variables:
   BOT_LOOP_INTERVAL_SECONDS: "15"
   MAX_ALERT_AGE_SECONDS: "70"
   
-  # === WKLEJ TUTAJ SWOJE KLUCZE ===
-  # Pamiętaj, aby wartości były w cudzysłowach
   BYBIT_API_KEY: "sz3y2CfXOuAVIcQpsI"
   BYBIT_API_SECRET: "jyuJkCm0aDfdNWG5XL9xmoRV5O5TOjbZ0hfl"

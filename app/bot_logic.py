@@ -102,7 +102,110 @@ def get_all_prices_for_category(category: str = BYBIT_DEFAULT_CATEGORY) -> Dict[
 
 # --- GŁÓWNA LOGIKA BOTA ---
 
+# W pliku app/bot_logic.py
+
 def check_for_new_setups(symbol: str):
+    """Sprawdza, czy najnowsze alerty tworzą prawidłowy, nowy setup do zaplanowania."""
+    logger.info(f"--- [{symbol}] Rozpoczynam check_for_new_setups ---")
+    last_ob_alert_q = state_manager.get_last_orderblocks(symbol)
+    if not last_ob_alert_q:
+        logger.debug(f"[{symbol}] Brak alertów OrderBlock w pamięci. Kończę.")
+        return
+    last_ob = last_ob_alert_q[-1]
+    
+    direction = last_ob.get("direction", "").lower()
+    if not direction:
+        logger.warning(f"[{symbol}] Brak 'direction' w alercie OrderBlock: {last_ob}. Kończę.")
+        return
+
+    heatmap_event_type = "TOP_GREEN_CHANGE" if direction == "long" else "BOTTOM_RED_CHANGE"
+    last_heatmap_alert_q = state_manager.get_last_heatmap(symbol, heatmap_event_type)
+    if not last_heatmap_alert_q:
+        logger.debug(f"[{symbol}] Brak pasujących alertów Heatmap typu '{heatmap_event_type}'. Kończę.")
+        return
+    last_heatmap = last_heatmap_alert_q[-1]
+
+    try:
+        # --- Uodporniona logika parsowania timestampów ---
+        ob_ts_value = last_ob.get("timestamp")
+        heatmap_ts_value = last_heatmap.get("timestamp")
+        
+        if not ob_ts_value or not heatmap_ts_value:
+             logger.warning(f"[{symbol}] Brak pola 'timestamp' w jednym z alertów. Kończę.")
+             return
+
+        def parse_timestamp(ts_value):
+            if isinstance(ts_value, datetime):
+                return ts_value.astimezone(timezone.utc) if ts_value.tzinfo else ts_value.replace(tzinfo=timezone.utc)
+            elif isinstance(ts_value, str):
+                return datetime.fromisoformat(ts_value.replace("Z", "+00:00")).replace(tzinfo=timezone.utc)
+            raise TypeError(f"Nieobsługiwany typ dla timestamp: {type(ts_value)}")
+
+        ob_ts = parse_timestamp(ob_ts_value)
+        heatmap_ts = parse_timestamp(heatmap_ts_value)
+        
+        triggering_ob_timestamp_str = ob_ts_value if isinstance(ob_ts_value, str) else ob_ts_value.isoformat()
+        
+        time_diff_seconds = abs((ob_ts - heatmap_ts).total_seconds())
+        if time_diff_seconds > MAX_ALERT_AGE_SECONDS:
+            logger.info(f"[{symbol}] Setup odrzucony: alerty zbyt odległe w czasie ({time_diff_seconds:.0f}s > {MAX_ALERT_AGE_SECONDS}s).")
+            return
+        
+        # --- JAWNA KONWERSJA I SPRAWDZENIE WARUNKU CENOWEGO ---
+        ob_entry = float(last_ob["entry"])
+        ob_sl = float(last_ob["sl"])
+        heatmap_value = float(last_heatmap["value"])
+
+        # Dodajemy bardzo czytelne logowanie, które MUSI się pojawić
+        logger.info(f"[{symbol}][CONDITION_CHECK] Sprawdzam: DIR={direction}, SL={ob_sl}, HEATMAP={heatmap_value}, ENTRY={ob_entry}")
+
+        condition_met = False
+        if direction == "long":
+            if ob_sl < heatmap_value and heatmap_value < ob_entry:
+                condition_met = True
+        elif direction == "short":
+            if ob_entry < heatmap_value and heatmap_value < ob_sl:
+                condition_met = True
+
+        logger.info(f"[{symbol}][CONDITION_RESULT] Wynik: {condition_met}")
+
+        if not condition_met:
+            logger.info(f"[{symbol}] Setup odrzucony: warunek ceny nie został spełniony.")
+            return # Zakończ, jeśli warunek nie jest spełniony
+
+        # === Jeśli doszliśmy tutaj, warunek JEST spełniony ===
+        
+        position_id = state_manager.generate_position_id(symbol, direction, ob_entry, triggering_ob_timestamp_str)
+        
+        planned_positions_for_symbol = state_manager.get_all_planned_for_symbol(symbol)
+        for planned_pos in planned_positions_for_symbol:
+            if planned_pos.get("triggering_ob_timestamp") == triggering_ob_timestamp_str:
+                logger.info(f"[{symbol}] Setup odrzucony: pozycja oparta o ten sam OB już istnieje: {planned_pos.get('position_id')}.")
+                return
+
+        # Planowanie pozycji
+        ob_tp = float(last_ob["tp"])
+        ob_level_low = float(last_ob["levelLow"])
+        ob_level_high = float(last_ob["levelHigh"])
+        
+        position_details = {
+            "position_id": position_id, "symbol": symbol, "direction": direction,
+            "entry_price": ob_entry, "stop_loss": ob_sl, "take_profit": ob_tp,
+            "status": "planned", 
+            "planned_at": firestore.SERVER_TIMESTAMP,
+            "triggering_ob_timestamp": triggering_ob_timestamp_str,
+            "triggering_ob_level_low": ob_level_low,
+            "triggering_ob_level_high": ob_level_high,
+            "triggering_heatmap_value_at_planning": heatmap_value
+        }
+        state_manager.add_planned_position(position_details) 
+        log_new_position(symbol, direction, ob_entry, ob_sl, ob_tp, position_id) 
+        logger.info(f"[✅ PLAN] {symbol} | Entry: {ob_entry} | SL: {ob_sl} | TP: {ob_tp} | Heatmap: {heatmap_value}")
+
+    except (KeyError, ValueError, TypeError) as e:
+        logger.error(f"[{symbol}][PLAN_ERROR] Błąd: {e}. OB: {last_ob}, Heatmap: {last_heatmap}", exc_info=True)
+    
+    logger.info(f"--- [{symbol}] Zakończono check_for_new_setups ---")
     """Sprawdza, czy najnowsze alerty tworzą prawidłowy, nowy setup do zaplanowania."""
     logger.info(f"--- [{symbol}] Rozpoczynam check_for_new_setups ---")
     last_ob_alert_q = state_manager.get_last_orderblocks(symbol)
