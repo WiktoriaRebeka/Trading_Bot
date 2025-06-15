@@ -24,7 +24,7 @@ def get_all_prices_for_category(category: str = BYBIT_DEFAULT_CATEGORY) -> Dict[
     """Pobiera ceny dla wszystkich symboli w danej kategorii za jednym zapytaniem."""
     logger.info(f"[GET_PRICES] Rozpoczynam pobieranie cen dla kategorii: {category}")
     params = {"category": category}
-    headers = {'User-Agent': 'TradingBot/1.0 (AppEngine)', 'Accept': 'application/json'}
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36', 'Accept': 'application/json'}
     all_prices = {}
     try:
         response = requests.get(BYBIT_API_URL_V5_TICKERS, params=params, headers=headers, timeout=15)
