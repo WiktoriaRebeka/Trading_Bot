@@ -4,10 +4,10 @@ import logging
 import requests
 from typing import Optional, Dict, List, Any
 from datetime import datetime, timedelta, timezone
-# NOWE IMPORTY POTRZEBNE DO PODPISYWANIA
 import time
 import hmac
 import hashlib
+import json # Dodajemy import json
 
 # Poprawne importy
 from firebase_admin import firestore
@@ -18,7 +18,6 @@ from .constants import (
     BYBIT_API_URL_V5_TICKERS,
     BYBIT_DEFAULT_CATEGORY,
     MAX_ALERT_AGE_SECONDS,
-    # IMPORTUJEMY KLUCZE
     BYBIT_API_KEY,
     BYBIT_API_SECRET
 )
@@ -32,21 +31,18 @@ def get_all_prices_for_category(category: str = BYBIT_DEFAULT_CATEGORY) -> Dict[
     logger.info(f"[GET_PRICES] Rozpoczynam pobieranie cen z autoryzacją dla kategorii: {category}")
     
     if not BYBIT_API_KEY or not BYBIT_API_SECRET:
-        logger.error("[GET_PRICES] Klucze API Bybit nie są skonfigurowane! Nie można pobrać cen.")
+        logger.error("[GET_PRICES] Klucze API Bybit nie są skonfigurowane!")
         return {}
 
-    # === ZMIENIONA I ULEPSZONA LOGIKA PODPISYWANIA ===
-    
     # 1. Ustawienia
     timestamp = str(int(time.time() * 1000))
-    recv_window = "10000"  # Zwiększamy okno na wszelki wypadek
+    recv_window = "10000"
     params = {"category": category}
     
-    # 2. Tworzenie query string (posortowane alfabetycznie)
+    # 2. Tworzenie query string
     query_string = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
     
     # 3. Tworzenie stringa do podpisania
-    # Format dla GET: timestamp + apiKey + recvWindow + queryString
     sign_str = timestamp + BYBIT_API_KEY + recv_window + query_string
 
     # 4. Generowanie podpisu
@@ -61,49 +57,49 @@ def get_all_prices_for_category(category: str = BYBIT_DEFAULT_CATEGORY) -> Dict[
         'X-BAPI-API-KEY': BYBIT_API_KEY,
         'X-BAPI-TIMESTAMP': timestamp,
         'X-BAPI-RECV-WINDOW': recv_window,
-        'X-BAPI-SIGN': signature
+        'X-BAPI-SIGN': signature,
     }
     
-    # Dodajemy logi, żeby widzieć, co wysyłamy
-    logger.debug(f"[GET_PRICES_AUTH] Timestamp: {timestamp}")
-    logger.debug(f"[GET_PRICES_AUTH] String do podpisu: {sign_str}")
-    logger.debug(f"[GET_PRICES_AUTH] Wygenerowany podpis: {signature}")
-
+    logger.debug(f"[GET_PRICES_AUTH] Wysyłane nagłówki (bez klucza): Timestamp={timestamp}, RecvWindow={recv_window}, Sign={signature}")
+    
     # 6. Wykonanie zapytania
     all_prices = {}
     try:
         url = f"{BYBIT_API_URL_V5_TICKERS}?{query_string}"
         response = requests.get(url, headers=headers, timeout=15)
         
-        # Logujemy odpowiedź, żeby zobaczyć, co zwraca Bybit
-        logger.info(f"[GET_PRICES_RESPONSE] Status: {response.status_code}, Odpowiedź (fragment): {response.text[:500]}")
+        # === NAJWAŻNIEJSZY LOG ===
+        # Logujemy status i treść odpowiedzi ZANIM rzucimy wyjątek
+        logger.info(f"[GET_PRICES_RESPONSE] Status: {response.status_code}, Odpowiedź: {response.text}")
 
-        response.raise_for_status()
+        response.raise_for_status() # Rzuci wyjątkiem, jeśli status to 4xx lub 5xx
         data = response.json()
         
-        if data.get("retCode") == 0 and data.get("result") and data["result"].get("list"):
-            # ... (reszta logiki parsowania bez zmian) ...
-            for ticker in data["result"]["list"]:
-                symbol = ticker.get("symbol")
-                price_str = ticker.get("lastPrice")
-                if symbol and price_str:
-                    try:
-                        all_prices[symbol] = float(price_str)
-                    except ValueError:
-                        logger.warning(f"[GET_PRICES] Nie udało się sparsować ceny dla {symbol}: '{price_str}'")
-            logger.info(f"[GET_PRICES] Pomyślnie pobrano ceny dla {len(all_prices)} symboli.")
+        if data.get("retCode") == 0:
+            if data.get("result") and data["result"].get("list"):
+                for ticker in data["result"]["list"]:
+                    symbol = ticker.get("symbol")
+                    price_str = ticker.get("lastPrice")
+                    if symbol and price_str:
+                        try:
+                            all_prices[symbol] = float(price_str)
+                        except ValueError:
+                            logger.warning(f"[GET_PRICES] Nie udało się sparsować ceny dla {symbol}: '{price_str}'")
+                logger.info(f"[GET_PRICES] Pomyślnie pobrano ceny dla {len(all_prices)} symboli.")
             return all_prices
         else:
-            # Ten log jest teraz bardzo ważny - pokaże nam wiadomość błędu od Bybit
+            # Ten log pokaże nam wiadomość błędu z ciała odpowiedzi JSON od Bybit
             logger.error(f"[GET_PRICES_API_ERROR] Błąd API Bybit: Code={data.get('retCode')}, Msg='{data.get('retMsg')}'")
             return {}
             
     except requests.exceptions.HTTPError as http_err:
-        logger.error(f"[GET_PRICES_HTTP_ERROR] Błąd HTTP: {http_err}.", exc_info=False) # exc_info=False dla czystości logów, bo i tak logujemy odpowiedź
+        # Ten log jest teraz mniej ważny, bo logujemy treść odpowiedzi powyżej
+        logger.error(f"[GET_PRICES_HTTP_ERROR] Błąd HTTP: {http_err}.")
     except Exception as e:
         logger.error(f"[GET_PRICES_UNEXPECTED_ERROR] Nieoczekiwany błąd: {e}", exc_info=True)
         
     return {}
+
 # --- GŁÓWNA LOGIKA BOTA ---
 
 def check_for_new_setups(symbol: str):
