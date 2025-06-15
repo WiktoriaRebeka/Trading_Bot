@@ -4,7 +4,6 @@ import logging
 from typing import Dict, Deque, Optional, List, Any
 from collections import deque
 
-# Poprawne importy
 from firebase_admin import firestore
 from .firebase_client import get_db
 
@@ -24,6 +23,7 @@ MAX_OB_ALERTS = 2
 def init_symbol_alerts(symbol: str):
     """Inicjuje strukturę danych dla nowego symbolu w buforze alertów."""
     if symbol not in alert_data_store:
+        logger.debug(f"[STATE_MGR] Inicjuję bufor alertów dla nowego symbolu: {symbol}")
         alert_data_store[symbol] = {
             "TOP_GREEN_CHANGE": deque(maxlen=MAX_HEATMAP_ALERTS),
             "BOTTOM_RED_CHANGE": deque(maxlen=MAX_HEATMAP_ALERTS),
@@ -33,13 +33,20 @@ def init_symbol_alerts(symbol: str):
 def process_alert(alert: dict):
     """Przetwarza przychodzący alert i dodaje go do odpowiedniego bufora w pamięci."""
     symbol = alert.get("symbol") or alert.get("ticker")
-    event = alert.get("event") or alert.get("type")
+    # Zmieniamy 'event' na 'type', aby było spójne z nowymi alertami
+    event = alert.get("type")
+    
     if not all([symbol, event]):
-        logger.warning(f"Alert bez symbolu/eventu, pomijam: {alert.get('id')}")
+        logger.warning(f"Alert bez symbolu lub typu, pomijam: {alert}")
         return
+        
     init_symbol_alerts(symbol)
+    
     if event in alert_data_store[symbol]:
+        logger.debug(f"[STATE_MGR] Dodaję alert do bufora [{symbol}][{event}]")
         alert_data_store[symbol][event].append(alert)
+    else:
+        logger.warning(f"[STATE_MGR] Otrzymano nieznany typ eventu '{event}' dla symbolu {symbol}. Pomijam.")
 
 def get_last_heatmap(symbol: str, event_type: str) -> Deque[dict]:
     """Zwraca bufor (deque) ostatnich alertów heatmapy dla danego symbolu."""
@@ -55,16 +62,25 @@ def get_all_alert_symbols() -> List[str]:
 
 # --- ZARZĄDZANIE POZYCJAMI (w Firestore) ---
 
-def generate_position_id(symbol: str, direction: str, entry_price: float) -> str:
-    """Tworzy deterministyczne ID pozycji na podstawie kluczowych parametrów setupu."""
-    return f"{symbol}_{direction}_{entry_price:.5f}"
+# ==============================================================================
+# === KLUCZOWA POPRAWKA ===
+# Zmieniamy definicję funkcji, aby przyjmowała 4 argumenty, w tym timestamp.
+# ==============================================================================
+def generate_position_id(symbol: str, direction: str, entry_price: float, ob_timestamp: str) -> str:
+    """Tworzy unikalne ID pozycji na podstawie parametrów i timestampu OrderBlocka."""
+    # Usuwamy znaki specjalne z timestampu, aby był bezpieczny jako ID dokumentu
+    safe_timestamp = ob_timestamp.replace(":", "-").replace(".", "_").replace("+", "plus").replace("Z", "")
+    return f"{symbol}_{direction}_{entry_price:.5f}_{safe_timestamp}"
 
 def add_planned_position(details: Dict[str, Any]):
     """Zapisuje nową, zaplanowaną pozycję jako dokument w Firestore."""
     db = get_db()
-    position_id = details["position_id"]
+    position_id = details.get("position_id")
+    if not position_id:
+        logger.error(f"[STATE_MGR_ERROR] Próba dodania planowanej pozycji bez ID. Szczegóły: {details}")
+        return
+        
     try:
-        # Sprawdzenie, czy pozycja o tym ID już istnieje
         doc_ref = db.collection(PLANNED_POSITIONS_COLLECTION).document(position_id)
         if doc_ref.get().exists:
             logger.warning(f"[STATE_MGR_WARN] Pozycja {position_id} już istnieje w planowanych. Pomijam dodanie.")
@@ -101,11 +117,13 @@ def get_all_position_symbols() -> List[str]:
     try:
         planned_docs = db.collection(PLANNED_POSITIONS_COLLECTION).select(["symbol"]).stream()
         for doc in planned_docs:
-            symbols.add(doc.to_dict().get("symbol"))
+            if doc and doc.exists and doc.to_dict().get("symbol"):
+                symbols.add(doc.to_dict().get("symbol"))
         
         opened_docs = db.collection(OPENED_POSITIONS_COLLECTION).select(["symbol"]).stream()
         for doc in opened_docs:
-            symbols.add(doc.to_dict().get("symbol"))
+            if doc and doc.exists and doc.to_dict().get("symbol"):
+                symbols.add(doc.to_dict().get("symbol"))
     except Exception as e:
         logger.error(f"[STATE_MGR_FIRESTORE_ERROR] Nie udało się pobrać wszystkich symboli pozycji: {e}", exc_info=True)
     return list(symbols)
@@ -119,7 +137,7 @@ def move_planned_to_opened_transactional(transaction, pos_id: str):
     
     planned_snapshot = planned_ref.get(transaction=transaction)
     if not planned_snapshot.exists:
-        logger.warning(f"[TRANSACTION_WARN] Pozycja {pos_id} nie istnieje już w planowanych. Prawdopodobnie anulowana lub otwarta przez inny cykl.")
+        logger.warning(f"[TRANSACTION_WARN] Pozycja {pos_id} nie istnieje już w planowanych.")
         return False
         
     position_details = planned_snapshot.to_dict()
@@ -143,3 +161,16 @@ def remove_position_transactional(transaction, collection: str, pos_id: str):
     transaction.delete(doc_ref)
     logger.info(f"[TRANSACTION_SUCCESS] Pozycja {pos_id} atomowo usunięta z kolekcji '{collection}'.")
     return True
+
+# Opcjonalna funkcja do debugowania stanu w pamięci
+def print_state_summary():
+    logger.debug("--- PODSUMOWANIE STANU PAMIĘCI ---")
+    if not alert_data_store:
+        logger.debug("Brak danych alertów w pamięci.")
+        return
+    for symbol, events in alert_data_store.items():
+        logger.debug(f"Symbol: {symbol}")
+        for event_type, alerts_deque in events.items():
+            if alerts_deque:
+                logger.debug(f"  -> {event_type} (ilość: {len(alerts_deque)}): Najnowszy = {alerts_deque[-1]}")
+    logger.debug("---------------------------------")
