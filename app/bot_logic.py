@@ -35,39 +35,54 @@ def get_all_prices_for_category(category: str = BYBIT_DEFAULT_CATEGORY) -> Dict[
         logger.error("[GET_PRICES] Klucze API Bybit nie są skonfigurowane! Nie można pobrać cen.")
         return {}
 
-    # 1. Przygotuj parametry zapytania (query string)
-    params = {"category": category}
-    query_string = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
-
-    # 2. Przygotuj dane do podpisania (timestamp, klucz api, okno odbioru, query string)
+    # === ZMIENIONA I ULEPSZONA LOGIKA PODPISYWANIA ===
+    
+    # 1. Ustawienia
     timestamp = str(int(time.time() * 1000))
-    recv_window = "5000"
+    recv_window = "10000"  # Zwiększamy okno na wszelki wypadek
+    params = {"category": category}
+    
+    # 2. Tworzenie query string (posortowane alfabetycznie)
+    query_string = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
+    
+    # 3. Tworzenie stringa do podpisania
+    # Format dla GET: timestamp + apiKey + recvWindow + queryString
     sign_str = timestamp + BYBIT_API_KEY + recv_window + query_string
 
-    # 3. Wygeneruj podpis
+    # 4. Generowanie podpisu
     signature = hmac.new(
         bytes(BYBIT_API_SECRET, "utf-8"),
         bytes(sign_str, "utf-8"),
         hashlib.sha256
     ).hexdigest()
 
-    # 4. Przygotuj nagłówki z podpisem
+    # 5. Przygotowanie nagłówków
     headers = {
         'X-BAPI-API-KEY': BYBIT_API_KEY,
         'X-BAPI-TIMESTAMP': timestamp,
         'X-BAPI-RECV-WINDOW': recv_window,
-        'X-BAPI-SIGN': signature,
-        'Content-Type': 'application/json'
+        'X-BAPI-SIGN': signature
     }
+    
+    # Dodajemy logi, żeby widzieć, co wysyłamy
+    logger.debug(f"[GET_PRICES_AUTH] Timestamp: {timestamp}")
+    logger.debug(f"[GET_PRICES_AUTH] String do podpisu: {sign_str}")
+    logger.debug(f"[GET_PRICES_AUTH] Wygenerowany podpis: {signature}")
 
-    # 5. Wykonaj zapytanie
+    # 6. Wykonanie zapytania
     all_prices = {}
     try:
-        response = requests.get(BYBIT_API_URL_V5_TICKERS, params=params, headers=headers, timeout=15)
+        url = f"{BYBIT_API_URL_V5_TICKERS}?{query_string}"
+        response = requests.get(url, headers=headers, timeout=15)
+        
+        # Logujemy odpowiedź, żeby zobaczyć, co zwraca Bybit
+        logger.info(f"[GET_PRICES_RESPONSE] Status: {response.status_code}, Odpowiedź (fragment): {response.text[:500]}")
+
         response.raise_for_status()
         data = response.json()
         
         if data.get("retCode") == 0 and data.get("result") and data["result"].get("list"):
+            # ... (reszta logiki parsowania bez zmian) ...
             for ticker in data["result"]["list"]:
                 symbol = ticker.get("symbol")
                 price_str = ticker.get("lastPrice")
@@ -79,11 +94,12 @@ def get_all_prices_for_category(category: str = BYBIT_DEFAULT_CATEGORY) -> Dict[
             logger.info(f"[GET_PRICES] Pomyślnie pobrano ceny dla {len(all_prices)} symboli.")
             return all_prices
         else:
+            # Ten log jest teraz bardzo ważny - pokaże nam wiadomość błędu od Bybit
             logger.error(f"[GET_PRICES_API_ERROR] Błąd API Bybit: Code={data.get('retCode')}, Msg='{data.get('retMsg')}'")
             return {}
             
     except requests.exceptions.HTTPError as http_err:
-        logger.error(f"[GET_PRICES_HTTP_ERROR] Błąd HTTP: {http_err}.", exc_info=True)
+        logger.error(f"[GET_PRICES_HTTP_ERROR] Błąd HTTP: {http_err}.", exc_info=False) # exc_info=False dla czystości logów, bo i tak logujemy odpowiedź
     except Exception as e:
         logger.error(f"[GET_PRICES_UNEXPECTED_ERROR] Nieoczekiwany błąd: {e}", exc_info=True)
         
