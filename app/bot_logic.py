@@ -24,11 +24,17 @@ def get_all_prices_for_category(category: str = BYBIT_DEFAULT_CATEGORY) -> Dict[
     """Pobiera ceny dla wszystkich symboli w danej kategorii za jednym zapytaniem."""
     logger.info(f"[GET_PRICES] Rozpoczynam pobieranie cen dla kategorii: {category}")
     params = {"category": category}
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36', 'Accept': 'application/json'}
+    
+    # === KLUCZOWA POPRAWKA: Zmiana User-Agent, aby uniknąć błędu 403 Forbidden ===
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Accept': 'application/json'
+    }
+    
     all_prices = {}
     try:
         response = requests.get(BYBIT_API_URL_V5_TICKERS, params=params, headers=headers, timeout=15)
-        response.raise_for_status()
+        response.raise_for_status() # To rzuci wyjątkiem dla błędów HTTP (jak 403)
         data = response.json()
         if data.get("retCode") == 0 and data.get("result") and data["result"].get("list"):
             for ticker in data["result"]["list"]:
@@ -39,7 +45,6 @@ def get_all_prices_for_category(category: str = BYBIT_DEFAULT_CATEGORY) -> Dict[
                         all_prices[symbol] = float(price_str)
                     except ValueError:
                         logger.warning(f"[GET_PRICES] Nie udało się sparsować ceny dla {symbol}: '{price_str}'")
-                        continue
             logger.info(f"[GET_PRICES] Pomyślnie pobrano ceny dla {len(all_prices)} symboli.")
             return all_prices
         else:
@@ -77,25 +82,26 @@ def check_for_new_setups(symbol: str):
     last_heatmap = last_heatmap_alert_q[-1]
 
     try:
-        # --- Uodporniona logika parsowania timestampów ---
-        ob_ts_value = last_ob["timestamp"]
-        heatmap_ts_value = last_heatmap["timestamp"]
+        # === POPRAWIONA, ODPORNA LOGIKA PARSOWANIA TIMESTAMPÓW ===
+        ob_ts_value = last_ob.get("timestamp")
+        heatmap_ts_value = last_heatmap.get("timestamp")
+        
+        if not ob_ts_value or not heatmap_ts_value:
+             logger.warning(f"[{symbol}] Brak pola 'timestamp' w jednym z alertów. OB: {ob_ts_value}, Heatmap: {heatmap_ts_value}. Kończę.")
+             return
 
         def parse_timestamp(ts_value):
             if isinstance(ts_value, datetime):
                 return ts_value.astimezone(timezone.utc) if ts_value.tzinfo else ts_value.replace(tzinfo=timezone.utc)
             elif isinstance(ts_value, str):
                 return datetime.fromisoformat(ts_value.replace("Z", "+00:00")).replace(tzinfo=timezone.utc)
-            else:
-                raise TypeError(f"Nieobsługiwany typ dla timestamp: {type(ts_value)}")
+            raise TypeError(f"Nieobsługiwany typ dla timestamp: {type(ts_value)}")
 
         ob_ts = parse_timestamp(ob_ts_value)
         heatmap_ts = parse_timestamp(heatmap_ts_value)
         
         triggering_ob_timestamp_str = ob_ts_value if isinstance(ob_ts_value, str) else ob_ts_value.isoformat()
         
-        # --- Koniec logiki parsowania timestampów ---
-
         logger.debug(f"[{symbol}][TIMESTAMPS] Parsowane: OB_ts={ob_ts.isoformat()}, Heatmap_ts={heatmap_ts.isoformat()}")
 
         time_diff_seconds = abs((ob_ts - heatmap_ts).total_seconds())
@@ -104,6 +110,8 @@ def check_for_new_setups(symbol: str):
             logger.info(f"[{symbol}] Setup odrzucony: alerty zbyt odległe w czasie.")
             return
 
+        # --- Koniec logiki parsowania timestampów ---
+        
         ob_entry = float(last_ob["entry"])
         ob_sl = float(last_ob["sl"])
         ob_tp = float(last_ob["tp"])
@@ -120,12 +128,10 @@ def check_for_new_setups(symbol: str):
                 return
 
         condition_met = False
-        if direction == "long":
-            if ob_sl < heatmap_value < ob_entry:
-                condition_met = True
-        elif direction == "short":
-            if ob_entry < heatmap_value < ob_sl:
-                condition_met = True
+        if direction == "long" and ob_sl < heatmap_value < ob_entry:
+            condition_met = True
+        elif direction == "short" and ob_entry < heatmap_value < ob_sl:
+            condition_met = True
         
         logger.info(f"[{symbol}][CONDITION_RESULT] Wynik sprawdzenia warunku ceny: {condition_met}")
         
@@ -153,13 +159,14 @@ def check_for_new_setups(symbol: str):
 
 
 def monitor_positions(all_prices: Dict[str, float]):
-    logger.info(f"--- Rozpoczynam monitor_positions. Dostępne ceny dla {len(all_prices)} symboli. ---")
+    logger.info(f"--- Rozpoczynam monitor_positions ---")
     all_symbols_with_positions = state_manager.get_all_position_symbols()
-    logger.debug(f"[MONITOR_POS] Symbole z pozycjami (z Firestore) do sprawdzenia: {all_symbols_with_positions}")
     
     if not all_symbols_with_positions:
         logger.info("[MONITOR_POS] Brak pozycji do monitorowania.")
         return
+        
+    logger.debug(f"[MONITOR_POS] Symbole z pozycjami do sprawdzenia: {all_symbols_with_positions}")
 
     for symbol in all_symbols_with_positions:
         cleaned_symbol_for_price = symbol.replace(".P", "") 
@@ -169,19 +176,15 @@ def monitor_positions(all_prices: Dict[str, float]):
             logger.warning(f"[{symbol}][MONITOR_POS] Brak aktualnej ceny dla {cleaned_symbol_for_price}. Pomijam monitorowanie tego symbolu.")
             continue
             
-        logger.debug(f"== [{symbol}] Monitorowanie. Cena rynkowa ({cleaned_symbol_for_price}): {current_price} ==")
+        logger.debug(f"== [{symbol}] Monitorowanie. Cena rynkowa: {current_price} ==")
         
         planned_positions = state_manager.get_all_planned_for_symbol(symbol)
-        if planned_positions:
-            logger.debug(f"[{symbol}][MONITOR_POS] Znaleziono {len(planned_positions)} planowanych pozycji.")
-            for pos_details in planned_positions:
-                check_and_process_planned_position(pos_details, current_price) 
+        for pos_details in planned_positions:
+            check_and_process_planned_position(pos_details, current_price) 
             
         opened_positions = state_manager.get_all_opened_for_symbol(symbol)
-        if opened_positions:
-            logger.debug(f"[{symbol}][MONITOR_POS] Znaleziono {len(opened_positions)} otwartych pozycji.")
-            for pos_details in opened_positions:
-                check_and_process_opened_position(pos_details, current_price)
+        for pos_details in opened_positions:
+            check_and_process_opened_position(pos_details, current_price)
             
     logger.info("--- Zakończono monitor_positions ---")
 
@@ -192,7 +195,6 @@ def check_and_process_planned_position(planned_pos_details: Dict[str, Any], curr
     
     logger.debug(f"[{symbol}][PLANNED_CHECK] Sprawdzam pozycję {pos_id}")
     
-    # Najpierw sprawdź warunki anulowania
     cancel_reason = check_cancellation_conditions(planned_pos_details)
     if cancel_reason:
         logger.info(f"[{symbol}][PLANNED_CANCEL] Anulowanie pozycji {pos_id}. Powód: {cancel_reason}")
@@ -202,12 +204,11 @@ def check_and_process_planned_position(planned_pos_details: Dict[str, Any], curr
             update_position_status(pos_id, "cancelled", result_reason=cancel_reason)
         return 
 
-    # Jeśli nie anulowano, sprawdź warunki otwarcia
     try:
         direction = planned_pos_details["direction"]
         entry_price = float(planned_pos_details["entry_price"])
     except (KeyError, ValueError, TypeError) as e:
-        logger.error(f"[{symbol}][PLANNED_CHECK_ERROR] {pos_id}: Błąd odczytu/konwersji danych pozycji: {e}.", exc_info=True)
+        logger.error(f"[{symbol}][PLANNED_CHECK_ERROR] {pos_id}: Błąd odczytu/konwersji danych: {e}.", exc_info=True)
         return
 
     should_open = False
@@ -232,21 +233,19 @@ def check_cancellation_conditions(planned_pos: Dict[str, Any]) -> Optional[str]:
     
     logger.debug(f"--- [{symbol}][CANCEL_CHECK] Sprawdzam warunki anulowania dla {pos_id} ---")
 
-    # Warunek 1: Unieważnienie przez nowy, przeciwny OB
     latest_ob_alerts = state_manager.get_last_orderblocks(symbol)
     if latest_ob_alerts:
         latest_ob = latest_ob_alerts[-1]
         latest_ob_ts_value = latest_ob.get("timestamp")
-        latest_ob_ts_str = latest_ob_ts_value if isinstance(latest_ob_ts_value, str) else latest_ob_ts_value.isoformat()
-        
-        if latest_ob_ts_str != triggering_ob_timestamp and latest_ob.get("direction", "").lower() != direction:
-            return f"OrderBlock unieważniony przez nowy, PRZECIWSTAWNY OB (nowy dir: {latest_ob.get('direction')})."
+        if latest_ob_ts_value:
+            latest_ob_ts_str = latest_ob_ts_value if isinstance(latest_ob_ts_value, str) else latest_ob_ts_value.isoformat()
+            if latest_ob_ts_str != triggering_ob_timestamp and latest_ob.get("direction", "").lower() != direction:
+                return f"Unieważniono przez nowy, PRZECIWSTAWNY OB (nowy dir: {latest_ob.get('direction')})."
 
-    # Warunek 2: "Ucieczka" heatmapy
     heatmap_event_type = "TOP_GREEN_CHANGE" if direction == "long" else "BOTTOM_RED_CHANGE"
     latest_heatmap_alerts = state_manager.get_last_heatmap(symbol, heatmap_event_type)
     if not latest_heatmap_alerts:
-        return None # Brak nowej heatmapy nie jest powodem do anulowania
+        return None
 
     try:
         current_heatmap_value = float(latest_heatmap_alerts[-1].get("value"))
@@ -254,9 +253,9 @@ def check_cancellation_conditions(planned_pos: Dict[str, Any]) -> Optional[str]:
         triggering_ob_level_low = float(planned_pos["triggering_ob_level_low"])
         
         if not (triggering_ob_level_low < current_heatmap_value < triggering_ob_level_high):
-            return f"Poziom Heatmap ({current_heatmap_value}) wyszedł poza granice pierwotnego OB ({triggering_ob_level_low} - {triggering_ob_level_high})."
+            return f"Poziom Heatmap ({current_heatmap_value}) wyszedł poza granice OB ({triggering_ob_level_low} - {triggering_ob_level_high})."
     except (ValueError, TypeError, KeyError, IndexError) as e:
-        logger.error(f"[{symbol}][CANCEL_CHECK_ERROR] {pos_id}: Błąd danych przy sprawdzaniu heatmapy: {e}.", exc_info=True)
+        logger.error(f"[{symbol}][CANCEL_CHECK_ERROR] {pos_id}: Błąd danych: {e}.", exc_info=True)
         return f"Błąd danych podczas sprawdzania warunków anulowania."
     
     return None
@@ -271,7 +270,7 @@ def check_and_process_opened_position(opened_pos_details: Dict[str, Any], curren
         sl_price = float(opened_pos_details["stop_loss"])
         tp_price = float(opened_pos_details["take_profit"])
     except (KeyError, ValueError, TypeError) as e:
-        logger.error(f"[{symbol}][OPENED_CHECK_ERROR] {pos_id}: Błąd odczytu/konwersji danych pozycji: {e}.", exc_info=True)
+        logger.error(f"[{symbol}][OPENED_CHECK_ERROR] {pos_id}: Błąd odczytu/konwersji danych: {e}.", exc_info=True)
         return
 
     logger.debug(f"[{symbol}][OPENED_CHECK] Sprawdzam {pos_id}: Dir='{direction}', SL={sl_price}, TP={tp_price}, Cena={current_price}")
