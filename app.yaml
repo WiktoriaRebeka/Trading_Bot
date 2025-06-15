@@ -1,6 +1,8 @@
+# app.yaml
+
 runtime: python310
 service: default
-entrypoint: gunicorn -b :$PORT app.main:app # Wskazuje na app/main.py
+entrypoint: gunicorn -b :$PORT app.main:app
 
 instance_class: F1
 automatic_scaling:
@@ -10,4 +12,9 @@ automatic_scaling:
 env_variables:
   FETCH_INTERVAL_SECONDS: "60"
   BOT_LOOP_INTERVAL_SECONDS: "15"
-  # Upewnij się, że żadne inne zmienne nie są absolutnie krytyczne dla samego startu
+  MAX_ALERT_AGE_SECONDS: "70"
+  
+  # === WKLEJ TUTAJ SWOJE KLUCZE ===
+  # Pamiętaj, aby wartości były w cudzysłowach
+  BYBIT_API_KEY: "sz3y2CfXOuAVIcQpsI"
+  BYBIT_API_SECRET: "jyuJkCm0aDfdNWG5XL9xmoRV5O5TOjbZ0hfl"

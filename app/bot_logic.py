@@ -4,6 +4,10 @@ import logging
 import requests
 from typing import Optional, Dict, List, Any
 from datetime import datetime, timedelta, timezone
+# NOWE IMPORTY POTRZEBNE DO PODPISYWANIA
+import time
+import hmac
+import hashlib
 
 # Poprawne importy
 from firebase_admin import firestore
@@ -13,7 +17,10 @@ from .positions_logger import log_new_position, update_position_status
 from .constants import (
     BYBIT_API_URL_V5_TICKERS,
     BYBIT_DEFAULT_CATEGORY,
-    MAX_ALERT_AGE_SECONDS
+    MAX_ALERT_AGE_SECONDS,
+    # IMPORTUJEMY KLUCZE
+    BYBIT_API_KEY,
+    BYBIT_API_SECRET
 )
 
 logger = logging.getLogger(__name__)
@@ -21,21 +28,45 @@ logger = logging.getLogger(__name__)
 # --- FUNKCJE POMOCNICZE ---
 
 def get_all_prices_for_category(category: str = BYBIT_DEFAULT_CATEGORY) -> Dict[str, float]:
-    """Pobiera ceny dla wszystkich symboli w danej kategorii za jednym zapytaniem."""
-    logger.info(f"[GET_PRICES] Rozpoczynam pobieranie cen dla kategorii: {category}")
+    """Pobiera ceny dla wszystkich symboli, używając kluczy API do autoryzacji."""
+    logger.info(f"[GET_PRICES] Rozpoczynam pobieranie cen z autoryzacją dla kategorii: {category}")
+    
+    if not BYBIT_API_KEY or not BYBIT_API_SECRET:
+        logger.error("[GET_PRICES] Klucze API Bybit nie są skonfigurowane! Nie można pobrać cen.")
+        return {}
+
+    # 1. Przygotuj parametry zapytania (query string)
     params = {"category": category}
-    
-    # === KLUCZOWA POPRAWKA: Zmiana User-Agent, aby uniknąć błędu 403 Forbidden ===
+    query_string = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
+
+    # 2. Przygotuj dane do podpisania (timestamp, klucz api, okno odbioru, query string)
+    timestamp = str(int(time.time() * 1000))
+    recv_window = "5000"
+    sign_str = timestamp + BYBIT_API_KEY + recv_window + query_string
+
+    # 3. Wygeneruj podpis
+    signature = hmac.new(
+        bytes(BYBIT_API_SECRET, "utf-8"),
+        bytes(sign_str, "utf-8"),
+        hashlib.sha256
+    ).hexdigest()
+
+    # 4. Przygotuj nagłówki z podpisem
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-        'Accept': 'application/json'
+        'X-BAPI-API-KEY': BYBIT_API_KEY,
+        'X-BAPI-TIMESTAMP': timestamp,
+        'X-BAPI-RECV-WINDOW': recv_window,
+        'X-BAPI-SIGN': signature,
+        'Content-Type': 'application/json'
     }
-    
+
+    # 5. Wykonaj zapytanie
     all_prices = {}
     try:
         response = requests.get(BYBIT_API_URL_V5_TICKERS, params=params, headers=headers, timeout=15)
-        response.raise_for_status() # To rzuci wyjątkiem dla błędów HTTP (jak 403)
+        response.raise_for_status()
         data = response.json()
+        
         if data.get("retCode") == 0 and data.get("result") and data["result"].get("list"):
             for ticker in data["result"]["list"]:
                 symbol = ticker.get("symbol")
@@ -48,16 +79,15 @@ def get_all_prices_for_category(category: str = BYBIT_DEFAULT_CATEGORY) -> Dict[
             logger.info(f"[GET_PRICES] Pomyślnie pobrano ceny dla {len(all_prices)} symboli.")
             return all_prices
         else:
-            logger.error(f"[GET_PRICES_API_ERROR] Błąd API Bybit: Code={data.get('retCode')}, Msg='{data.get('retMsg')}'.")
+            logger.error(f"[GET_PRICES_API_ERROR] Błąd API Bybit: Code={data.get('retCode')}, Msg='{data.get('retMsg')}'")
             return {}
+            
     except requests.exceptions.HTTPError as http_err:
         logger.error(f"[GET_PRICES_HTTP_ERROR] Błąd HTTP: {http_err}.", exc_info=True)
-    except requests.exceptions.RequestException as req_err:
-        logger.error(f"[GET_PRICES_REQUEST_ERROR] Błąd żądania: {req_err}", exc_info=True)
     except Exception as e:
         logger.error(f"[GET_PRICES_UNEXPECTED_ERROR] Nieoczekiwany błąd: {e}", exc_info=True)
+        
     return {}
-
 # --- GŁÓWNA LOGIKA BOTA ---
 
 def check_for_new_setups(symbol: str):
