@@ -80,19 +80,30 @@ firebase-admin: Interacting with Cloud Firestore.
 requests: Making HTTP requests to Bybit API.
 python-dotenv: For local environment variable management (not used directly on App Engine).
 logging: Standard Python logging.
-📁 Repository Structure (Core Bot on App Engine):
+
+
 TRADING_BOT/
-├── app/
+├── .env                    # Local environment variables (in .gitignore)
+├── .gcloudignore             # Files to ignore for App Engine deployment
+├── .gitignore                # Files to ignore for Git
+├── app.yaml                  # App Engine configuration (incl. env variables)
+├── firebase_key.json         # (Potentially) Service account key for local Firebase access
+├── hello_main.py             # (Potentially) A simple test file, not part of the core app
+├── package.json              # Node.js dependencies manifest (if any JS tools are used)
+├── package-lock.json         # Node.js lock file
+├── README.md                 # This file
+├── requirements.txt          # Python dependencies
+│
+├── app/                      # Main application source code
 │   ├── __init__.py
-│   ├── main.py                 # Flask app, Gunicorn entrypoint, main coordinator
+│   ├── bot_logic.py          # Core trading decision logic, price fetching
+│   ├── constants.py            # Application constants, config loading
+│   ├── fetch_from_firestore.py # Logic for fetching alerts & managing timestamps
 │   ├── firebase_client.py      # Firebase Admin SDK initialization
-│   ├── constants.py            # Application constants, Firestore collection names
-│   ├── fetch_from_firestore.py # Logic to fetch alerts & manage last processed timestamp
-│   ├── state_manager.py        # In-memory alert cache & Firestore position CRUD operations
-│   ├── bot_logic.py            # Core trading decision logic, price fetching
-│   └── positions_logger.py     # Logging position lifecycle to Firestore
-├── app.yaml                    # App Engine configuration
-├── requirements.txt            # Python dependencies
-└── .gcloudignore               # Files to ignore for App Engine deployment
+│   ├── main.py                 # Flask app, Gunicorn entrypoint, main coordinator
+│   ├── positions_logger.py     # Logging position lifecycle to Firestore
+│   └── state_manager.py        # In-memory alert cache & strategy state management
+│
+└── node_modules/             # Node.js installed packages
 
 

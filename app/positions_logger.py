@@ -26,7 +26,7 @@ def get_firestore_server_timestamp_or_fallback():
         logger.warning("[POS_LOGGER_WARN] firebase_firestore_module (dla SERVER_TIMESTAMP) niedostępny, używam datetime.now(timezone.utc).")
         return datetime.now(timezone.utc)
 
-def log_new_position(symbol: str, direction: str, entry: float, stoploss: float, target: float, position_id: str):
+def log_new_position(symbol: str, direction: str, entry: float, stoploss: float, target: float, position_id: str, triggering_ob_timestamp: str):
     try:
         db = get_db() # Pobierz klienta Firestore na początku funkcji
     except Exception as e_db:
@@ -42,6 +42,7 @@ def log_new_position(symbol: str, direction: str, entry: float, stoploss: float,
         "take_profit": target,
         "status": "planned",
         "planned_at": get_firestore_server_timestamp_or_fallback(),
+        "triggering_ob_timestamp": triggering_ob_timestamp,
         "opened_at": None,
         "closed_at": None,
         "cancelled_at": None,
