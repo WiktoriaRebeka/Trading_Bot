@@ -174,3 +174,36 @@ def print_state_summary():
             if alerts_deque:
                 logger.debug(f"  -> {event_type} (ilość: {len(alerts_deque)}): Najnowszy = {alerts_deque[-1]}")
     logger.debug("---------------------------------")
+
+
+    # W app/state_manager.py
+
+# ... (na górze pliku, obok innych zmiennych globalnych)
+# Nowa struktura do śledzenia stanu strategii dla każdego symbolu
+strategy_state_store: Dict[str, Dict[str, Any]] = {}
+
+# ... (reszta pliku)
+
+# === NOWE FUNKCJE NA KOŃCU PLIKU ===
+
+def set_active_order_block(symbol: str, ob_data: dict):
+    """Ustawia nowy aktywny OrderBlock i resetuje jego stan."""
+    if symbol not in strategy_state_store:
+        strategy_state_store[symbol] = {}
+    strategy_state_store[symbol]['active_order_block'] = ob_data
+    strategy_state_store[symbol]['is_ob_mitigated'] = False
+    logger.info(f"[{symbol}] Ustawiono nowy aktywny OrderBlock: {ob_data}")
+
+def get_active_order_block(symbol: str) -> Optional[dict]:
+    """Pobiera aktualnie śledzony OrderBlock."""
+    return strategy_state_store.get(symbol, {}).get('active_order_block')
+
+def is_ob_mitigated(symbol: str) -> bool:
+    """Sprawdza, czy aktywny OB został już zmitigowany."""
+    return strategy_state_store.get(symbol, {}).get('is_ob_mitigated', True) # Domyślnie True, jeśli nie ma stanu
+
+def set_ob_as_mitigated(symbol: str):
+    """Oznacza aktywny OrderBlock jako zmitigowany/zużyty."""
+    if symbol in strategy_state_store:
+        strategy_state_store[symbol]['is_ob_mitigated'] = True
+        logger.info(f"[{symbol}] Aktywny OrderBlock został oznaczony jako zmitigowany.")

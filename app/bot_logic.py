@@ -25,26 +25,23 @@ from .constants import (
 logger = logging.getLogger(__name__)
 
 # --- FUNKCJA POMOCNICZA DO PARSOWANIA TIMESTAMPÓW ---
-# Musi być zdefiniowana na poziomie modułu, aby inne funkcje mogły jej używać.
 def parse_timestamp(ts_value):
     if isinstance(ts_value, datetime):
-        # Jeśli to już jest obiekt datetime, upewnij się, że ma strefę czasową UTC
         return ts_value.astimezone(timezone.utc) if ts_value.tzinfo else ts_value.replace(tzinfo=timezone.utc)
     elif isinstance(ts_value, str):
-        # Jeśli to string, sparsuj go
         return datetime.fromisoformat(ts_value.replace("Z", "+00:00")).replace(tzinfo=timezone.utc)
     raise TypeError(f"Nieobsługiwany typ dla timestamp: {type(ts_value)}")
 
-
-# --- FUNKCJE API I LOGIKI BOTA ---
+# --- GŁÓWNE FUNKCJE LOGIKI BOTA ---
 
 def get_all_prices_for_category(category: str = BYBIT_DEFAULT_CATEGORY) -> Dict[str, float]:
     """Pobiera ceny dla wszystkich symboli, używając kluczy API do autoryzacji."""
-    # Ta funkcja jest już poprawna, zostawiamy ją bez zmian
     logger.info(f"[GET_PRICES] Rozpoczynam pobieranie cen z autoryzacją dla kategorii: {category}")
+    
     if not BYBIT_API_KEY or not BYBIT_API_SECRET:
         logger.error("[GET_PRICES] Klucze API Bybit nie są skonfigurowane!")
         return {}
+
     timestamp = str(int(time.time() * 1000))
     recv_window = "10000"
     params = {"category": category}
@@ -55,14 +52,15 @@ def get_all_prices_for_category(category: str = BYBIT_DEFAULT_CATEGORY) -> Dict[
         'X-BAPI-API-KEY': BYBIT_API_KEY, 'X-BAPI-TIMESTAMP': timestamp,
         'X-BAPI-RECV-WINDOW': recv_window, 'X-BAPI-SIGN': signature,
     }
-    logger.debug(f"[GET_PRICES_AUTH] Wysyłane nagłówki (bez klucza): Timestamp={timestamp}, RecvWindow={recv_window}, Sign={signature}")
+    
     all_prices = {}
     try:
         url = f"{BYBIT_API_URL_V5_TICKERS}?{query_string}"
         response = requests.get(url, headers=headers, timeout=15)
-        logger.info(f"[GET_PRICES_RESPONSE] Status: {response.status_code}, Odpowiedź: {response.text[:500]}")
+        logger.info(f"[GET_PRICES_RESPONSE] Status: {response.status_code}, Odpowiedź (fragment): {response.text[:500]}")
         response.raise_for_status()
         data = response.json()
+        
         if data.get("retCode") == 0:
             if data.get("result") and data["result"].get("list"):
                 for ticker in data["result"]["list"]:
@@ -84,88 +82,101 @@ def get_all_prices_for_category(category: str = BYBIT_DEFAULT_CATEGORY) -> Dict[
         logger.error(f"[GET_PRICES_UNEXPECTED_ERROR] Nieoczekiwany błąd: {e}", exc_info=True)
     return {}
 
-def check_for_new_setups(symbol: str):
-    """Sprawdza, czy najnowsze alerty tworzą prawidłowy, nowy setup do zaplanowania (ULEPSZONA LOGIKA)."""
-    logger.info(f"--- [{symbol}] Rozpoczynam check_for_new_setups (v3) ---")
-    ob_alerts = state_manager.get_last_orderblocks(symbol)
-    if not ob_alerts:
-        logger.debug(f"[{symbol}] Brak alertów OrderBlock w pamięci. Kończę.")
-        return
-
-    last_ob = ob_alerts[-1]
-    try:
-        direction = last_ob.get("direction", "").lower()
-        if not direction:
-            logger.warning(f"[{symbol}] Najnowszy OB nie ma kierunku. Alert: {last_ob}")
-            return
-
-        heatmap_event_type = "TOP_GREEN_CHANGE" if direction == "long" else "BOTTOM_RED_CHANGE"
-        heatmap_alerts = state_manager.get_last_heatmap(symbol, heatmap_event_type)
-        if not heatmap_alerts:
-            logger.debug(f"[{symbol}] Brak alertów Heatmap typu '{heatmap_event_type}' do sparowania z najnowszym OB.")
-            return
-
-        ob_ts = parse_timestamp(last_ob["timestamp"])
-        
-        best_matching_heatmap = None
-        min_time_diff = float('inf')
-        for heatmap in heatmap_alerts:
-            heatmap_ts = parse_timestamp(heatmap["timestamp"])
-            time_diff = abs((ob_ts - heatmap_ts).total_seconds())
-            if time_diff <= MAX_ALERT_AGE_SECONDS and time_diff < min_time_diff:
-                min_time_diff = time_diff
-                best_matching_heatmap = heatmap
-
-        if not best_matching_heatmap:
-            logger.info(f"[{symbol}] Setup odrzucony: Nie znaleziono heatmapy w oknie {MAX_ALERT_AGE_SECONDS}s dla najnowszego OB.")
-            return
-            
-        logger.debug(f"[{symbol}] Znaleziono najlepszą parę! Różnica: {min_time_diff:.0f}s")
-        
-        ob_entry = float(last_ob["entry"])
-        ob_sl = float(last_ob["sl"])
-        heatmap_value = float(best_matching_heatmap["value"])
-        
-        logger.info(f"[{symbol}][CONDITION_CHECK] Sprawdzam: DIR={direction}, SL={ob_sl}, HEATMAP={heatmap_value}, ENTRY={ob_entry}")
-
-        condition_met = False
-        if direction == "long" and ob_sl < heatmap_value < ob_entry:
-            condition_met = True
-        elif direction == "short" and ob_entry < heatmap_value < ob_sl:
-            condition_met = True
-
-        logger.info(f"[{symbol}][CONDITION_RESULT] Wynik: {condition_met}")
-
-        if not condition_met:
-            return
-
-        triggering_ob_timestamp_str = last_ob["timestamp"] if isinstance(last_ob["timestamp"], str) else last_ob["timestamp"].isoformat()
-        position_id = state_manager.generate_position_id(symbol, direction, ob_entry, triggering_ob_timestamp_str)
-        
-        if any(p.get("position_id") == position_id for p in state_manager.get_all_planned_for_symbol(symbol)):
-             logger.info(f"[{symbol}] Setup odrzucony: pozycja o ID {position_id} już istnieje.")
-             return
-
-        ob_tp = float(last_ob["tp"])
-        ob_level_low = float(last_ob["levelLow"])
-        ob_level_high = float(last_ob["levelHigh"])
-        
-        position_details = {
-            "position_id": position_id, "symbol": symbol, "direction": direction,
-            "entry_price": ob_entry, "stop_loss": ob_sl, "take_profit": ob_tp, "status": "planned", 
-            "planned_at": firestore.SERVER_TIMESTAMP, "triggering_ob_timestamp": triggering_ob_timestamp_str,
-            "triggering_ob_level_low": ob_level_low, "triggering_ob_level_high": ob_level_high,
-            "triggering_heatmap_value_at_planning": heatmap_value
-        }
-        state_manager.add_planned_position(position_details) 
-        log_new_position(symbol, direction, ob_entry, ob_sl, ob_tp, position_id) 
-        logger.info(f"[✅ PLAN] {symbol} | Entry: {ob_entry} | SL: {ob_sl} | TP: {ob_tp} | Heatmap: {heatmap_value}")
-
-    except (KeyError, ValueError, TypeError) as e:
-        logger.error(f"[{symbol}][PLAN_ERROR] Błąd: {e}. OB: {last_ob}", exc_info=True)
+def process_new_alerts(newly_fetched_alerts: List[Dict]):
+    """Przetwarza nowe alerty, aktualizując stan strategii."""
+    logger.debug(f"Przetwarzam {len(newly_fetched_alerts)} nowych alertów w logice bota.")
+    alerts_sorted = sorted(newly_fetched_alerts, key=lambda x: 0 if x.get('type') == 'OrderBlock' else 1)
     
-    logger.info(f"--- [{symbol}] Zakończono check_for_new_setups ---")
+    for alert in alerts_sorted:
+        symbol = alert.get("symbol")
+        if not symbol:
+            continue
+            
+        if alert.get("type") == "OrderBlock":
+            active_ob = state_manager.get_active_order_block(symbol)
+            if active_ob and active_ob.get("timestamp") != alert.get("timestamp"):
+                planned_positions = state_manager.get_all_planned_for_symbol(symbol)
+                for pos in planned_positions:
+                    if pos.get("triggering_ob_timestamp") == active_ob.get("timestamp"):
+                        logger.info(f"[{symbol}] Nowy OB unieważnia starą planowaną pozycję: {pos.get('position_id')}. Anulowanie.")
+                        db = get_db()
+                        transaction = db.transaction()
+                        if state_manager.remove_position_transactional(transaction, state_manager.PLANNED_POSITIONS_COLLECTION, pos.get('position_id')):
+                            update_position_status(pos.get('position_id'), "cancelled", result_reason="New opposing OB")
+            
+            state_manager.set_active_order_block(symbol, alert)
+        
+        state_manager.process_alert(alert)
 
+def run_strategy_cycle(all_active_symbols: List[str], all_prices: Dict[str, float]):
+    """Główna pętla strategii, wywoływana w każdym cyklu bota."""
+    logger.info("--- Rozpoczynam cykl strategii dla aktywnych symboli ---")
+    
+    for symbol in all_active_symbols:
+        active_ob = state_manager.get_active_order_block(symbol)
+        if not active_ob:
+            logger.debug(f"[{symbol}] Brak aktywnego OB do analizy. Pomijam.")
+            continue
+
+        if state_manager.is_ob_mitigated(symbol):
+            logger.debug(f"[{symbol}] Aktywny OB jest już zmitigowany. Pomijam.")
+            continue
+
+        current_price = all_prices.get(symbol.replace(".P", ""))
+        if current_price is None:
+            logger.warning(f"[{symbol}] Brak ceny rynkowej. Pomijam.")
+            continue
+
+        try:
+            direction = active_ob.get("direction", "").lower()
+            ob_level_low = float(active_ob["levelLow"])
+            ob_level_high = float(active_ob["levelHigh"])
+            entry_price = float(active_ob["entry"])
+            ob_sl_price = float(active_ob["sl"])
+            
+            # WARUNEK 1: MITIGACJA PRZEZ CENĘ
+            is_mitigated_by_price = False
+            if direction == "long" and current_price <= ob_level_high:
+                is_mitigated_by_price = True
+            elif direction == "short" and current_price >= ob_level_low:
+                is_mitigated_by_price = True
+
+            if is_mitigated_by_price:
+                state_manager.set_ob_as_mitigated(symbol)
+                logger.info(f"[{symbol}] Aktywny OB zmitigowany przez cenę rynkową. Staje się nieaktywny.")
+                continue
+
+            # WARUNEK 2: PLANOWANIE (jeśli nie zmitigowano)
+            heatmap_event_type = "TOP_GREEN_CHANGE" if direction == "long" else "BOTTOM_RED_CHANGE"
+            heatmap_alerts = state_manager.get_last_heatmap(symbol, heatmap_event_type)
+            if not heatmap_alerts:
+                continue
+
+            last_heatmap = heatmap_alerts[-1]
+            heatmap_value = float(last_heatmap["value"])
+            
+            is_in_zone = (ob_sl_price < heatmap_value < entry_price) if direction == "long" else (entry_price < heatmap_value < ob_sl_price)
+            
+            if is_in_zone:
+                triggering_ob_timestamp_str = active_ob["timestamp"] if isinstance(active_ob["timestamp"], str) else active_ob["timestamp"].isoformat()
+                position_id = state_manager.generate_position_id(symbol, direction, entry_price, triggering_ob_timestamp_str)
+                is_already_planned = any(p.get("position_id") == position_id for p in state_manager.get_all_planned_for_symbol(symbol))
+
+                if not is_already_planned:
+                    logger.info(f"[✅ PLAN] {symbol} | Warunki spełnione. Planowanie pozycji.")
+                    position_details = {
+                        "position_id": position_id, "symbol": symbol, "direction": direction,
+                        "entry_price": entry_price, "stop_loss": ob_sl_price, "take_profit": float(active_ob["tp"]), "status": "planned", 
+                        "planned_at": firestore.SERVER_TIMESTAMP, "triggering_ob_timestamp": triggering_ob_timestamp_str,
+                        "triggering_ob_level_low": ob_level_low, "triggering_ob_level_high": ob_level_high,
+                        "triggering_heatmap_value_at_planning": heatmap_value
+                    }
+                    state_manager.add_planned_position(position_details)
+                    log_new_position(symbol, direction, entry_price, ob_sl_price, float(active_ob["tp"]), position_id)
+        
+        except (KeyError, ValueError, TypeError) as e:
+            logger.error(f"[{symbol}] Błąd w cyklu strategii: {e}", exc_info=True)
+            
 def monitor_positions(all_prices: Dict[str, float]):
     logger.info(f"--- Rozpoczynam monitor_positions ---")
     all_symbols_with_positions = state_manager.get_all_position_symbols()
