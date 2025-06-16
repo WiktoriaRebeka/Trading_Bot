@@ -24,55 +24,45 @@ from .constants import (
 
 logger = logging.getLogger(__name__)
 
-# --- FUNKCJE POMOCNICZE ---
+# --- FUNKCJA POMOCNICZA DO PARSOWANIA TIMESTAMPÓW ---
+# Musi być zdefiniowana na poziomie modułu, aby inne funkcje mogły jej używać.
+def parse_timestamp(ts_value):
+    if isinstance(ts_value, datetime):
+        # Jeśli to już jest obiekt datetime, upewnij się, że ma strefę czasową UTC
+        return ts_value.astimezone(timezone.utc) if ts_value.tzinfo else ts_value.replace(tzinfo=timezone.utc)
+    elif isinstance(ts_value, str):
+        # Jeśli to string, sparsuj go
+        return datetime.fromisoformat(ts_value.replace("Z", "+00:00")).replace(tzinfo=timezone.utc)
+    raise TypeError(f"Nieobsługiwany typ dla timestamp: {type(ts_value)}")
+
+
+# --- FUNKCJE API I LOGIKI BOTA ---
 
 def get_all_prices_for_category(category: str = BYBIT_DEFAULT_CATEGORY) -> Dict[str, float]:
     """Pobiera ceny dla wszystkich symboli, używając kluczy API do autoryzacji."""
+    # Ta funkcja jest już poprawna, zostawiamy ją bez zmian
     logger.info(f"[GET_PRICES] Rozpoczynam pobieranie cen z autoryzacją dla kategorii: {category}")
-    
     if not BYBIT_API_KEY or not BYBIT_API_SECRET:
         logger.error("[GET_PRICES] Klucze API Bybit nie są skonfigurowane!")
         return {}
-
-    # 1. Ustawienia
     timestamp = str(int(time.time() * 1000))
     recv_window = "10000"
     params = {"category": category}
-    
-    # 2. Tworzenie query string
     query_string = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
-    
-    # 3. Tworzenie stringa do podpisania
     sign_str = timestamp + BYBIT_API_KEY + recv_window + query_string
-
-    # 4. Generowanie podpisu
-    signature = hmac.new(
-        bytes(BYBIT_API_SECRET, "utf-8"),
-        bytes(sign_str, "utf-8"),
-        hashlib.sha256
-    ).hexdigest()
-
-    # 5. Przygotowanie nagłówków
+    signature = hmac.new(bytes(BYBIT_API_SECRET, "utf-8"), bytes(sign_str, "utf-8"), hashlib.sha256).hexdigest()
     headers = {
-        'X-BAPI-API-KEY': BYBIT_API_KEY,
-        'X-BAPI-TIMESTAMP': timestamp,
-        'X-BAPI-RECV-WINDOW': recv_window,
-        'X-BAPI-SIGN': signature,
+        'X-BAPI-API-KEY': BYBIT_API_KEY, 'X-BAPI-TIMESTAMP': timestamp,
+        'X-BAPI-RECV-WINDOW': recv_window, 'X-BAPI-SIGN': signature,
     }
-    
     logger.debug(f"[GET_PRICES_AUTH] Wysyłane nagłówki (bez klucza): Timestamp={timestamp}, RecvWindow={recv_window}, Sign={signature}")
-    
-    # 6. Wykonanie zapytania
     all_prices = {}
     try:
         url = f"{BYBIT_API_URL_V5_TICKERS}?{query_string}"
         response = requests.get(url, headers=headers, timeout=15)
-        
         logger.info(f"[GET_PRICES_RESPONSE] Status: {response.status_code}, Odpowiedź: {response.text[:500]}")
-
         response.raise_for_status()
         data = response.json()
-        
         if data.get("retCode") == 0:
             if data.get("result") and data["result"].get("list"):
                 for ticker in data["result"]["list"]:
@@ -88,89 +78,73 @@ def get_all_prices_for_category(category: str = BYBIT_DEFAULT_CATEGORY) -> Dict[
         else:
             logger.error(f"[GET_PRICES_API_ERROR] Błąd API Bybit: Code={data.get('retCode')}, Msg='{data.get('retMsg')}'")
             return {}
-            
     except requests.exceptions.HTTPError as http_err:
         logger.error(f"[GET_PRICES_HTTP_ERROR] Błąd HTTP: {http_err}.")
     except Exception as e:
         logger.error(f"[GET_PRICES_UNEXPECTED_ERROR] Nieoczekiwany błąd: {e}", exc_info=True)
-        
     return {}
 
-# --- GŁÓWNA LOGIKA BOTA ---
-
 def check_for_new_setups(symbol: str):
-    """Sprawdza, czy najnowsze alerty tworzą prawidłowy, nowy setup do zaplanowania."""
-    logger.info(f"--- [{symbol}] Rozpoczynam check_for_new_setups ---")
-    last_ob_alert_q = state_manager.get_last_orderblocks(symbol)
-    if not last_ob_alert_q:
+    """Sprawdza, czy najnowsze alerty tworzą prawidłowy, nowy setup do zaplanowania (ULEPSZONA LOGIKA)."""
+    logger.info(f"--- [{symbol}] Rozpoczynam check_for_new_setups (v3) ---")
+    ob_alerts = state_manager.get_last_orderblocks(symbol)
+    if not ob_alerts:
         logger.debug(f"[{symbol}] Brak alertów OrderBlock w pamięci. Kończę.")
         return
-    last_ob = last_ob_alert_q[-1]
-    
-    direction = last_ob.get("direction", "").lower()
-    if not direction:
-        logger.warning(f"[{symbol}] Brak 'direction' w alercie OrderBlock: {last_ob}. Kończę.")
-        return
 
-    heatmap_event_type = "TOP_GREEN_CHANGE" if direction == "long" else "BOTTOM_RED_CHANGE"
-    last_heatmap_alert_q = state_manager.get_last_heatmap(symbol, heatmap_event_type)
-    if not last_heatmap_alert_q:
-        logger.debug(f"[{symbol}] Brak pasujących alertów Heatmap typu '{heatmap_event_type}'. Kończę.")
-        return
-    last_heatmap = last_heatmap_alert_q[-1]
-
+    last_ob = ob_alerts[-1]
     try:
-        ob_ts_value = last_ob.get("timestamp")
-        heatmap_ts_value = last_heatmap.get("timestamp")
-        
-        if not ob_ts_value or not heatmap_ts_value:
-             logger.warning(f"[{symbol}] Brak pola 'timestamp' w jednym z alertów. Kończę.")
-             return
-
-        def parse_timestamp(ts_value):
-            if isinstance(ts_value, datetime):
-                return ts_value.astimezone(timezone.utc) if ts_value.tzinfo else ts_value.replace(tzinfo=timezone.utc)
-            elif isinstance(ts_value, str):
-                return datetime.fromisoformat(ts_value.replace("Z", "+00:00")).replace(tzinfo=timezone.utc)
-            raise TypeError(f"Nieobsługiwany typ dla timestamp: {type(ts_value)}")
-
-        ob_ts = parse_timestamp(ob_ts_value)
-        heatmap_ts = parse_timestamp(heatmap_ts_value)
-        
-        triggering_ob_timestamp_str = ob_ts_value if isinstance(ob_ts_value, str) else ob_ts_value.isoformat()
-        
-        time_diff_seconds = abs((ob_ts - heatmap_ts).total_seconds())
-        if time_diff_seconds > MAX_ALERT_AGE_SECONDS:
-            logger.info(f"[{symbol}] Setup odrzucony: alerty zbyt odległe w czasie ({time_diff_seconds:.0f}s > {MAX_ALERT_AGE_SECONDS}s).")
+        direction = last_ob.get("direction", "").lower()
+        if not direction:
+            logger.warning(f"[{symbol}] Najnowszy OB nie ma kierunku. Alert: {last_ob}")
             return
+
+        heatmap_event_type = "TOP_GREEN_CHANGE" if direction == "long" else "BOTTOM_RED_CHANGE"
+        heatmap_alerts = state_manager.get_last_heatmap(symbol, heatmap_event_type)
+        if not heatmap_alerts:
+            logger.debug(f"[{symbol}] Brak alertów Heatmap typu '{heatmap_event_type}' do sparowania z najnowszym OB.")
+            return
+
+        ob_ts = parse_timestamp(last_ob["timestamp"])
+        
+        best_matching_heatmap = None
+        min_time_diff = float('inf')
+        for heatmap in heatmap_alerts:
+            heatmap_ts = parse_timestamp(heatmap["timestamp"])
+            time_diff = abs((ob_ts - heatmap_ts).total_seconds())
+            if time_diff <= MAX_ALERT_AGE_SECONDS and time_diff < min_time_diff:
+                min_time_diff = time_diff
+                best_matching_heatmap = heatmap
+
+        if not best_matching_heatmap:
+            logger.info(f"[{symbol}] Setup odrzucony: Nie znaleziono heatmapy w oknie {MAX_ALERT_AGE_SECONDS}s dla najnowszego OB.")
+            return
+            
+        logger.debug(f"[{symbol}] Znaleziono najlepszą parę! Różnica: {min_time_diff:.0f}s")
         
         ob_entry = float(last_ob["entry"])
         ob_sl = float(last_ob["sl"])
-        heatmap_value = float(last_heatmap["value"])
-
+        heatmap_value = float(best_matching_heatmap["value"])
+        
         logger.info(f"[{symbol}][CONDITION_CHECK] Sprawdzam: DIR={direction}, SL={ob_sl}, HEATMAP={heatmap_value}, ENTRY={ob_entry}")
 
         condition_met = False
-        if direction == "long":
-            if ob_sl < heatmap_value and heatmap_value < ob_entry:
-                condition_met = True
-        elif direction == "short":
-            if ob_entry < heatmap_value and heatmap_value < ob_sl:
-                condition_met = True
+        if direction == "long" and ob_sl < heatmap_value < ob_entry:
+            condition_met = True
+        elif direction == "short" and ob_entry < heatmap_value < ob_sl:
+            condition_met = True
 
         logger.info(f"[{symbol}][CONDITION_RESULT] Wynik: {condition_met}")
 
         if not condition_met:
-            logger.info(f"[{symbol}] Setup odrzucony: warunek ceny nie został spełniony.")
             return
 
+        triggering_ob_timestamp_str = last_ob["timestamp"] if isinstance(last_ob["timestamp"], str) else last_ob["timestamp"].isoformat()
         position_id = state_manager.generate_position_id(symbol, direction, ob_entry, triggering_ob_timestamp_str)
         
-        planned_positions_for_symbol = state_manager.get_all_planned_for_symbol(symbol)
-        for planned_pos in planned_positions_for_symbol:
-            if planned_pos.get("triggering_ob_timestamp") == triggering_ob_timestamp_str:
-                logger.info(f"[{symbol}] Setup odrzucony: pozycja oparta o ten sam OB już istnieje: {planned_pos.get('position_id')}.")
-                return
+        if any(p.get("position_id") == position_id for p in state_manager.get_all_planned_for_symbol(symbol)):
+             logger.info(f"[{symbol}] Setup odrzucony: pozycja o ID {position_id} już istnieje.")
+             return
 
         ob_tp = float(last_ob["tp"])
         ob_level_low = float(last_ob["levelLow"])
@@ -178,12 +152,9 @@ def check_for_new_setups(symbol: str):
         
         position_details = {
             "position_id": position_id, "symbol": symbol, "direction": direction,
-            "entry_price": ob_entry, "stop_loss": ob_sl, "take_profit": ob_tp,
-            "status": "planned", 
-            "planned_at": firestore.SERVER_TIMESTAMP,
-            "triggering_ob_timestamp": triggering_ob_timestamp_str,
-            "triggering_ob_level_low": ob_level_low,
-            "triggering_ob_level_high": ob_level_high,
+            "entry_price": ob_entry, "stop_loss": ob_sl, "take_profit": ob_tp, "status": "planned", 
+            "planned_at": firestore.SERVER_TIMESTAMP, "triggering_ob_timestamp": triggering_ob_timestamp_str,
+            "triggering_ob_level_low": ob_level_low, "triggering_ob_level_high": ob_level_high,
             "triggering_heatmap_value_at_planning": heatmap_value
         }
         state_manager.add_planned_position(position_details) 
@@ -191,10 +162,9 @@ def check_for_new_setups(symbol: str):
         logger.info(f"[✅ PLAN] {symbol} | Entry: {ob_entry} | SL: {ob_sl} | TP: {ob_tp} | Heatmap: {heatmap_value}")
 
     except (KeyError, ValueError, TypeError) as e:
-        logger.error(f"[{symbol}][PLAN_ERROR] Błąd: {e}. OB: {last_ob}, Heatmap: {last_heatmap}", exc_info=True)
+        logger.error(f"[{symbol}][PLAN_ERROR] Błąd: {e}. OB: {last_ob}", exc_info=True)
     
     logger.info(f"--- [{symbol}] Zakończono check_for_new_setups ---")
-
 
 def monitor_positions(all_prices: Dict[str, float]):
     logger.info(f"--- Rozpoczynam monitor_positions ---")
