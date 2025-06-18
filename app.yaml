@@ -16,3 +16,9 @@ env_variables:
   
   BYBIT_API_KEY: "sz3y2CfXOuAVIcQpsI"
   BYBIT_API_SECRET: "jyuJkCm0aDfdNWG5XL9xmoRV5O5TOjbZ0hfl"
+
+
+    # --- ZAKTUALIZOWANA KONFIGURACJA ---
+  GCP_PROJECT_ID: "trading-bot-463318" # <-- WSTAW TUTAJ NOWE ID PROJEKTU
+  BIGQUERY_DATASET_ID: "trading_analytics"
+  BIGQUERY_TABLE_ID: "trades_order_block"
