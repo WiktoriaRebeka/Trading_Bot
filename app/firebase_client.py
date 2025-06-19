@@ -12,36 +12,32 @@ def initialize_firebase():
         try:
             logger.info("Inicjalizacja Firebase Admin SDK dla App Engine...")
             
-            # W środowisku Google Cloud nie potrzebujemy pliku z kluczem,
-            # uprawnienia są dziedziczone z konta usługi App Engine.
-            # Musimy jednak jawnie podać ID projektu, aby uniknąć niejasności.
             project_id = os.getenv('GCP_PROJECT_ID')
             if not project_id:
                 raise ValueError("Zmienna środowiskowa GCP_PROJECT_ID nie jest ustawiona w app.yaml.")
 
+            # W środowisku GAE, wystarczy podać ID projektu.
+            # SDK automatycznie użyje domyślnych uprawnień.
             firebase_admin.initialize_app(options={
                 'projectId': project_id
             })
             
-            # Tworzymy klienta, wskazując na konkretną, nazwaną bazę danych.
-            # Jeśli byśmy tego nie zrobili, próbowałby się połączyć z nieistniejącą bazą '(default)'.
-            db_client = firestore.client(database="trading-bot-data")
+            # Klient połączy się z jedyną dostępną bazą w tym projekcie.
+            db_client = firestore.client()
             
-            logger.info(f"Inicjalizacja Firebase i połączenie z bazą 'trading-bot-data' w projekcie '{project_id}' zakończone sukcesem.")
+            logger.info(f"Inicjalizacja Firebase w projekcie '{project_id}' zakończona sukcesem.")
             return True
             
         except Exception as e:
             logger.error(f"Krytyczny błąd inicjalizacji Firebase: {e}", exc_info=True)
             return False
     else:
-        # Jeśli już zainicjowano, upewnij się, że klient jest ustawiony
         if not db_client:
-            db_client = firestore.client(database="trading-bot-data")
+            db_client = firestore.client()
         logger.info("Firebase Admin SDK już zainicjowane.")
         return True
 
 def get_db():
     if db_client is None:
-        # Ten błąd może się pojawić, jeśli initialize_firebase() nie powiodło się
         raise Exception("Klient Firestore nie został zainicjowany. Wywołaj initialize_firebase() najpierw.")
     return db_client
