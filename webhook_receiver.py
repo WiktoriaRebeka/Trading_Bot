@@ -38,7 +38,7 @@ try:
     })
     
     # Klient Firestore połączy się z jedyną dostępną bazą w projekcie, czyli 'trading-bot-data'
-    db = firestore.client()
+    db = firestore.client(database="trading-bot-data") 
     logger.info(f"Inicjalizacja Firebase dla webhooka zakończona sukcesem. Projekt: {project_id}")
 
 except Exception as e:
