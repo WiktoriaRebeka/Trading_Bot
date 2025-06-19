@@ -24,7 +24,7 @@ try:
     # Ścieżka jest zdefiniowana w zmiennej środowiskowej GOOGLE_APPLICATION_CREDENTIALS
     cred = credentials.Certificate(os.environ.get('GOOGLE_APPLICATION_CREDENTIALS'))
     firebase_admin.initialize_app(cred)
-    db = firestore.client()
+    db = firestore.client(database="trading-bot-data")
     logger.info("Inicjalizacja Firebase dla webhooka zakończona sukcesem.")
 except Exception as e:
     logger.error(f"KRYTYCZNY BŁĄD inicjalizacji Firebase: {e}", exc_info=True)
