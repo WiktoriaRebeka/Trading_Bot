@@ -1,5 +1,3 @@
-# TRADING_BOT/app/bot_logic.py (FINALNA WERSJA)
-
 import logging
 import requests
 from typing import Dict
@@ -9,10 +7,9 @@ from .constants import BYBIT_API_URL_V5_TICKERS, BYBIT_DEFAULT_CATEGORY
 
 logger = logging.getLogger(__name__)
 
-# Ta funkcja pozostaje bez zmian, ale usuwamy z niej odwołania do kluczy API,
-# ponieważ na razie nie rozwiązaliśmy problemu 403.
+# Funkcja get_all_prices_for_category pozostaje bez zmian...
 def get_all_prices_for_category(category: str = BYBIT_DEFAULT_CATEGORY) -> Dict[str, float]:
-    """Pobiera ceny dla wszystkich symboli."""
+    # ... (cała funkcja bez zmian) ...
     logger.info(f"[GET_PRICES] Rozpoczynam pobieranie cen dla kategorii: {category}")
     params = {"category": category}
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
@@ -51,10 +48,17 @@ def run_trading_logic(all_prices: Dict[str, float]):
         setup = state_manager.get_active_setup(symbol)
         if not setup:
             continue
+        
+        # --- ZMIANA 1: Poprawione pobieranie nazwy symbolu dla API ---
+        # Usuwamy ".P", ale też sprawdzamy, czy symbol już go nie ma.
+        api_symbol = symbol.replace('.P', '')
+        current_price = all_prices.get(api_symbol)
 
-        current_price = all_prices.get(symbol.replace(".P", ""))
+        # --- DODANE LOGOWANIE: Sprawdzamy, czy mamy cenę ---
+        logger.info(f"[{symbol}] Sprawdzam. Symbol dla API: '{api_symbol}'. Znaleziona cena: {current_price}")
+
         if current_price is None:
-            logger.warning(f"[{symbol}] Brak aktualnej ceny. Pomijam cykl dla tego symbolu.")
+            logger.warning(f"[{symbol}] Brak aktualnej ceny w danych z API. Pomijam cykl dla tego symbolu.")
             continue
         
         ob_data = setup['ob_data']
@@ -73,7 +77,7 @@ def run_trading_logic(all_prices: Dict[str, float]):
 
         try:
             if is_position_open:
-                # --- LOGIKA ZARZĄDZANIA OTWARTĄ POZYCJĄ ---
+                # --- LOGIKA ZARZĄDZANIA OTWARTĄ POZYCJĄ (bez zmian) ---
                 ob_type = "New OB" if is_new_ob else "Old OB"
                 closed_result = None
                 if direction == 'long' and current_price >= tp: closed_result = "WIN"
@@ -88,20 +92,35 @@ def run_trading_logic(all_prices: Dict[str, float]):
                     if is_new_ob:
                         state_manager.mark_setup_as_old(symbol)
             else:
-                # --- LOGIKA WEJŚCIA W POZYCJĘ ---
+                # --- LOGIKA WEJŚCIA W POZYCJĘ (z nowym, szczegółowym logowaniem) ---
                 should_open = False
+                logger.info(f"[{symbol}] Analiza wejścia. Pozycja nie jest otwarta. Kierunek: {direction.upper()}. Cena wejścia (entry): {entry}. Aktualna cena: {current_price}. Ostatnia znana cena: {last_price}")
+
                 if direction == 'long':
-                    if (last_price is not None and last_price > entry and current_price <= entry) or (last_price is None and current_price <= entry):
+                    # Warunek 1: Cena przeszła z góry na dół przez poziom wejścia
+                    condition1_met = (last_price is not None and last_price > entry and current_price <= entry)
+                    # Warunek 2: Pierwsze sprawdzenie (brak ostatniej ceny) i cena jest już poniżej wejścia
+                    condition2_met = (last_price is None and current_price <= entry)
+                    logger.info(f"[{symbol}] [LONG] Sprawdzanie warunków: Przekroczenie z góry ({condition1_met}), Pierwsze sprawdzenie ({condition2_met})")
+                    if condition1_met or condition2_met:
                         should_open = True
+                
                 elif direction == 'short':
-                    if (last_price is not None and last_price < entry and current_price >= entry) or (last_price is None and current_price >= entry):
+                    # Warunek 1: Cena przeszła z dołu na górę przez poziom wejścia
+                    condition1_met = (last_price is not None and last_price < entry and current_price >= entry)
+                    # Warunek 2: Pierwsze sprawdzenie (brak ostatniej ceny) i cena jest już powyżej wejścia
+                    condition2_met = (last_price is None and current_price >= entry)
+                    logger.info(f"[{symbol}] [SHORT] Sprawdzanie warunków: Przekroczenie z dołu ({condition1_met}), Pierwsze sprawdzenie ({condition2_met})")
+                    if condition1_met or condition2_met:
                         should_open = True
                     
                 if should_open:
                     ob_type = "New OB" if is_new_ob else "Old OB"
-                    logger.info(f"--- [WEJŚCIE] --- [{symbol}] | {ob_type} | Cena: {current_price}")
+                    logger.info(f"--- [DECYZJA: WEJŚCIE] --- [{symbol}] | {ob_type} | Cena: {current_price}")
                     log_position_event(symbol, direction, "opened", ob_type, current_price)
                     state_manager.set_position_status(symbol, is_open=True)
+                else:
+                    logger.info(f"[{symbol}] DECYZJA: Brak wejścia w tym cyklu.")
 
         finally:
             # Zawsze aktualizuj ostatnią znaną cenę na koniec cyklu dla tego symbolu
