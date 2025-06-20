@@ -1,13 +1,11 @@
-# TRADING_BOT/app/positions_logger.py (NOWA WERSJA)
-
 from datetime import datetime, timezone
 from typing import Optional, Literal
 import logging
 from .firebase_client import get_db
-from firebase_admin import firestore as firebase_firestore_module
+# Importujemy SERVER_TIMESTAMP z nowej biblioteki
+from google.cloud.firestore_v1.base_query import SERVER_TIMESTAMP
 
 logger = logging.getLogger(__name__)
-# Nowa, czysta kolekcja dla nowej strategii
 POSITIONS_COLLECTION_FIRESTORE = "trading_positions_ob_only"
 
 PositionStatus = Literal["opened", "closed"]
@@ -32,7 +30,7 @@ def log_position_event(
     doc_ref = db.collection(POSITIONS_COLLECTION_FIRESTORE).document(doc_id)
 
     log_data = {
-        "timestamp": firebase_firestore_module.SERVER_TIMESTAMP,
+        "timestamp": SERVER_TIMESTAMP, # Używamy poprawnego importu
         "symbol": symbol,
         "direction": direction,
         "status": status,
