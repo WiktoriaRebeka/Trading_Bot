@@ -1,11 +1,9 @@
 from google.cloud import firestore
 
-# Bezpośrednia inicjalizacja klienta Firestore
-# W środowisku Google Cloud to wystarczy - automatycznie użyje
-# uprawnień konta usługi i zlokalizuje projekt.
 try:
+    # Ten parametr jest kluczowy dla Twojej nazwanej bazy danych
     db = firestore.Client(database="trading-bot-data")
-    # Testowe zapytanie, aby sprawdzić połączenie przy starcie funkcji
+    # Testowe zapytanie sprawdzające połączenie przy starcie
     db.collection('_test_connection_').limit(1).get()
     print(f"INFO: Pomyślnie zainicjowano klienta dla bazy 'trading-bot-data'.")
 except Exception as e:
@@ -28,10 +26,7 @@ def firestore_webhook_receiver(request):
             return ("Nieprawidłowe żądanie: Pusty JSON", 400)
 
         print(f"INFO: Odebrano alert: {alert_data}")
-        # Do zapisu timestampa używamy teraz metody serwerowej z tej biblioteki
         alert_data['received_at'] = firestore.SERVER_TIMESTAMP
-
-        # Zapis do kolekcji 'alerts'
         doc_ref = db.collection('alerts').document()
         doc_ref.set(alert_data)
         print(f"INFO: Pomyślnie zapisano alert. ID: {doc_ref.id}")
