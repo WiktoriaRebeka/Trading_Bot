@@ -2,8 +2,8 @@ from datetime import datetime, timezone
 from typing import Optional, Literal
 import logging
 from .firebase_client import get_db
-# Importujemy SERVER_TIMESTAMP z nowej biblioteki
-from google.cloud.firestore_v1.base_query import SERVER_TIMESTAMP
+# Poprawiony, prawidłowy import
+from google.cloud import firestore
 
 logger = logging.getLogger(__name__)
 POSITIONS_COLLECTION_FIRESTORE = "trading_positions_ob_only"
@@ -19,18 +19,13 @@ def log_position_event(
     price: float, 
     result: Optional[Literal["WIN", "LOSE"]] = None
 ):
-    """Loguje zdarzenie otwarcia lub zamknięcia pozycji do Firestore."""
-    try:
-        db = get_db()
-    except Exception as e:
-        logger.error(f"[POS_LOGGER] Błąd pobierania klienta DB: {e}", exc_info=True)
-        return
-
+    db = get_db()
     doc_id = f"{symbol}_{status}_{datetime.now(timezone.utc).isoformat()}"
     doc_ref = db.collection(POSITIONS_COLLECTION_FIRESTORE).document(doc_id)
 
     log_data = {
-        "timestamp": SERVER_TIMESTAMP, # Używamy poprawnego importu
+        # Używamy poprawnej ścieżki do SERVER_TIMESTAMP
+        "timestamp": firestore.SERVER_TIMESTAMP,
         "symbol": symbol,
         "direction": direction,
         "status": status,

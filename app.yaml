@@ -1,12 +1,12 @@
 # app.yaml
 
-runtime: python310
+runtime: python311
 service: default
 entrypoint: gunicorn -b :$PORT app.main:app
 
 instance_class: F1
 automatic_scaling:
-  min_instances: 1
+  min_instances: 0
   max_instances: 1
 
 env_variables:
@@ -19,6 +19,6 @@ env_variables:
 
 
     # --- ZAKTUALIZOWANA KONFIGURACJA ---
-  GCP_PROJECT_ID: "trading-bot-463318" # <-- WSTAW TUTAJ NOWE ID PROJEKTU
+  GCP_PROJECT_ID: "trading-bot-463318" 
   BIGQUERY_DATASET_ID: "trading_analytics"
   BIGQUERY_TABLE_ID: "trades_order_block"
