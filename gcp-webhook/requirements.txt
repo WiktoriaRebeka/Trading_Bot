@@ -1,0 +1,2 @@
+# Zależności dla Google Cloud Function
+firebase-admin==6.5.0
