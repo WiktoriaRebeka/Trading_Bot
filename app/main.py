@@ -1,4 +1,4 @@
-# TRADING_BOT/app/main.py (FINALNA WERSJA)
+# TRADING_BOT/app/main.py 
 
 from flask import Flask, jsonify, request
 import logging
@@ -95,7 +95,34 @@ def run_bot_cycle_endpoint():
     except Exception as e:
         logger.error(f"Krytyczny błąd w cyklu bota: {e}", exc_info=True)
         return jsonify({"status": "error", "message": str(e)}), 500
-    
+   
+
+@app.route('/test-firebase-connection')
+def test_firebase_connection():
+    """
+    Ten endpoint służy wyłącznie do diagnozowania problemu z inicjalizacją Firebase.
+    """
+    # Celowo nie używamy globalnej flagi, tylko za każdym razem próbujemy od nowa.
+    logger.info("--- ROZPOCZĘCIE TESTU POŁĄCZENIA /test-firebase-connection ---")
+    try:
+        # Używamy dokładnie tej samej funkcji inicjalizującej, co bot
+        from .firebase_client import initialize_firebase
+        is_success = initialize_firebase()
+
+        if is_success:
+            logger.info("!!! TESTOWY ENDPOINT: Inicjalizacja Firebase ZAKOŃCZONA SUKCESEM !!!")
+            return "SUCCESS: Firebase connection was established.", 200
+        else:
+            # To się stanie, jeśli initialize_firebase() zwróci False, ale bez wyjątku
+            logger.error("!!! TESTOWY ENDPOINT: initialize_firebase() zwróciło False !!!")
+            return "FAILURE: initialize_firebase() returned False.", 500
+
+    except Exception as e:
+        # To jest najważniejsza część - złapie i zaloguje DOKŁADNY błąd
+        logger.critical(f"!!! TESTOWY ENDPOINT: KRYTYCZNY WYJĄTEK PODCZAS INICJALIZACJI: {e}", exc_info=True)
+        return f"CRITICAL EXCEPTION: {e}", 500
+
+
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port, debug=True)
