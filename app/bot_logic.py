@@ -1,3 +1,5 @@
+#trading_bot/app/bot_logic.py
+
 import logging
 import requests
 from typing import Dict

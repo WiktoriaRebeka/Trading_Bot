@@ -1,4 +1,4 @@
-# TRADING_BOT/app/state_manager.py (FINALNA WERSJA)
+# TRADING_BOT/app/state_manager.py 
 
 import logging
 from typing import Dict, Optional, Any, List

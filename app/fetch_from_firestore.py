@@ -1,4 +1,5 @@
-# Usunęliśmy 'import firebase_admin'
+#trading_bot/app/fetch_from_firestore.py
+
 from google.cloud import firestore
 from datetime import datetime, timezone, timedelta
 import logging
