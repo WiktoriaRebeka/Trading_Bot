@@ -1,11 +1,11 @@
-#trading_bot/app/bot_logic.py
+#trading_bot/bot_logic.py
 
 import logging
 import requests
 from typing import Dict
-from . import state_manager
-from .positions_logger import log_position_event
-from .constants import BYBIT_API_URL_V5_TICKERS, BYBIT_DEFAULT_CATEGORY
+import state_manager
+from positions_logger import log_position_event
+from constants import BYBIT_API_URL_V5_TICKERS, BYBIT_DEFAULT_CATEGORY
 
 logger = logging.getLogger(__name__)
 
