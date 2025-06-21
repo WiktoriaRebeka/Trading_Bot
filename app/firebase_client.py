@@ -1,3 +1,5 @@
+#trading_bot/app_firebase_client.py
+
 import os
 from google.cloud import firestore
 import logging
@@ -6,9 +8,6 @@ logger = logging.getLogger(__name__)
 db_client = None
 
 def initialize_firebase():
-    """
-    Inicjalizuje połączenie z Firestore używając bezpośredniej, jawnej metody.
-    """
     global db_client
 
     if db_client is not None:
@@ -16,17 +15,12 @@ def initialize_firebase():
         return True
 
     try:
-        # Pobieramy ID projektu ze zmiennej środowiskowej ustawionej w app.yaml
-        project_id = os.getenv('GCP_PROJECT_ID')
         database_name = "trading-bot-data"
-
-        if not project_id:
-            raise ValueError("Krytyczna zmienna środowiskowa GCP_PROJECT_ID nie jest ustawiona w app.yaml.")
+        logger.info(f"Inicjalizacja klienta Firestore dla domyślnego projektu GCP i bazy '{database_name}'...")
         
-        logger.info(f"Inicjalizacja klienta Firestore dla projektu '{project_id}' i bazy '{database_name}'...")
-        
-        # NAJWAŻNIEJSZE: Używamy tej samej, sprawdzonej metody co w webhooku.
-        db_client = firestore.Client(project=project_id, database=database_name)
+        # NAJWAŻNIEJSZA ZMIANA: Usuwamy jawne podawanie `project`.
+        # To jest "tryb Google Cloud".
+        db_client = firestore.Client(database=database_name)
         
         # Testowe zapytanie, aby upewnić się, że połączenie działa
         db_client.collection('_test_connection_').limit(1).get()
@@ -42,5 +36,5 @@ def initialize_firebase():
 def get_db():
     """Zwraca zainicjalizowanego klienta Firestore."""
     if db_client is None:
-        raise Exception("Próba pobrania klienta Firestore przed udaną inicjalizacją.")
+        raise Exception("Krytyczny błąd: Próba użycia klienta Firestore, który nie został pomyślnie zainicjalizowany.")
     return db_client
