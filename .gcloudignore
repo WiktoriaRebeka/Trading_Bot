@@ -1,20 +1,10 @@
-# .gcloudignore
 
-# Zawsze ignoruj te pliki
 .gcloudignore
 .git
 .gitignore
-
-# Środowisko wirtualne Pythona
 .venv/
 venv/
-
-# Pliki cache Pythona
 __pycache__/
 *.pyc
-
-# Pliki systemowe i wrażliwe
 .DS_Store
 .env
-firebase_key.json
-service_account.json
