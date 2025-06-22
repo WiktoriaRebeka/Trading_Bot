@@ -1,0 +1,23 @@
+name: Deploy to Google App Engine
+
+on:
+  push:
+    branches:
+      - main  # Lub 'master', w zależności od nazwy Twojej głównej gałęzi
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Authenticate to Google Cloud
+        uses: 'google-github-actions/auth@v1'
+        with:
+          credentials_json: '${{ secrets.GCP_SA_KEY }}'
+
+      - name: Deploy to App Engine
+        uses: 'google-github-actions/deploy-appengine@v1'
+        with:
+          project_id: trading-bot-463318
