@@ -1,9 +1,9 @@
-#trading_bot/app/positions_logger.py
+#trading_bot/positions_logger.py
 
 from datetime import datetime, timezone
 from typing import Optional, Literal
 import logging
-from .firebase_client import get_db
+from firebase_client import get_db
 # Poprawiony, prawidłowy import
 from google.cloud import firestore
 

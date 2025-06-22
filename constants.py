@@ -1,4 +1,4 @@
-# TRADING_BOT/app/constants.py
+# TRADING_BOT/constants.py
 import os
 from dotenv import load_dotenv
 

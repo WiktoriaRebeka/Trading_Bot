@@ -1,4 +1,4 @@
-#trading_bot/app_firebase_client.py
+#trading_bot/firebase_client.py
 
 import os
 from google.cloud import firestore

@@ -1,4 +1,4 @@
-# TRADING_BOT/app/main.py 
+# TRADING_BOT/main.py 
 
 from flask import Flask, jsonify, request
 import logging
@@ -7,12 +7,11 @@ import os
 from datetime import datetime 
 
 # --- Importy modułów aplikacji ---
-from .firebase_client import initialize_firebase, get_db
-from . import constants
-from . import state_manager
-from . import fetch_from_firestore
-from . import bot_logic
-
+from firebase_client import initialize_firebase, get_db
+import constants
+import state_manager
+import fetch_from_firestore
+import bot_logic
 # --- Konfiguracja Logowania ---
 logging.basicConfig(
     stream=sys.stdout, 

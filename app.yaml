@@ -2,7 +2,7 @@
 
 runtime: python311
 service: default
-entrypoint: gunicorn -b :$PORT app.main:app
+entrypoint: gunicorn -b :$PORT main:app
 
 instance_class: F1
 automatic_scaling:

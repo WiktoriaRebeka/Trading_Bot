@@ -1,4 +1,4 @@
-# TRADING_BOT/app/state_manager.py 
+# TRADING_BOT/state_manager.py 
 
 import logging
 from typing import Dict, Optional, Any, List

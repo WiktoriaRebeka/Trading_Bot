@@ -1,11 +1,11 @@
-#trading_bot/app/fetch_from_firestore.py
+#trading_bot/fetch_from_firestore.py
 
 from google.cloud import firestore
 from datetime import datetime, timezone, timedelta
 import logging
 
-from .firebase_client import get_db 
-from .constants import (
+from firebase_client import get_db 
+from constants import (
     FIRESTORE_COLLECTION_ALERTS,
     BOT_CONFIG_COLLECTION,
     LAST_FETCH_STATE_DOC_ID,
