@@ -3,7 +3,7 @@ name: Deploy Trading Bot to Cloud Run
 on:
   push:
     branches:
-      - div  # Uruchamiaj tylko dla gałęzi 'div'
+      - div
 
 jobs:
   deploy:
@@ -27,12 +27,12 @@ jobs:
       - name: Build and Push Docker image
         run: |-
           gcloud auth configure-docker europe-central2-docker.pkg.dev
-          gcloud builds submit --tag europe-central2-docker.pkg.dev/trading-bot-463318/trading-bot-image:latest
+          gcloud builds submit --tag europe-central2-docker.pkg.dev/trading-bot-463318/trading-bot-image/trading-bot-service:latest
 
       - name: Deploy to Cloud Run
         run: |-
           gcloud run deploy trading-bot-service \
-            --image europe-central2-docker.pkg.dev/trading-bot-463318/trading-bot-image:latest \
+            --image europe-central2-docker.pkg.dev/trading-bot-463318/trading-bot-image/trading-bot-service:latest \
             --region europe-central2 \
             --allow-unauthenticated \
             --vpc-connector app-connector-warsaw \
