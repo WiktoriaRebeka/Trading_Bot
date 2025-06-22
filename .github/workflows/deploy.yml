@@ -3,7 +3,7 @@ name: Deploy to Google App Engine
 on:
   push:
     branches:
-      - main  # Lub 'master', w zależności od nazwy Twojej głównej gałęzi
+      - div  # Lub 'master', w zależności od nazwy Twojej głównej gałęzi
 
 jobs:
   deploy:
