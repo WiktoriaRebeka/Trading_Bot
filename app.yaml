@@ -22,3 +22,6 @@ env_variables:
   GCP_PROJECT_ID: "trading-bot-463318" 
   BIGQUERY_DATASET_ID: "trading_analytics"
   BIGQUERY_TABLE_ID: "trades_order_block"
+
+  vpc_access_connector:
+    name: "projects/trading-bot-463318/locations/us-central1/connectors/app-engine-connector"
