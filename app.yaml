@@ -1,27 +1,30 @@
 # app.yaml
 
+# app.yaml
+
 runtime: python311
 service: default
-entrypoint: gunicorn -b :$PORT main:app
+entrypoint: gunicorn -b :$PORT main:app # Zakładamy płaską strukturę
 
 instance_class: F1
 automatic_scaling:
   min_instances: 0
   max_instances: 1
 
+# Zmienne środowiskowe dla Twojej aplikacji
 env_variables:
   FETCH_INTERVAL_SECONDS: "60"
   BOT_LOOP_INTERVAL_SECONDS: "15"
   MAX_ALERT_AGE_SECONDS: "70"
-  
   BYBIT_API_KEY: "sz3y2CfXOuAVIcQpsI"
   BYBIT_API_SECRET: "jyuJkCm0aDfdNWG5XL9xmoRV5O5TOjbZ0hfl"
-
-
-    # --- ZAKTUALIZOWANA KONFIGURACJA ---
   GCP_PROJECT_ID: "trading-bot-463318" 
   BIGQUERY_DATASET_ID: "trading_analytics"
   BIGQUERY_TABLE_ID: "trades_order_block"
 
-  vpc_access_connector:
-    name: "projects/trading-bot-463318/locations/us-central1/connectors/app-engine-connector"
+# Konfiguracja sieciowa - osobna sekcja, na najwyższym poziomie
+vpc_access_connector:
+  name: "projects/trading-bot-463318/locations/us-central1/connectors/app-engine-connector"
+  
+
+
