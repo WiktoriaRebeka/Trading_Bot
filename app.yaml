@@ -1,7 +1,5 @@
 # app.yaml
 
-# app.yaml
-
 runtime: python311
 service: default
 entrypoint: gunicorn -b :$PORT main:app # Zakładamy płaską strukturę
@@ -24,7 +22,7 @@ env_variables:
 
 # Konfiguracja sieciowa - osobna sekcja, na najwyższym poziomie
 vpc_access_connector:
-  name: "projects/trading-bot-463318/locations/us-central1/connectors/app-engine-connector"
+  name: "projects/trading-bot-463318/locations/europe-central2/connectors/app-connector-warsaw"
   egress_setting: all-traffic
   
 
