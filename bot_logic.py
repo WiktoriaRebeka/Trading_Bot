@@ -1,16 +1,20 @@
-# /trading_bot/bot_logic.py (WERSJA POPRAWIONA, GOTOWA DO WDROŻENIA)
+# /trading_bot/bot_logic.py (WERSJA FINALNA Z LOGOWANIEM DO BIGQUERY)
 
 import logging
 import requests
-from typing import Dict
+import uuid
+from typing import Dict, Optional, Any
+from datetime import datetime, timezone
+
+# Importy modułów aplikacji
 import state_manager
 from positions_logger import log_position_event
+from bigquery_logger import log_trade_to_bigquery
 from constants import BYBIT_API_URL_V5_TICKERS, BYBIT_DEFAULT_CATEGORY
 
 logger = logging.getLogger(__name__)
 
 
-# --- Ta funkcja pozostaje bez zmian ---
 def get_all_prices_for_category(category: str = BYBIT_DEFAULT_CATEGORY) -> Dict[str, float]:
     """Pobiera wszystkie ceny tickerów dla danej kategorii z API Bybit."""
     logger.info(f"[GET_PRICES] Rozpoczynam pobieranie cen dla kategorii: {category}")
@@ -23,13 +27,10 @@ def get_all_prices_for_category(category: str = BYBIT_DEFAULT_CATEGORY) -> Dict[
         data = response.json()
         if data.get("retCode") == 0 and data.get("result") and data["result"].get("list"):
             for ticker in data["result"]["list"]:
-                symbol = ticker.get("symbol")
-                price_str = ticker.get("lastPrice")
+                symbol, price_str = ticker.get("symbol"), ticker.get("lastPrice")
                 if symbol and price_str:
-                    try:
-                        all_prices[symbol] = float(price_str)
-                    except ValueError:
-                        pass # Ignorujemy tickery z niepoprawną ceną
+                    try: all_prices[symbol] = float(price_str)
+                    except ValueError: pass
             logger.info(f"[GET_PRICES] Pomyślnie pobrano ceny dla {len(all_prices)} symboli.")
         else:
             logger.error(f"[GET_PRICES] Błąd API Bybit: {data.get('retMsg')}")
@@ -48,90 +49,134 @@ def run_trading_logic(all_prices: Dict[str, float]):
     logger.info(f"Monitoruję aktywne setupy dla symboli: {active_symbols}")
 
     for symbol in active_symbols:
-        # === POCZĄTEK GŁÓWNEGO BLOKU ZABEZPIECZAJĄCEGO ===
-        # Ten blok `try...except` chroni przed awarią całego cyklu,
-        # jeśli dane dla JEDNEGO symbolu okażą się wadliwe.
         try:
             setup = state_manager.get_active_setup(symbol)
-            if not setup:
-                continue
-            
+            if not setup: continue
+
             api_symbol = symbol.replace('.P', '')
             current_price = all_prices.get(api_symbol)
 
-            logger.info(f"[{symbol}] Sprawdzam. Symbol dla API: '{api_symbol}'. Znaleziona cena: {current_price}")
-
             if current_price is None:
-                logger.warning(f"[{symbol}] Brak aktualnej ceny w danych z API. Pomijam cykl dla tego symbolu.")
-                continue
-            
-            # Te linie są teraz chronione przez nadrzędny blok try-except
-            ob_data = setup['ob_data']
-            is_new_ob = setup['is_new']
-            is_position_open = setup['is_position_open']
-            last_price = setup.get('last_known_price')
-            
-            # Wewnętrzny try-except do precyzyjnego logowania błędów w danych
-            try:
-                direction = ob_data['direction'].lower()
-                entry = float(ob_data['entry'])
-                sl = float(ob_data['sl'])
-                tp = float(ob_data['tp'])
-            except (KeyError, ValueError) as e:
-                logger.error(f"[{symbol}] Błąd pól w 'ob_data': {e}. Pomijam symbol. Setup: {setup}")
+                logger.warning(f"[{symbol}] Brak aktualnej ceny w danych z API. Pomijam.")
                 continue
 
-            # --- Logika Zarządzania Pozycją (bez zmian) ---
+            is_position_open = setup.get('is_position_open', False)
+
             if is_position_open:
-                ob_type = "New OB" if is_new_ob else "Old OB"
+                # --- LOGIKA ZARZĄDZANIA OTWARTĄ POZYCJĄ ---
+                position_data = setup.get('position_data')
+                if not position_data:
+                    logger.warning(f"[{symbol}] Pozycja oznaczona jako otwarta, ale brak 'position_data'. Pomijam.")
+                    continue
+
+                direction = position_data['direction']
+                main_tp_price = position_data['main_tp_price']
+                sl_price = position_data['sl_price']
+                
+                # --- Aktualizacja maksymalnego profitu i flag RR ---
+                max_profit_price = position_data.get('max_profit_price', current_price)
+                if direction == 'long': max_profit_price = max(max_profit_price, current_price)
+                else: max_profit_price = min(max_profit_price, current_price)
+                state_manager.update_max_profit_price(symbol, max_profit_price)
+
+                rr_targets = position_data.get('rr_targets', {})
+                rr_flags = position_data.get('rr_achieved_flags', {})
+                for rr_key, tp_value in rr_targets.items():
+                    if tp_value is not None and not rr_flags.get(rr_key):
+                        if (direction == 'long' and current_price >= tp_value) or \
+                           (direction == 'short' and current_price <= tp_value):
+                            logger.info(f"[{symbol}] OSIĄGNIĘTO CEL RR: {rr_key} przy cenie {current_price}")
+                            rr_flags[rr_key] = True
+                state_manager.update_rr_flags(symbol, rr_flags)
+
+                # --- Sprawdzenie warunków zamknięcia transakcji ---
                 closed_result = None
-                if direction == 'long' and current_price >= tp: closed_result = "WIN"
-                elif direction == 'long' and current_price <= sl: closed_result = "LOSE"
-                elif direction == 'short' and current_price <= tp: closed_result = "WIN"
-                elif direction == 'short' and current_price >= sl: closed_result = "LOSE"
+                if (direction == 'long' and current_price >= main_tp_price): closed_result = "WIN"
+                elif (direction == 'long' and current_price <= sl_price): closed_result = "LOSE"
+                elif (direction == 'short' and current_price <= main_tp_price): closed_result = "WIN"
+                elif (direction == 'short' and current_price >= sl_price): closed_result = "LOSE"
                 
                 if closed_result:
-                    logger.info(f"--- [ZAMKNIĘCIE] --- [{symbol}] | {ob_type} | Wynik: {closed_result} | Cena: {current_price}")
-                    log_position_event(symbol, direction, "closed", ob_type, current_price, result=closed_result)
-                    state_manager.set_position_status(symbol, is_open=False)
-                    if is_new_ob:
-                        state_manager.mark_setup_as_old(symbol)
-            else:
-                # --- Logika Wejścia w Pozycję (bez zmian) ---
-                should_open = False
-                logger.info(f"[{symbol}] Analiza wejścia. Pozycja nie jest otwarta. Kierunek: {direction.upper()}. Cena wejścia (entry): {entry}. Aktualna cena: {current_price}. Ostatnia znana cena: {last_price}")
-
-                if direction == 'long':
-                    condition1_met = (last_price is not None and last_price > entry and current_price <= entry)
-                    condition2_met = (last_price is None and current_price <= entry)
-                    logger.info(f"[{symbol}] [LONG] Sprawdzanie warunków: Przekroczenie z góry ({condition1_met}), Pierwsze sprawdzenie ({condition2_met})")
-                    if condition1_met or condition2_met:
-                        should_open = True
-                
-                elif direction == 'short':
-                    condition1_met = (last_price is not None and last_price < entry and current_price >= entry)
-                    condition2_met = (last_price is None and current_price >= entry)
-                    logger.info(f"[{symbol}] [SHORT] Sprawdzanie warunków: Przekroczenie z dołu ({condition1_met}), Pierwsze sprawdzenie ({condition2_met})")
-                    if condition1_met or condition2_met:
-                        should_open = True
+                    logger.info(f"--- [ZAMKNIĘCIE: {closed_result}] --- [{symbol}] | Cena: {current_price}")
                     
-                if should_open:
-                    ob_type = "New OB" if is_new_ob else "Old OB"
-                    logger.info(f"--- [DECYZJA: WEJŚCIE] --- [{symbol}] | {ob_type} | Cena: {current_price}")
-                    log_position_event(symbol, direction, "opened", ob_type, current_price)
-                    state_manager.set_position_status(symbol, is_open=True)
-                else:
-                    logger.info(f"[{symbol}] DECYZJA: Brak wejścia w tym cyklu.")
+                    # --- LOGOWANIE DO BIGQUERY ---
+                    entry_price = position_data['entry_price']
+                    risk_amount_usd = abs(entry_price - sl_price)
+                    max_profit_achieved_usd = abs(max_profit_price - entry_price)
+                    rr_achieved = (max_profit_achieved_usd / risk_amount_usd) if risk_amount_usd > 0 else 0.0
 
-            # Aktualizuj ostatnią cenę tylko jeśli cykl dla symbolu przebiegł pomyślnie
+                    trade_data = {
+                        "trade_id": position_data['trade_id'],
+                        "timestamp_entry": position_data['timestamp_entry'],
+                        "timestamp_close": datetime.now(timezone.utc).isoformat(),
+                        "symbol": symbol,
+                        "direction": direction.upper(),
+                        "main_result": closed_result,
+                        "ob_type": position_data['ob_type'],
+                        "risk_amount_usd": risk_amount_usd,
+                        "max_profit_achieved_usd": max_profit_achieved_usd,
+                        "rr_achieved": rr_achieved,
+                        "rr_1_0_win": rr_flags.get("tp_1_0", False),
+                        "rr_1_5_win": rr_flags.get("tp_1_5", False),
+                        "rr_2_0_win": rr_flags.get("tp_2_0", False),
+                        "rr_3_0_win": rr_flags.get("tp_3_0", False),
+                        "rr_4_0_win": rr_flags.get("tp_4_0", False),
+                        "rr_5_0_win": rr_flags.get("tp_5_0", False)
+                    }
+                    log_trade_to_bigquery(trade_data)
+                    # ----------------------------
+
+                    state_manager.set_position_status(symbol, is_open=False)
+                    if setup['is_new']: state_manager.mark_setup_as_old(symbol)
+            
+            else:
+                # --- LOGIKA WEJŚCIA W POZYCJĘ ---
+                ob_data = setup.get('ob_data')
+                if not ob_data: continue
+                
+                last_price = setup.get('last_known_price')
+
+                try:
+                    direction = ob_data['direction'].lower()
+                    entry = float(ob_data['entry'])
+                    sl = float(ob_data['sl'])
+                    tp = float(ob_data['tp'])
+                except (KeyError, ValueError) as e:
+                    logger.error(f"[{symbol}] Błąd pól w 'ob_data': {e}. Pomijam.")
+                    continue
+
+                should_open = False
+                if direction == 'long' and (last_price is not None and last_price > entry and current_price <= entry): should_open = True
+                elif direction == 'short' and (last_price is not None and last_price < entry and current_price >= entry): should_open = True
+                
+                if should_open:
+                    ob_type = "New OB" if setup['is_new'] else "Old OB"
+                    trade_id = str(uuid.uuid4())
+                    logger.info(f"--- [DECYZJA: WEJŚCIE] --- [{symbol}] | {ob_type} | Cena: {current_price} | ID: {trade_id}")
+                    
+                    trade_details = {
+                        "trade_id": trade_id,
+                        "timestamp_entry": datetime.now(timezone.utc).isoformat(),
+                        "direction": direction,
+                        "ob_type": ob_type,
+                        "entry_price": current_price,
+                        "sl_price": sl,
+                        "main_tp_price": tp,
+                        "max_profit_price": current_price,
+                        "rr_targets": {
+                            "tp_1_0": ob_data.get("tp_1_0"), "tp_1_5": ob_data.get("tp_1_5"),
+                            "tp_2_0": ob_data.get("tp_2_0"), "tp_3_0": ob_data.get("tp_3_0"),
+                            "tp_4_0": ob_data.get("tp_4_0"), "tp_5_0": ob_data.get("tp_5_0")
+                        },
+                        "rr_achieved_flags": {
+                            "tp_1_0": False, "tp_1_5": False, "tp_2_0": False,
+                            "tp_3_0": False, "tp_4_0": False, "tp_5_0": False
+                        }
+                    }
+                    state_manager.set_position_status(symbol, is_open=True, trade_details=trade_details)
+            
             state_manager.update_last_known_price(symbol, current_price)
 
-        # === GŁÓWNY BLOK OBSŁUGI BŁĘDÓW DLA CAŁEGO SYMBOLU ===
         except Exception as e:
-            logger.error(
-                f"KRYTYCZNY, NIEOCZEKIWANY BŁĄD podczas przetwarzania symbolu [{symbol}]. "
-                f"Pomijam ten symbol i kontynuuję pracę. Błąd: {e}", 
-                exc_info=True  # To doda pełny traceback do logu błędu
-            )
-            # Przechodzimy do następnego symbolu w pętli, aby bot się nie zatrzymał
+            logger.error(f"KRYTYCZNY BŁĄD podczas przetwarzania symbolu [{symbol}]. Pomijam. Błąd: {e}", exc_info=True)
             continue
