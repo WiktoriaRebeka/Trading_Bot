@@ -1,4 +1,5 @@
 # TRADING_BOT/constants.py
+
 import os
 from dotenv import load_dotenv
 
@@ -28,3 +29,10 @@ BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET")
 # Ostrzeżenie, jeśli klucze nie zostaną znalezione
 if not BYBIT_API_KEY or not BYBIT_API_SECRET:
    print("[CONSTANTS_WARN] Klucze API Bybit nie są ustawione w zmiennych środowiskowych.")
+
+# =======================================================
+# === NOWA SEKCJA: Konfiguracja Analityki BigQuery ===
+# =======================================================
+BIGQUERY_PROJECT_ID = os.getenv("GCP_PROJECT", "trading-bot-463318")
+BIGQUERY_DATASET_ID = "trading_analytics"
+BIGQUERY_TABLE_ID = "trades_history"
