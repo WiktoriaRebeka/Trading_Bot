@@ -1,4 +1,4 @@
-# /trading_bot/bigquery_logger.py
+# /trading_bot/bigquery_logger.py (WERSJA Z DEBUGOWANIEM)
 
 import logging
 from typing import Dict
@@ -9,7 +9,6 @@ import constants
 
 logger = logging.getLogger(__name__)
 
-# Inicjalizujemy klienta globalnie, aby ponownie go używać w ramach jednego wywołania Cloud Run
 try:
     bigquery_client = bigquery.Client()
     TABLE_REF = f"{constants.BIGQUERY_PROJECT_ID}.{constants.BIGQUERY_DATASET_ID}.{constants.BIGQUERY_TABLE_ID}"
@@ -27,6 +26,10 @@ def log_trade_to_bigquery(trade_data: Dict):
     if not bigquery_client or not TABLE_REF:
         logger.error("[BQ_LOGGER] Klient BigQuery nie jest dostępny. Pomijam logowanie transakcji.")
         return
+
+    # --- DODANA LINIA DO DEBUGOWANIA ---
+    logger.info(f"[BQ_LOGGER] Próba zapisu danych do BigQuery: {trade_data}")
+    # ------------------------------------
 
     try:
         errors = bigquery_client.insert_rows_json(TABLE_REF, [trade_data])

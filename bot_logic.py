@@ -1,4 +1,4 @@
-# /trading_bot/bot_logic.py (WERSJA FINALNA Z LOGOWANIEM DO BIGQUERY)
+# /trading_bot/bot_logic.py (WERSJA FINALNA Z POPRAWKĄ TypeError)
 
 import logging
 import requests
@@ -141,9 +141,11 @@ def run_trading_logic(all_prices: Dict[str, float]):
                     entry = float(ob_data['entry'])
                     sl = float(ob_data['sl'])
                     tp = float(ob_data['tp'])
-                except (KeyError, ValueError) as e:
-                    logger.error(f"[{symbol}] Błąd pól w 'ob_data': {e}. Pomijam.")
+                # === KLUCZOWA POPRAWKA ===
+                except (KeyError, ValueError, TypeError) as e:
+                    logger.error(f"[{symbol}] Błąd pól w 'ob_data' (np. brak klucza lub zła wartość): {e}. Pomijam setup. Dane: {ob_data}")
                     continue
+                # =========================
 
                 should_open = False
                 if direction == 'long' and (last_price is not None and last_price > entry and current_price <= entry): should_open = True
