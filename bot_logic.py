@@ -1,4 +1,4 @@
-#trading_bot/bot_logic.py
+# /trading_bot/bot_logic.py (WERSJA POPRAWIONA, GOTOWA DO WDROŻENIA)
 
 import logging
 import requests
@@ -9,9 +9,10 @@ from constants import BYBIT_API_URL_V5_TICKERS, BYBIT_DEFAULT_CATEGORY
 
 logger = logging.getLogger(__name__)
 
-# Funkcja get_all_prices_for_category pozostaje bez zmian...
+
+# --- Ta funkcja pozostaje bez zmian ---
 def get_all_prices_for_category(category: str = BYBIT_DEFAULT_CATEGORY) -> Dict[str, float]:
-    # ... (cała funkcja bez zmian) ...
+    """Pobiera wszystkie ceny tickerów dla danej kategorii z API Bybit."""
     logger.info(f"[GET_PRICES] Rozpoczynam pobieranie cen dla kategorii: {category}")
     params = {"category": category}
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
@@ -28,7 +29,7 @@ def get_all_prices_for_category(category: str = BYBIT_DEFAULT_CATEGORY) -> Dict[
                     try:
                         all_prices[symbol] = float(price_str)
                     except ValueError:
-                        pass
+                        pass # Ignorujemy tickery z niepoprawną ceną
             logger.info(f"[GET_PRICES] Pomyślnie pobrano ceny dla {len(all_prices)} symboli.")
         else:
             logger.error(f"[GET_PRICES] Błąd API Bybit: {data.get('retMsg')}")
@@ -47,39 +48,41 @@ def run_trading_logic(all_prices: Dict[str, float]):
     logger.info(f"Monitoruję aktywne setupy dla symboli: {active_symbols}")
 
     for symbol in active_symbols:
-        setup = state_manager.get_active_setup(symbol)
-        if not setup:
-            continue
-        
-        # --- ZMIANA 1: Poprawione pobieranie nazwy symbolu dla API ---
-        # Usuwamy ".P", ale też sprawdzamy, czy symbol już go nie ma.
-        api_symbol = symbol.replace('.P', '')
-        current_price = all_prices.get(api_symbol)
-
-        # --- DODANE LOGOWANIE: Sprawdzamy, czy mamy cenę ---
-        logger.info(f"[{symbol}] Sprawdzam. Symbol dla API: '{api_symbol}'. Znaleziona cena: {current_price}")
-
-        if current_price is None:
-            logger.warning(f"[{symbol}] Brak aktualnej ceny w danych z API. Pomijam cykl dla tego symbolu.")
-            continue
-        
-        ob_data = setup['ob_data']
-        is_new_ob = setup['is_new']
-        is_position_open = setup['is_position_open']
-        last_price = setup.get('last_known_price')
-        
+        # === POCZĄTEK GŁÓWNEGO BLOKU ZABEZPIECZAJĄCEGO ===
+        # Ten blok `try...except` chroni przed awarią całego cyklu,
+        # jeśli dane dla JEDNEGO symbolu okażą się wadliwe.
         try:
-            direction = ob_data['direction'].lower()
-            entry = float(ob_data['entry'])
-            sl = float(ob_data['sl'])
-            tp = float(ob_data['tp'])
-        except (KeyError, ValueError) as e:
-            logger.error(f"[{symbol}] Błąd danych w aktywnym setupie: {e}. Setup: {setup}")
-            continue
+            setup = state_manager.get_active_setup(symbol)
+            if not setup:
+                continue
+            
+            api_symbol = symbol.replace('.P', '')
+            current_price = all_prices.get(api_symbol)
 
-        try:
+            logger.info(f"[{symbol}] Sprawdzam. Symbol dla API: '{api_symbol}'. Znaleziona cena: {current_price}")
+
+            if current_price is None:
+                logger.warning(f"[{symbol}] Brak aktualnej ceny w danych z API. Pomijam cykl dla tego symbolu.")
+                continue
+            
+            # Te linie są teraz chronione przez nadrzędny blok try-except
+            ob_data = setup['ob_data']
+            is_new_ob = setup['is_new']
+            is_position_open = setup['is_position_open']
+            last_price = setup.get('last_known_price')
+            
+            # Wewnętrzny try-except do precyzyjnego logowania błędów w danych
+            try:
+                direction = ob_data['direction'].lower()
+                entry = float(ob_data['entry'])
+                sl = float(ob_data['sl'])
+                tp = float(ob_data['tp'])
+            except (KeyError, ValueError) as e:
+                logger.error(f"[{symbol}] Błąd pól w 'ob_data': {e}. Pomijam symbol. Setup: {setup}")
+                continue
+
+            # --- Logika Zarządzania Pozycją (bez zmian) ---
             if is_position_open:
-                # --- LOGIKA ZARZĄDZANIA OTWARTĄ POZYCJĄ (bez zmian) ---
                 ob_type = "New OB" if is_new_ob else "Old OB"
                 closed_result = None
                 if direction == 'long' and current_price >= tp: closed_result = "WIN"
@@ -94,23 +97,19 @@ def run_trading_logic(all_prices: Dict[str, float]):
                     if is_new_ob:
                         state_manager.mark_setup_as_old(symbol)
             else:
-                # --- LOGIKA WEJŚCIA W POZYCJĘ (z nowym, szczegółowym logowaniem) ---
+                # --- Logika Wejścia w Pozycję (bez zmian) ---
                 should_open = False
                 logger.info(f"[{symbol}] Analiza wejścia. Pozycja nie jest otwarta. Kierunek: {direction.upper()}. Cena wejścia (entry): {entry}. Aktualna cena: {current_price}. Ostatnia znana cena: {last_price}")
 
                 if direction == 'long':
-                    # Warunek 1: Cena przeszła z góry na dół przez poziom wejścia
                     condition1_met = (last_price is not None and last_price > entry and current_price <= entry)
-                    # Warunek 2: Pierwsze sprawdzenie (brak ostatniej ceny) i cena jest już poniżej wejścia
                     condition2_met = (last_price is None and current_price <= entry)
                     logger.info(f"[{symbol}] [LONG] Sprawdzanie warunków: Przekroczenie z góry ({condition1_met}), Pierwsze sprawdzenie ({condition2_met})")
                     if condition1_met or condition2_met:
                         should_open = True
                 
                 elif direction == 'short':
-                    # Warunek 1: Cena przeszła z dołu na górę przez poziom wejścia
                     condition1_met = (last_price is not None and last_price < entry and current_price >= entry)
-                    # Warunek 2: Pierwsze sprawdzenie (brak ostatniej ceny) i cena jest już powyżej wejścia
                     condition2_met = (last_price is None and current_price >= entry)
                     logger.info(f"[{symbol}] [SHORT] Sprawdzanie warunków: Przekroczenie z dołu ({condition1_met}), Pierwsze sprawdzenie ({condition2_met})")
                     if condition1_met or condition2_met:
@@ -124,6 +123,15 @@ def run_trading_logic(all_prices: Dict[str, float]):
                 else:
                     logger.info(f"[{symbol}] DECYZJA: Brak wejścia w tym cyklu.")
 
-        finally:
-            # Zawsze aktualizuj ostatnią znaną cenę na koniec cyklu dla tego symbolu
+            # Aktualizuj ostatnią cenę tylko jeśli cykl dla symbolu przebiegł pomyślnie
             state_manager.update_last_known_price(symbol, current_price)
+
+        # === GŁÓWNY BLOK OBSŁUGI BŁĘDÓW DLA CAŁEGO SYMBOLU ===
+        except Exception as e:
+            logger.error(
+                f"KRYTYCZNY, NIEOCZEKIWANY BŁĄD podczas przetwarzania symbolu [{symbol}]. "
+                f"Pomijam ten symbol i kontynuuję pracę. Błąd: {e}", 
+                exc_info=True  # To doda pełny traceback do logu błędu
+            )
+            # Przechodzimy do następnego symbolu w pętli, aby bot się nie zatrzymał
+            continue
