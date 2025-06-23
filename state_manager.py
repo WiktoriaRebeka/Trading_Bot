@@ -1,4 +1,4 @@
-# /trading_bot/state_manager.py (WERSJA ZMODYFIKOWANA)
+# /trading_bot/state_manager.py
 
 import logging
 from typing import Dict, Optional, Any, List
@@ -19,8 +19,7 @@ def set_active_setup(symbol: str, ob_data: dict):
         'is_new': True,
         'is_position_open': False,
         'last_known_price': None,
-        # Usuwamy ewentualne stare dane pozycji, jeśli setup jest nadpisywany
-        'position_data': None 
+        'position_data': None
     }
     logger.info(f"[{symbol}] Ustawiono nowy, aktywny setup Order Block. Status: New OB.")
 
@@ -55,10 +54,11 @@ def set_position_status(symbol: str, is_open: bool, trade_details: Optional[Dict
             logger.info(f"[{symbol}] Zmieniono status pozycji na: OTWARTA. Zapisano dane transakcji ID: {trade_details.get('trade_id')}")
         
         elif not is_open:
-            # Gdy zamykamy, czyścimy dane pozycji
+            # UWAGA: Ta gałąź nie powinna być już używana. Zamiast tego używamy remove_setup.
+            # Zostawiamy dla ewentualnej kompatybilności wstecznej, ale główna logika powinna ją omijać.
             if 'position_data' in active_setups[symbol]:
                 del active_setups[symbol]['position_data']
-            logger.info(f"[{symbol}] Zmieniono status pozycji na: ZAMKNIĘTA.")
+            logger.info(f"[{symbol}] Zmieniono status pozycji na: ZAMKNIĘTA (Legacy call).")
     else:
         logger.warning(f"[{symbol}] Próba zmiany statusu pozycji dla nieistniejącego setupu.")
 
@@ -68,8 +68,6 @@ def update_last_known_price(symbol: str, price: Optional[float]):
     if symbol in active_setups:
         active_setups[symbol]['last_known_price'] = price
 
-
-# === NOWE FUNKCJE DO ZARZĄDZANIA STANEM OTWARTEJ POZYCJI ===
 
 def update_max_profit_price(symbol: str, new_max_profit_price: float):
     """Aktualizuje cenę maksymalnego osiągniętego profitu w stanie pozycji."""
@@ -85,3 +83,16 @@ def update_rr_flags(symbol: str, updated_flags: Dict[str, bool]):
         active_setups[symbol]['position_data']['rr_achieved_flags'] = updated_flags
     else:
         logger.warning(f"[{symbol}] Próba aktualizacji flag RR dla nieistniejącej lub zamkniętej pozycji.")
+
+
+# === NOWA, KLUCZOWA FUNKCJA ===
+def remove_setup(symbol: str):
+    """
+    Całkowicie usuwa setup dla danego symbolu z aktywnego stanu.
+    Wywoływać po zakończeniu transakcji (WIN/LOSE), aby zapobiec ponownemu wejściu.
+    """
+    if symbol in active_setups:
+        del active_setups[symbol]
+        logger.info(f"[{symbol}] Zakończony setup został usunięty ze stanu.")
+    else:
+        logger.warning(f"[{symbol}] Próba usunięcia nieistniejącego setupu.")

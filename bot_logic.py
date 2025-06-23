@@ -1,4 +1,4 @@
-# /trading_bot/bot_logic.py (WERSJA FINALNA Z POPRAWKĄ TypeError)
+# /trading_bot/bot_logic.py
 
 import logging
 import requests
@@ -8,7 +8,6 @@ from datetime import datetime, timezone
 
 # Importy modułów aplikacji
 import state_manager
-from positions_logger import log_position_event
 from bigquery_logger import log_trade_to_bigquery
 from constants import BYBIT_API_URL_V5_TICKERS, BYBIT_DEFAULT_CATEGORY
 
@@ -41,6 +40,7 @@ def get_all_prices_for_category(category: str = BYBIT_DEFAULT_CATEGORY) -> Dict[
 
 def run_trading_logic(all_prices: Dict[str, float]):
     """Główna pętla logiki, która monitoruje aktywne setupy."""
+    # Kopiujemy listę symboli, aby uniknąć problemów z modyfikacją słownika w trakcie iteracji
     active_symbols = state_manager.get_all_active_symbols()
     if not active_symbols:
         logger.info("Brak aktywnych setupów do monitorowania.")
@@ -48,7 +48,7 @@ def run_trading_logic(all_prices: Dict[str, float]):
 
     logger.info(f"Monitoruję aktywne setupy dla symboli: {active_symbols}")
 
-    for symbol in active_symbols:
+    for symbol in list(active_symbols): # Iterujemy po kopii kluczy
         try:
             setup = state_manager.get_active_setup(symbol)
             if not setup: continue
@@ -124,10 +124,11 @@ def run_trading_logic(all_prices: Dict[str, float]):
                         "rr_5_0_win": rr_flags.get("tp_5_0", False)
                     }
                     log_trade_to_bigquery(trade_data)
-                    # ----------------------------
-
-                    state_manager.set_position_status(symbol, is_open=False)
-                    if setup['is_new']: state_manager.mark_setup_as_old(symbol)
+                    
+                    # === KLUCZOWA POPRAWKA LOGIKI ===
+                    # Całkowicie usuwamy setup ze stanu, aby zakończyć jego cykl życia.
+                    state_manager.remove_setup(symbol)
+                    # ==============================
             
             else:
                 # --- LOGIKA WEJŚCIA W POZYCJĘ ---
@@ -141,11 +142,11 @@ def run_trading_logic(all_prices: Dict[str, float]):
                     entry = float(ob_data['entry'])
                     sl = float(ob_data['sl'])
                     tp = float(ob_data['tp'])
-                # === KLUCZOWA POPRAWKA ===
                 except (KeyError, ValueError, TypeError) as e:
                     logger.error(f"[{symbol}] Błąd pól w 'ob_data' (np. brak klucza lub zła wartość): {e}. Pomijam setup. Dane: {ob_data}")
+                    # Po błędzie danych usuwamy wadliwy setup, aby nie próbować go w kółko
+                    state_manager.remove_setup(symbol)
                     continue
-                # =========================
 
                 should_open = False
                 if direction == 'long' and (last_price is not None and last_price > entry and current_price <= entry): should_open = True
@@ -176,9 +177,14 @@ def run_trading_logic(all_prices: Dict[str, float]):
                         }
                     }
                     state_manager.set_position_status(symbol, is_open=True, trade_details=trade_details)
+                    
+                    # Oznaczamy setup jako "stary" zaraz po wejściu w pozycję
+                    state_manager.mark_setup_as_old(symbol)
             
             state_manager.update_last_known_price(symbol, current_price)
 
         except Exception as e:
             logger.error(f"KRYTYCZNY BŁĄD podczas przetwarzania symbolu [{symbol}]. Pomijam. Błąd: {e}", exc_info=True)
+            # W przypadku nieoczekiwanego błędu, usuwamy setup, aby uniknąć pętli błędów
+            state_manager.remove_setup(symbol)
             continue
