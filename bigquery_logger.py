@@ -1,8 +1,7 @@
-# /trading_bot/bigquery_logger.py (WERSJA FINALNA Z WALIDACJĄ)
+# /trading_bot/bigquery_logger.py (Wersja Finalna)
 
 import logging
 from typing import Dict, Any, Optional
-from datetime import datetime
 from google.cloud import bigquery
 from google.api_core.exceptions import GoogleAPICallError
 
@@ -10,9 +9,7 @@ import constants
 
 logger = logging.getLogger(__name__)
 
-### --- 1. Definicja Oczekiwanego Schematu ---
-# Definiujemy, jakich pól i jakich typów danych spodziewamy się w BigQuery.
-# To pomoże nam walidować dane przed wysłaniem.
+# Zaktualizowany schemat zgodny z nową logiką
 EXPECTED_SCHEMA = {
     "trade_id": str,
     "timestamp_entry": str,
@@ -21,15 +18,15 @@ EXPECTED_SCHEMA = {
     "direction": str,
     "main_result": str,
     "ob_type": str,
-    "risk_amount_usd": float,
-    "max_profit_achieved_usd": float,
+    "risk_amount_price_diff": float,
+    "max_profit_price_diff": float,
     "rr_achieved": float,
-    "rr_1_0_win": bool,
-    "rr_1_5_win": bool,
-    "rr_2_0_win": bool,
-    "rr_3_0_win": bool,
-    "rr_4_0_win": bool,
-    "rr_5_0_win": bool,
+    "rr_1_0_achieved": bool,
+    "rr_1_5_achieved": bool,
+    "rr_2_0_achieved": bool,
+    "rr_3_0_achieved": bool,
+    "rr_4_0_achieved": bool,
+    "rr_5_0_achieved": bool,
 }
 
 try:
@@ -43,59 +40,43 @@ except Exception as e:
 
 
 def _validate_and_sanitize_data(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """
-    Sprawdza, czy dane pasują do schematu, konwertuje typy i obsługuje brakujące wartości.
-    """
+    """Sprawdza, czy dane pasują do schematu, konwertuje typy i obsługuje brakujące wartości."""
     sanitized_data = {}
     has_errors = False
 
     for key, expected_type in EXPECTED_SCHEMA.items():
         value = data.get(key)
 
-        # Sprawdzenie brakujących, ale wymaganych pól (można dostosować)
         if value is None:
-            # Ustawiamy bezpieczne wartości domyślne, aby uniknąć błędów BQ
-            if expected_type == str:
-                sanitized_data[key] = "N/A"
-            elif expected_type == float:
-                sanitized_data[key] = 0.0
-            elif expected_type == bool:
-                sanitized_data[key] = False
+            if expected_type == str: sanitized_data[key] = "N/A"
+            elif expected_type == float: sanitized_data[key] = 0.0
+            elif expected_type == bool: sanitized_data[key] = False
             logger.warning(f"[BQ_VALIDATOR] Brakujące pole '{key}'. Ustawiono domyślną wartość: {sanitized_data[key]}")
             continue
 
-        # Walidacja i konwersja typów
         try:
-            if expected_type == str and not isinstance(value, str):
-                sanitized_data[key] = str(value)
-            elif expected_type == float and not isinstance(value, float):
-                sanitized_data[key] = float(value)
-            elif expected_type == bool and not isinstance(value, bool):
-                sanitized_data[key] = bool(value)
-            else:
-                sanitized_data[key] = value
+            if expected_type == str and not isinstance(value, str): sanitized_data[key] = str(value)
+            elif expected_type == float and not isinstance(value, float): sanitized_data[key] = float(value)
+            elif expected_type == bool and not isinstance(value, bool): sanitized_data[key] = bool(value)
+            else: sanitized_data[key] = value
         except (ValueError, TypeError) as e:
             logger.error(f"[BQ_VALIDATOR] Błąd konwersji typu dla klucza '{key}'. Oczekiwano {expected_type}, otrzymano {type(value)} (wartość: {value}). Błąd: {e}")
             has_errors = True
             continue
             
     if has_errors:
-        return None # Zwracamy None, jeśli wystąpiły błędy, których nie dało się naprawić
+        return None
 
     return sanitized_data
 
 
 def log_trade_to_bigquery(trade_data: Dict):
-    """
-    Waliduje, czyści, a następnie wstawia pojedynczy wiersz do BigQuery.
-    """
+    """Waliduje, czyści, a następnie wstawia pojedynczy wiersz do BigQuery."""
     if not bigquery_client or not TABLE_REF:
         logger.error("[BQ_LOGGER] Klient BigQuery nie jest dostępny. Pomijam logowanie transakcji.")
         return
 
     logger.info(f"[BQ_LOGGER] Otrzymano dane do zapisu: {trade_data}")
-
-    # --- 2. Krok walidacji i czyszczenia danych ---
     sanitized_trade_data = _validate_and_sanitize_data(trade_data)
 
     if sanitized_trade_data is None:
@@ -110,6 +91,5 @@ def log_trade_to_bigquery(trade_data: Dict):
             logger.info(f"[BQ_LOGGER] Pomyślnie zapisano transakcję {sanitized_trade_data.get('trade_id')} do BigQuery.")
         else:
             logger.error(f"[BQ_LOGGER] Wystąpiły błędy API podczas wstawiania danych do BigQuery dla {sanitized_trade_data.get('trade_id')}: {errors}")
-            
     except GoogleAPICallError as e:
         logger.error(f"[BQ_LOGGER] Błąd API podczas zapisu do BigQuery dla {sanitized_trade_data.get('trade_id')}: {e}", exc_info=True)
