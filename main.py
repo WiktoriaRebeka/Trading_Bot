@@ -1,4 +1,4 @@
-# /trading_bot/main.py (Wersja dla Architektury Stanu Ciągłego v5.1)
+# /trading_bot/main.py (WERSJA FINALNA - Architektura Dwustanowa)
 
 from flask import Flask, jsonify
 import logging
@@ -38,18 +38,19 @@ def warmup():
 
 @app.route('/run-bot-cycle', methods=['GET', 'POST'])
 def run_bot_cycle_endpoint():
-    logger.info("--- ROZPOCZĘCIE CYKLU BOTA (Architektura Stanu Ciągłego) ---")
+    logger.info("--- ROZPOCZĘCIE CYKLU BOTA (Architektura Dwustanowa) ---")
 
     if not firebase_initialized:
         logger.error("Błąd krytyczny: Firebase nie jest zainicjowane.")
         return jsonify({"status": "error", "message": "Firestore not initialized"}), 500
 
     try:
-        # 1. Pobierz nowe alerty z kolejki `alerts`
+        # === ETAP 1: ZARZĄDZANIE NOWYMI SETUPAMI ===
+        # Pobierz nowe alerty z kolejki `alerts`
         current_last_ts_dt = fetch_from_firestore.load_last_processed_timestamp()
         newly_fetched_alerts, new_max_ts_dt = fetch_from_firestore.fetch_new_alerts_since(current_last_ts_dt)
         
-        # 2. Przetwórz nowe alerty, NADPISUJĄC setup dla danego symbolu
+        # Przetwórz nowe alerty, NADPISUJĄC setup w kolekcji `active_setups`
         if newly_fetched_alerts:
             db = get_db()
             for alert_data in newly_fetched_alerts:
@@ -67,39 +68,36 @@ def run_bot_cycle_endpoint():
                         logger.warning(f"Otrzymano alert bez symbolu: {alert_data}")
                         continue
 
-                    # Nowy alert zawsze nadpisuje stary setup dla tego symbolu.
-                    doc_ref = db.collection(constants.STATE_COLLECTION).document(symbol)
+                    # Zapisujemy/nadpisujemy stan w dedykowanej kolekcji dla setupów.
+                    # To unieważnia stary OB dla NOWYCH wejść.
+                    doc_ref = db.collection(constants.SETUP_COLLECTION).document(symbol)
                     
-                    # Tworzymy kompletny, "świeży" stan dla tego symbolu.
-                    # To resetuje wszystkie liczniki i statusy dla nowego OB.
-                    new_symbol_state = {
+                    new_setup_state = {
                         "alert_data": alert_data,
-                        "is_position_open": False,
                         "entry_attempts": 0,
-                        "last_known_price": None,
-                        "active_trade_id": None,
-                        "active_trade_entry_price": None,
-                        "active_trade_entry_timestamp_ms": None,
                         "updated_at": datetime.now(timezone.utc)
                     }
-                    doc_ref.set(new_symbol_state)
-                    logger.info(f"[{symbol}] Zarejestrowano/zaktualizowano AKTYWNY SETUP (stan zresetowany).")
+                    doc_ref.set(new_setup_state)
+                    logger.info(f"[{symbol}] Zarejestrowano/zaktualizowano aktywny setup w '{constants.SETUP_COLLECTION}'.")
             
             if new_max_ts_dt > current_last_ts_dt:
                 fetch_from_firestore.save_last_processed_timestamp(new_max_ts_dt)
 
-        # 3. Pobierz wszystkie ceny rynkowe
+        # === ETAP 2: EGZEKUCJA LOGIKI TRADINGOWEJ ===
+        # Pobierz wszystkie ceny rynkowe
         all_current_prices = bot_logic.get_all_prices_for_category()
         if not all_current_prices:
             logger.warning("Nie udało się pobrać cen rynkowych. Pomijam cykl logiki.")
             return jsonify({"status": "warning", "message": "Failed to fetch prices"}), 200
         
-        # 4. Uruchom główną pętlę logiki
+        # Uruchom główną logikę, która zajmie się zarówno otwieraniem nowych
+        # pozycji (na podstawie `active_setups`), jak i monitorowaniem już
+        # otwartych (z `open_trades`).
         bot_logic.run_trading_logic(all_current_prices)
 
         logger.info("--- ZAKOŃCZENIE CYKLU BOTA ---")
         return jsonify({"status": "success"}), 200
 
     except Exception as e:
-        logger.error(f"Krytyczny błąd w cyklu bota: {e}", exc_info=True)
+        logger.error(f"Krytyczny błąd w głównym cyklu bota: {e}", exc_info=True)
         return jsonify({"status": "error", "message": str(e)}), 500

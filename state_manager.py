@@ -1,11 +1,11 @@
-# /trading_bot/state_manager.py (Wersja dla Architektury Stanu Ciągłego v5.1)
+# /trading_bot/state_manager.py (WERSJA FINALNA - Architektura Dwustanowa)
 
 import logging
 from typing import Iterable, Optional, Dict, Any
 from datetime import datetime
 from google.cloud.firestore_v1.document import DocumentSnapshot
 from google.cloud.firestore_v1.base_client import BaseClient
-from google.cloud import firestore  # Import dla firestore.Increment
+from google.cloud import firestore
 
 from firebase_client import get_db
 import constants
@@ -16,67 +16,69 @@ def _get_db() -> BaseClient:
     """Helper do uzyskania instancji DB."""
     return get_db()
 
+# --- Funkcje dla Setupów (Kolekcja `active_setups`) ---
+
+def get_all_active_setups() -> Iterable[DocumentSnapshot]:
+    """Pobiera wszystkie aktywne setupy (jeden na symbol)."""
+    db = _get_db()
+    return db.collection(constants.SETUP_COLLECTION).stream()
+
 def get_active_setup(symbol: str) -> Optional[Dict[str, Any]]:
     """Odczytuje aktywny setup dla danego symbolu."""
     db = _get_db()
-    doc_ref = db.collection(constants.STATE_COLLECTION).document(symbol)
+    doc_ref = db.collection(constants.SETUP_COLLECTION).document(symbol)
     doc = doc_ref.get()
     if doc.exists:
         return doc.to_dict()
     return None
 
-def get_all_active_symbols() -> Iterable[DocumentSnapshot]:
-    """Pobiera iterator po wszystkich dokumentach (aktywnych setupach)."""
+def update_setup_entry_attempt(symbol: str):
+    """Inkrementuje licznik prób wejścia dla danego setupu."""
     db = _get_db()
-    return db.collection(constants.STATE_COLLECTION).stream()
+    doc_ref = db.collection(constants.SETUP_COLLECTION).document(symbol)
+    doc_ref.update({"entry_attempts": firestore.Increment(1)})
 
-def update_last_known_price(symbol: str, price: float):
-    """Aktualizuje ostatnią znaną cenę dla danego setupu."""
-    if price is None:
-        return
-    db = _get_db()
-    doc_ref = db.collection(constants.STATE_COLLECTION).document(symbol)
-    doc_ref.update({"last_known_price": price})
+# --- Funkcje dla Otwartych Transakcji (Kolekcja `open_trades`) ---
 
-def open_new_position(symbol: str, trade_id: str, entry_price: float, timestamp_utc: datetime):
-    """
-    Ustawia pozycję jako otwartą, zapisuje jej szczegóły i inkrementuje licznik prób wejścia.
-    """
+def get_all_open_trades() -> Iterable[DocumentSnapshot]:
+    """Pobiera wszystkie otwarte transakcje do monitorowania."""
     db = _get_db()
-    doc_ref = db.collection(constants.STATE_COLLECTION).document(symbol)
+    return db.collection(constants.TRADE_COLLECTION).stream()
+
+def is_position_open_for_symbol(symbol: str) -> bool:
+    """Sprawdza, czy istnieje jakakolwiek otwarta pozycja dla danego symbolu."""
+    db = _get_db()
+    trades = db.collection(constants.TRADE_COLLECTION).where("symbol", "==", symbol).limit(1).get()
+    return len(trades) > 0
+
+def create_open_trade(trade_id: str, symbol: str, direction: str, ob_type: str, entry_price: float, sl_price: float, tp_price: float, alert_data: dict):
+    """Tworzy nowy, odizolowany dokument dla otwartej transakcji."""
+    db = _get_db()
+    trade_doc_ref = db.collection(constants.TRADE_COLLECTION).document(trade_id)
     
-    update_data = {
-        "is_position_open": True,
-        "active_trade_id": trade_id,
-        "active_trade_entry_price": entry_price,
-        "active_trade_entry_timestamp_ms": int(timestamp_utc.timestamp() * 1000),
-        "entry_attempts": firestore.Increment(1)  # Atomowa inkrementacja licznika
+    timestamp_utc = datetime.now(timezone.utc)
+    
+    trade_data = {
+        "trade_id": trade_id,
+        "symbol": symbol,
+        "direction": direction,
+        "ob_type": ob_type,
+        "entry_price": entry_price,
+        "sl_price": sl_price,  # "Zamrożony" SL z momentu wejścia
+        "tp_price": tp_price,  # "Zamrożony" TP z momentu wejścia
+        "opened_at_ms": int(timestamp_utc.timestamp() * 1000),
+        "opened_at_iso": timestamp_utc.isoformat(),
+        "alert_data_snapshot": alert_data # Zapisujemy kopię alertu dla celów analitycznych
     }
-    doc_ref.update(update_data)
-    logger.info(f"[{symbol}] Zaktualizowano stan na OTWARTY. ID transakcji: {trade_id}. Licznik prób zwiększony.")
+    trade_doc_ref.set(trade_data)
+    logger.info(f"[{symbol}][{trade_id}] Zapisano otwartą pozycję do '{constants.TRADE_COLLECTION}'.")
+    
+    # Jednocześnie aktualizujemy licznik w setupie
+    update_setup_entry_attempt(symbol)
 
-def close_active_position(symbol: str):
-    """
-    Resetuje stan aktywnej pozycji (ustawia is_position_open na False),
-    ale zachowuje setup, pozwalając na kolejne wejścia (Used OB).
-    """
+def remove_closed_trade(trade_id: str):
+    """Usuwa dokument zamkniętej transakcji z kolekcji monitorowania."""
     db = _get_db()
-    doc_ref = db.collection(constants.STATE_COLLECTION).document(symbol)
-    update_data = {
-        "is_position_open": False,
-        "active_trade_id": None,
-        "active_trade_entry_price": None,
-        "active_trade_entry_timestamp_ms": None
-    }
-    doc_ref.update(update_data)
-    logger.info(f"[{symbol}] Zresetowano stan aktywnej pozycji. Setup gotowy na ponowne wejście (Used OB).")
-
-def remove_setup(symbol: str):
-    """
-    Całkowicie usuwa setup dla danego symbolu z Firestore, np. po unieważnieniu
-    przez SL/TP lub nowy alert (co dzieje się w main.py przez .set()).
-    """
-    db = _get_db()
-    doc_ref = db.collection(constants.STATE_COLLECTION).document(symbol)
+    doc_ref = db.collection(constants.TRADE_COLLECTION).document(trade_id)
     doc_ref.delete()
-    logger.info(f"[{symbol}] Usunięto cały aktywny setup ze stanu.")
+    logger.info(f"[{trade_id}] Usunięto zamkniętą pozycję ze stanu monitorowania.")
