@@ -1,4 +1,4 @@
-# /trading_bot/bot_logic.py (WERSJA OSTATECZNA - Zintegrowana z Planem Naprawczym v2.1)
+# /trading_bot/bot_logic.py (Wersja Ostateczna - Uproszczony Schemat)
 
 import logging
 import requests
@@ -169,6 +169,7 @@ def run_trading_logic(all_prices: Dict[str, float]):
                             except (ValueError, TypeError):
                                 achieved_rr_flags[rr_key] = False
 
+                    # Przygotowanie danych do BigQuery zgodnie z UPROSZCZONYM schematem
                     trade_data = {
                         "trade_id": trade_id,
                         "timestamp_entry": trade_state['entry_timestamp'],
@@ -177,8 +178,6 @@ def run_trading_logic(all_prices: Dict[str, float]):
                         "direction": direction.upper(),
                         "main_result": closed_result,
                         "ob_type": alert_data.get('source', 'N/A'),
-                        "risk_amount_price_diff": risk_price_diff,
-                        "max_profit_price_diff": max_profit_price_diff,
                         "rr_achieved": rr_achieved,
                         "rr_1_0_achieved": achieved_rr_flags.get("tp_1_0", False),
                         "rr_1_5_achieved": achieved_rr_flags.get("tp_1_5", False),
