@@ -1,4 +1,4 @@
-# /trading_bot/main.py (Wersja dla Architektury Dwustanowej v4.1)
+# /trading_bot/main.py (Wersja dla Architektury Stanu Ciągłego v5.1)
 
 from flask import Flask, jsonify
 import logging
@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 # --- Importy modułów aplikacji ---
 from firebase_client import initialize_firebase, get_db
-import constants  # Upewnij się, że constants.py zawiera SETUP_COLLECTION
+import constants
 import fetch_from_firestore
 import bot_logic
 
@@ -38,7 +38,7 @@ def warmup():
 
 @app.route('/run-bot-cycle', methods=['GET', 'POST'])
 def run_bot_cycle_endpoint():
-    logger.info("--- ROZPOCZĘCIE CYKLU BOTA (Architektura Dwustanowa) ---")
+    logger.info("--- ROZPOCZĘCIE CYKLU BOTA (Architektura Stanu Ciągłego) ---")
 
     if not firebase_initialized:
         logger.error("Błąd krytyczny: Firebase nie jest zainicjowane.")
@@ -49,7 +49,7 @@ def run_bot_cycle_endpoint():
         current_last_ts_dt = fetch_from_firestore.load_last_processed_timestamp()
         newly_fetched_alerts, new_max_ts_dt = fetch_from_firestore.fetch_new_alerts_since(current_last_ts_dt)
         
-        # 2. Przetwórz nowe alerty, AKTUALIZUJĄC stan `active_setups`
+        # 2. Przetwórz nowe alerty, NADPISUJĄC setup dla danego symbolu
         if newly_fetched_alerts:
             db = get_db()
             for alert_data in newly_fetched_alerts:
@@ -67,16 +67,23 @@ def run_bot_cycle_endpoint():
                         logger.warning(f"Otrzymano alert bez symbolu: {alert_data}")
                         continue
 
-                    # Zawsze NADPISUJEMY setup dla danego symbolu, bo nowy alert unieważnia stary.
-                    doc_ref = db.collection(constants.SETUP_COLLECTION).document(symbol)
+                    # Nowy alert zawsze nadpisuje stary setup dla tego symbolu.
+                    doc_ref = db.collection(constants.STATE_COLLECTION).document(symbol)
                     
-                    # Stan setupu zawiera tylko dane potrzebne do otwarcia NOWEJ pozycji
-                    new_setup_state = {
+                    # Tworzymy kompletny, "świeży" stan dla tego symbolu.
+                    # To resetuje wszystkie liczniki i statusy dla nowego OB.
+                    new_symbol_state = {
                         "alert_data": alert_data,
+                        "is_position_open": False,
+                        "entry_attempts": 0,
+                        "last_known_price": None,
+                        "active_trade_id": None,
+                        "active_trade_entry_price": None,
+                        "active_trade_entry_timestamp_ms": None,
                         "updated_at": datetime.now(timezone.utc)
                     }
-                    doc_ref.set(new_setup_state)
-                    logger.info(f"[{symbol}] Zarejestrowano/zaktualizowano AKTYWNY SETUP.")
+                    doc_ref.set(new_symbol_state)
+                    logger.info(f"[{symbol}] Zarejestrowano/zaktualizowano AKTYWNY SETUP (stan zresetowany).")
             
             if new_max_ts_dt > current_last_ts_dt:
                 fetch_from_firestore.save_last_processed_timestamp(new_max_ts_dt)
@@ -87,7 +94,7 @@ def run_bot_cycle_endpoint():
             logger.warning("Nie udało się pobrać cen rynkowych. Pomijam cykl logiki.")
             return jsonify({"status": "warning", "message": "Failed to fetch prices"}), 200
         
-        # 4. Uruchom główną pętlę logiki, która będzie operować na obu kolekcjach stanu
+        # 4. Uruchom główną pętlę logiki
         bot_logic.run_trading_logic(all_current_prices)
 
         logger.info("--- ZAKOŃCZENIE CYKLU BOTA ---")
