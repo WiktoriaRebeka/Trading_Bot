@@ -1,4 +1,4 @@
-# /trading_bot/bot_logic.py (Wersja dla Architektury Stanu Ciągłego v5.1)
+# /trading_bot/bot_logic.py (Wersja Ostateczna dla Planu v5.2)
 
 import logging
 import requests
@@ -76,8 +76,7 @@ def run_trading_logic(all_prices: Dict[str, float]):
     for symbol in active_symbols:
         try:
             setup = state_manager.get_active_setup(symbol)
-            if not setup:
-                continue
+            if not setup: continue
 
             api_symbol = symbol.replace('.P', '')
             current_price = all_prices.get(api_symbol)
@@ -115,26 +114,35 @@ def run_trading_logic(all_prices: Dict[str, float]):
                 
                 if closed_result:
                     log_and_finalize_trade(setup, symbol, closed_result, current_price)
-                    # Zamknięcie na główny TP/SL unieważnia cały OB.
+                    # Zamknięcie na główny TP/SL unieważnia cały OB i usuwa setup.
                     state_manager.remove_setup(symbol)
-            else:
+            
+            else: # Pozycja nie jest otwarta
                 # --- LOGIKA OTWIERANIA NOWEJ POZYCJI ---
                 last_price = setup.get('last_known_price')
                 entry_attempts = setup.get('entry_attempts', 0)
                 
                 should_open = False
+                # Warunek wejścia jest ten sam dla Fresh i Used, ale dla Used wymaga resetu.
+                entry_condition_met = False
+                if last_price:
+                    # Dla LONG, cena musi przyjść z dołu (last < entry) i przebić w górę (current >= entry)
+                    if direction == 'long' and last_price < entry_level and current_price >= entry_level: entry_condition_met = True
+                    # Dla SHORT, cena musi przyjść z góry (last > entry) i przebić w dół (current <= entry)
+                    elif direction == 'short' and last_price > entry_level and current_price <= entry_level: entry_condition_met = True
+                
                 if entry_attempts == 0: # Logika dla Fresh OB
-                    if direction == 'long' and last_price and last_price > entry_level and current_price <= entry_level: should_open = True
-                    elif direction == 'short' and last_price and last_price < entry_level and current_price >= entry_level: should_open = True
-                else: # Logika dla Used OB (wymaga "resetu" ceny)
+                    if entry_condition_met:
+                        should_open = True
+                else: # Logika dla Used OB
                     is_reset_for_reentry = False
-                    if direction == 'long' and current_price > entry_level: is_reset_for_reentry = True
-                    elif direction == 'short' and current_price < entry_level: is_reset_for_reentry = True
-                    
-                    if is_reset_for_reentry and last_price:
-                        # Sprawdzamy ponowne przecięcie
-                        if direction == 'long' and last_price > entry_level and current_price <= entry_level: should_open = True
-                        elif direction == 'short' and last_price < entry_level and current_price >= entry_level: should_open = True
+                    # Dla LONG, reset następuje, gdy cena jest PONIŻEJ wejścia
+                    if direction == 'long' and current_price < entry_level: is_reset_for_reentry = True
+                    # Dla SHORT, reset następuje, gdy cena jest POWYŻEJ wejścia
+                    elif direction == 'short' and current_price > entry_level: is_reset_for_reentry = True
+
+                    if is_reset_for_reentry and entry_condition_met:
+                        should_open = True
 
                 if should_open:
                     ob_type = "Fresh OB" if entry_attempts == 0 else "Used OB"
@@ -191,8 +199,7 @@ def log_and_finalize_trade(setup: dict, symbol: str, closed_result: str, close_p
             except (ValueError, TypeError):
                 achieved_rr_flags[rr_key] = False
 
-    # Określenie OB Type na podstawie licznika prób, który jest już > 0
-    ob_type = "Fresh OB" if setup.get('entry_attempts', 1) == 1 else "Used OB"
+    ob_type = "Fresh OB" if setup.get('entry_attempts', 1) <= 1 else "Used OB"
 
     bq_data = {
         "trade_id": trade_id,
