@@ -1,4 +1,4 @@
-# /trading_bot/bot_logic.py (Wersja Finalna - Przebudowa na Trade-Centric)
+# /trading_bot/bot_logic.py (WERSJA OSTATECZNA - Zintegrowana z Planem Naprawczym v2.1)
 
 import logging
 import requests
@@ -78,23 +78,34 @@ def run_trading_logic(all_prices: Dict[str, float]):
             trade_state = trade_doc.to_dict()
             symbol = trade_state.get('symbol')
             if not symbol:
-                logger.error(f"Brak symbolu w dokumencie transakcji {trade_id}. Pomijam.")
+                logger.error(f"Brak pola 'symbol' w dokumencie transakcji {trade_id}. Usuwam.")
+                state_manager.remove_trade(trade_id)
                 continue
 
             api_symbol = symbol.replace('.P', '')
             current_price = all_prices.get(api_symbol)
             if current_price is None:
-                logger.warning(f"[{symbol}][{trade_id}] Brak aktualnej ceny. Pomijam.")
+                logger.warning(f"[{symbol}][{trade_id}] Brak aktualnej ceny dla symbolu. Pomijam cykl.")
                 continue
 
             status = trade_state.get('status')
+            alert_data = trade_state.get('alert_data')
+            
+            if not isinstance(alert_data, dict):
+                logger.error(f"[{symbol}][{trade_id}] Pole 'alert_data' jest uszkodzone lub go brakuje. Usuwam stan. Stan: {trade_state}")
+                state_manager.remove_trade(trade_id)
+                continue
             
             if status == 'PENDING_ENTRY':
-                alert_data = trade_state['alert_data']
+                try:
+                    direction = str(alert_data['direction']).lower()
+                    entry_level = float(alert_data['entry'])
+                except (KeyError, ValueError, TypeError) as e:
+                    logger.error(f"[{symbol}][{trade_id}] Wadliwy alert dla PENDING_ENTRY (brak 'direction'/'entry' lub zły typ). Błąd: {e}. Usuwam. Alert: {alert_data}")
+                    state_manager.remove_trade(trade_id)
+                    continue
+
                 last_price = trade_state.get('last_known_price')
-                
-                direction = alert_data.get('direction', '').lower()
-                entry_level = float(alert_data['entry'])
                 
                 should_open = False
                 if direction == 'long' and last_price and last_price > entry_level and current_price <= entry_level: should_open = True
@@ -107,10 +118,14 @@ def run_trading_logic(all_prices: Dict[str, float]):
                 state_manager.update_last_known_price(trade_id, current_price)
                 
             elif status == 'OPEN':
-                alert_data = trade_state['alert_data']
-                direction = alert_data.get('direction', '').lower()
-                sl_price = float(alert_data['sl'])
-                main_tp_price = float(alert_data['tp'])
+                try:
+                    direction = str(alert_data['direction']).lower()
+                    sl_price = float(alert_data['sl'])
+                    main_tp_price = float(alert_data['tp'])
+                except (KeyError, ValueError, TypeError) as e:
+                    logger.error(f"[{symbol}][{trade_id}] Wadliwy alert dla OPEN (brak 'direction'/'sl'/'tp' lub zły typ). Błąd: {e}. Usuwam. Alert: {alert_data}")
+                    state_manager.remove_trade(trade_id)
+                    continue
 
                 closed_result = None
                 if (direction == 'long' and current_price >= main_tp_price) or \
@@ -144,13 +159,16 @@ def run_trading_logic(all_prices: Dict[str, float]):
                     rr_targets = {k: v for k, v in alert_data.items() if k.startswith('tp_')}
                     for rr_key, tp_value in rr_targets.items():
                         if tp_value is not None:
-                            tp_price = float(tp_value)
-                            if (direction == 'long' and extreme_profit_price >= tp_price) or \
-                               (direction == 'short' and extreme_profit_price <= tp_price):
-                                achieved_rr_flags[rr_key] = True
-                            else:
+                            try:
+                                tp_price = float(tp_value)
+                                if (direction == 'long' and extreme_profit_price >= tp_price) or \
+                                   (direction == 'short' and extreme_profit_price <= tp_price):
+                                    achieved_rr_flags[rr_key] = True
+                                else:
+                                    achieved_rr_flags[rr_key] = False
+                            except (ValueError, TypeError):
                                 achieved_rr_flags[rr_key] = False
-                    
+
                     trade_data = {
                         "trade_id": trade_id,
                         "timestamp_entry": trade_state['entry_timestamp'],
@@ -173,6 +191,11 @@ def run_trading_logic(all_prices: Dict[str, float]):
                     
                     state_manager.remove_trade(trade_id)
 
+            else:
+                logger.warning(f"[{symbol}][{trade_id}] Nieznany lub brakujący status: '{status}'. Usuwam.")
+                state_manager.remove_trade(trade_id)
+
         except Exception as e:
-            logger.error(f"KRYTYCZNY BŁĄD w pętli dla transakcji [{trade_id}]. Błąd: {e}", exc_info=True)
+            logger.error(f"KRYTYCZNY, NIEPRZEWIDZIANY BŁĄD w pętli dla transakcji [{trade_id}]. Błąd: {e}", exc_info=True)
+            state_manager.remove_trade(trade_id)
             continue
