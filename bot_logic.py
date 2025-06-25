@@ -1,4 +1,4 @@
-# /trading_bot/bot_logic.py (WERSJA FINALNA v4.1 - Architektura Dwustanowa)
+# /trading_bot/bot_logic.py (Wersja dla Architektury Stanu Ciągłego v5.1)
 
 import logging
 import requests
@@ -9,11 +9,9 @@ from datetime import datetime, timezone
 # Importy modułów aplikacji
 import state_manager
 from bigquery_logger import log_trade_to_bigquery
-from constants import BYBIT_API_URL_V5_TICKERS, BYBIT_API_URL_V5_KLINE
+from constants import BYBIT_API_URL_V5_TICKERS, BYBIT_API_URL_V5_KLINE, BYBIT_DEFAULT_CATEGORY
 
 logger = logging.getLogger(__name__)
-
-# --- Funkcje pomocnicze (bez zmian) ---
 
 def get_historical_klines(symbol: str, start_time_ms: int, end_time_ms: int) -> List[List[Any]]:
     """Pobiera dane historyczne (kline) 1-min z API Bybit."""
@@ -41,7 +39,7 @@ def get_historical_klines(symbol: str, start_time_ms: int, end_time_ms: int) -> 
         logger.error(f"[{symbol}] Nieoczekiwany błąd przy pobieraniu kline: {e}", exc_info=True)
         return []
 
-def get_all_prices_for_category(category: str = "linear") -> Dict[str, float]:
+def get_all_prices_for_category(category: str = BYBIT_DEFAULT_CATEGORY) -> Dict[str, float]:
     """Pobiera wszystkie ceny tickerów dla danej kategorii z API Bybit."""
     logger.info(f"[GET_PRICES] Rozpoczynam pobieranie cen dla kategorii: {category}")
     params = {"category": category}
@@ -64,146 +62,123 @@ def get_all_prices_for_category(category: str = "linear") -> Dict[str, float]:
         logger.error(f"[GET_PRICES] Nieoczekiwany błąd: {e}", exc_info=True)
     return all_prices
 
-
-# --- GŁÓWNA LOGIKA BOTA - PRZEBUDOWANA NA DWIE PĘTLE ---
-
 def run_trading_logic(all_prices: Dict[str, float]):
-    """Główna pętla logiki, która obsługuje otwieranie i zamykanie pozycji."""
-    
-    # Krok 1: Zarządzaj otwartymi pozycjami (z kolekcji `active_trades`)
-    manage_open_trades(all_prices)
-    
-    # Krok 2: Zarządzaj nowymi wejściami (z kolekcji `active_setups`)
-    manage_new_entries(all_prices)
+    """Główna pętla logiki oparta na architekturze stanu ciągłego."""
+    active_symbols_stream = state_manager.get_all_active_symbols()
+    active_symbols = [doc.id for doc in active_symbols_stream]
 
-
-def manage_open_trades(all_prices: Dict[str, float]):
-    """Iteruje po otwartych pozycjach i sprawdza warunki zamknięcia."""
-    open_trades = list(state_manager.get_all_trades())
-    if not open_trades:
-        logger.info("[Zamykanie] Brak otwartych pozycji do monitorowania.")
+    if not active_symbols:
+        logger.info("Brak aktywnych setupów do monitorowania.")
         return
-    
-    logger.info(f"[Zamykanie] Monitoruję {len(open_trades)} otwartych pozycji.")
-    
-    for trade_doc in open_trades:
-        trade_id = trade_doc.id
+
+    logger.info(f"Monitoruję setupy dla symboli: {active_symbols}")
+
+    for symbol in active_symbols:
         try:
-            trade_data = trade_doc.to_dict()
-            symbol = trade_data.get('symbol')
+            setup = state_manager.get_active_setup(symbol)
+            if not setup:
+                continue
+
             api_symbol = symbol.replace('.P', '')
             current_price = all_prices.get(api_symbol)
-
             if current_price is None:
-                logger.warning(f"[{symbol}][{trade_id}] Brak ceny dla otwartej pozycji. Pomijam.")
+                logger.warning(f"[{symbol}] Brak aktualnej ceny. Pomijam cykl dla tego symbolu.")
                 continue
 
-            direction = trade_data['direction'].lower()
-            sl_price = trade_data['sl']
-            main_tp_price = trade_data['tp']
+            alert_data = setup.get('alert_data')
+            if not isinstance(alert_data, dict):
+                logger.error(f"[{symbol}] Uszkodzony alert_data w setupie. Usuwam.")
+                state_manager.remove_setup(symbol)
+                continue
 
-            closed_result = None
-            if (direction == 'long' and current_price >= main_tp_price) or \
-               (direction == 'short' and current_price <= main_tp_price):
-                closed_result = "WIN"
-            elif (direction == 'long' and current_price <= sl_price) or \
-                 (direction == 'short' and current_price >= sl_price):
-                closed_result = "LOSE"
+            try:
+                direction = str(alert_data['direction']).lower()
+                entry_level = float(alert_data['entry'])
+                sl_price = float(alert_data['sl'])
+                main_tp_price = float(alert_data['tp'])
+            except (KeyError, ValueError, TypeError) as e:
+                logger.error(f"[{symbol}] Wadliwy alert (brak pól lub zły typ). Błąd: {e}. Usuwam setup.")
+                state_manager.remove_setup(symbol)
+                continue
 
-            if closed_result:
-                logger.info(f"--- [ZAMKNIĘCIE: {closed_result}] --- [{symbol}] | ID: {trade_id} | Cena: {current_price}")
+            is_position_open = setup.get('is_position_open', False)
+
+            if is_position_open:
+                # --- LOGIKA ZARZĄDZANIA OTWARTĄ POZYCJĄ ---
+                closed_result = None
+                if (direction == 'long' and current_price >= main_tp_price) or \
+                   (direction == 'short' and current_price <= main_tp_price):
+                    closed_result = "WIN"
+                elif (direction == 'long' and current_price <= sl_price) or \
+                     (direction == 'short' and current_price >= sl_price):
+                    closed_result = "LOSE"
                 
-                # Pełna analiza KLINE i zapis do BigQuery
-                log_closed_trade_to_bigquery(trade_id, trade_data, closed_result)
+                if closed_result:
+                    log_and_finalize_trade(setup, symbol, closed_result, current_price)
+                    # Zamknięcie na główny TP/SL unieważnia cały OB.
+                    state_manager.remove_setup(symbol)
+            else:
+                # --- LOGIKA OTWIERANIA NOWEJ POZYCJI ---
+                last_price = setup.get('last_known_price')
+                entry_attempts = setup.get('entry_attempts', 0)
                 
-                # Usunięcie pozycji z `active_trades` i setupu z `active_setups`
-                state_manager.remove_trade(trade_id)
-                state_manager.remove_setup(symbol) # Zamknięcie na SL/TP unieważnia cały setup OB
+                should_open = False
+                if entry_attempts == 0: # Logika dla Fresh OB
+                    if direction == 'long' and last_price and last_price > entry_level and current_price <= entry_level: should_open = True
+                    elif direction == 'short' and last_price and last_price < entry_level and current_price >= entry_level: should_open = True
+                else: # Logika dla Used OB (wymaga "resetu" ceny)
+                    is_reset_for_reentry = False
+                    if direction == 'long' and current_price > entry_level: is_reset_for_reentry = True
+                    elif direction == 'short' and current_price < entry_level: is_reset_for_reentry = True
+                    
+                    if is_reset_for_reentry and last_price:
+                        # Sprawdzamy ponowne przecięcie
+                        if direction == 'long' and last_price > entry_level and current_price <= entry_level: should_open = True
+                        elif direction == 'short' and last_price < entry_level and current_price >= entry_level: should_open = True
+
+                if should_open:
+                    ob_type = "Fresh OB" if entry_attempts == 0 else "Used OB"
+                    trade_id = str(uuid.uuid4())
+                    logger.info(f"--- [DECYZJA: WEJŚCIE {ob_type}] --- [{symbol}] | Cena: {current_price} | ID: {trade_id}")
+                    state_manager.open_new_position(symbol, trade_id, current_price, datetime.now(timezone.utc))
+
+            # Zawsze aktualizuj ostatnią cenę, jeśli setup nadal istnieje
+            if state_manager.get_active_setup(symbol):
+                state_manager.update_last_known_price(symbol, current_price)
 
         except Exception as e:
-            logger.error(f"Krytyczny błąd podczas zarządzania otwartą pozycją [{trade_id}]: {e}", exc_info=True)
-            state_manager.remove_trade(trade_id) # Bezpieczne usunięcie w razie błędu
+            logger.error(f"KRYTYCZNY BŁĄD w pętli dla symbolu [{symbol}]. Usuwam setup. Błąd: {e}", exc_info=True)
+            state_manager.remove_setup(symbol)
+            continue
 
+def log_and_finalize_trade(setup: dict, symbol: str, closed_result: str, close_price: float):
+    """Helper do analizy klines i logowania zamkniętej transakcji do BigQuery."""
+    trade_id = setup['active_trade_id']
+    logger.info(f"--- [ZAMKNIĘCIE: {closed_result}] --- [{symbol}] | ID: {trade_id} | Cena: {close_price}")
 
-def manage_new_entries(all_prices: Dict[str, float]):
-    """Iteruje po aktywnych setupach i sprawdza warunki wejścia."""
-    active_setups = list(state_manager.get_all_setups())
-    if not active_setups:
-        logger.info("[Otwieranie] Brak aktywnych setupów do sprawdzenia.")
-        return
-        
-    logger.info(f"[Otwieranie] Sprawdzam {len(active_setups)} aktywnych setupów.")
-
-    open_trade_symbols = state_manager.get_open_trade_symbols()
-
-    for setup_doc in active_setups:
-        symbol = setup_doc.id
-        try:
-            if symbol in open_trade_symbols:
-                logger.info(f"[{symbol}] Już jest otwarta pozycja. Pomijam nowe wejście.")
-                continue
-                
-            setup_data = setup_doc.to_dict()
-            alert_data = setup_data.get('alert_data', {})
-            api_symbol = symbol.replace('.P', '')
-            current_price = all_prices.get(api_symbol)
-
-            if current_price is None:
-                logger.warning(f"[{symbol}] Brak ceny dla potencjalnego wejścia. Pomijam.")
-                continue
-
-            direction = str(alert_data.get('direction', '')).lower()
-            entry_level = float(alert_data['entry'])
-            last_price = setup_data.get('last_known_price')
-            
-            should_open = False
-            if direction == 'long' and last_price and last_price > entry_level and current_price <= entry_level: should_open = True
-            elif direction == 'short' and last_price and last_price < entry_level and current_price >= entry_level: should_open = True
-
-            if should_open:
-                is_fresh = setup_data.get('entry_attempts', 0) == 0
-                ob_type = "Fresh OB" if is_fresh else "Used OB"
-                
-                logger.info(f"--- [DECYZJA: WEJŚCIE {ob_type}] --- [{symbol}] | Cena: {current_price}")
-                
-                # Utwórz nową pozycję w kolekcji `active_trades`
-                state_manager.create_trade(symbol, alert_data, current_price, ob_type)
-                
-                # Zaktualizuj licznik prób wejścia w `active_setups`
-                state_manager.increment_entry_attempts(symbol)
-
-            state_manager.update_last_known_price(symbol, current_price)
-
-        except Exception as e:
-            logger.error(f"Krytyczny błąd podczas zarządzania nowym wejściem dla [{symbol}]: {e}", exc_info=True)
-            state_manager.remove_setup(symbol) # Bezpieczne usunięcie wadliwego setupu
-
-
-def log_closed_trade_to_bigquery(trade_id: str, trade_data: dict, closed_result: str):
-    """Helper do analizy klines i logowania do BigQuery."""
-    symbol = trade_data['symbol']
-    direction = trade_data['direction'].lower()
-    sl_price = trade_data['sl']
+    alert_data = setup['alert_data']
+    direction = str(alert_data['direction']).lower()
+    sl_price = float(alert_data['sl'])
     
     close_timestamp_utc = datetime.now(timezone.utc)
-    start_time_ms = trade_data['entry_timestamp_ms']
+    start_time_ms = setup['active_trade_entry_timestamp_ms']
     end_time_ms = int(close_timestamp_utc.timestamp() * 1000)
     
     klines = get_historical_klines(symbol, start_time_ms, end_time_ms)
     
-    extreme_profit_price = trade_data.get('entry_price') # Wartość awaryjna
+    extreme_profit_price = close_price
     if klines:
         if direction == 'long': extreme_profit_price = max(float(k[2]) for k in klines)
         else: extreme_profit_price = min(float(k[3]) for k in klines)
-    logger.info(f"[{symbol}][{trade_id}] Analiza historyczna. Rzeczywiste ekstremum ceny: {extreme_profit_price}")
+    logger.info(f"[{symbol}][{trade_id}] Analiza historyczna. Ekstremum ceny: {extreme_profit_price}")
 
-    entry_price = trade_data['entry_price']
+    entry_price = setup['active_trade_entry_price']
     risk_price_diff = abs(entry_price - sl_price)
     max_profit_price_diff = abs(extreme_profit_price - entry_price)
     rr_achieved = (max_profit_price_diff / risk_price_diff) if risk_price_diff > 0 else 0.0
     
     achieved_rr_flags = {}
-    rr_targets = {k: v for k, v in trade_data.get('alert_data', {}).items() if k.startswith('tp_')}
+    rr_targets = {k: v for k, v in alert_data.items() if k.startswith('tp_')}
     for rr_key, tp_value in rr_targets.items():
         if tp_value is not None:
             try:
@@ -216,14 +191,17 @@ def log_closed_trade_to_bigquery(trade_id: str, trade_data: dict, closed_result:
             except (ValueError, TypeError):
                 achieved_rr_flags[rr_key] = False
 
+    # Określenie OB Type na podstawie licznika prób, który jest już > 0
+    ob_type = "Fresh OB" if setup.get('entry_attempts', 1) == 1 else "Used OB"
+
     bq_data = {
         "trade_id": trade_id,
-        "timestamp_entry": trade_data['entry_timestamp'],
+        "timestamp_entry": datetime.fromtimestamp(start_time_ms / 1000, tz=timezone.utc).isoformat(),
         "timestamp_close": close_timestamp_utc.isoformat(),
         "symbol": symbol,
         "direction": direction.upper(),
         "main_result": closed_result,
-        "ob_type": trade_data.get('ob_type', 'N/A'),
+        "ob_type": ob_type,
         "rr_achieved": rr_achieved,
         "rr_1_0_achieved": achieved_rr_flags.get("tp_1_0", False),
         "rr_1_5_achieved": achieved_rr_flags.get("tp_1_5", False),
