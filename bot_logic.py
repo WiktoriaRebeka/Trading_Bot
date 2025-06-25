@@ -1,4 +1,4 @@
-# /trading_bot/bot_logic.py (WERSJA FINALNA - Architektura Dwustanowa)
+# /trading_bot/bot_logic.py (WERSJA FINALNA v4.3 z Poprawką)
 
 import logging
 import requests
@@ -74,21 +74,26 @@ def _handle_open_new_positions(all_prices: Dict[str, float]):
             setup_data = setup_doc.to_dict()
             alert_data = setup_data.get('alert_data', {})
             
-            # Sprawdzanie warunku wejścia...
-            direction = str(alert_data.get('direction', '')).lower()
-            entry_level = float(alert_data['entry'])
-            last_price = setup_data.get('last_known_price')
             current_price = all_prices.get(symbol.replace('.P', ''))
-            
             if current_price is None: continue
 
-            # Aktualizujemy cenę na końcu, niezależnie od wyniku
-            state_manager.update_last_known_price(symbol, current_price)
-            
-            # Jeśli już jest otwarta pozycja dla tego symbolu, nie otwieramy kolejnej
+            # Jeśli dla tego symbolu jest już otwarta pozycja, nie robimy nic więcej.
+            # Czekamy, aż zostanie zamknięta.
             if state_manager.is_position_open_for_symbol(symbol):
                 continue
-                
+            
+            # Jeśli pozycja nie jest otwarta, możemy zaktualizować cenę i sprawdzić warunki wejścia.
+            last_price = setup_data.get('last_known_price')
+            state_manager.update_last_known_price(symbol, current_price) # Bezpieczna aktualizacja
+
+            # Walidacja danych alertu
+            try:
+                direction = str(alert_data['direction']).lower()
+                entry_level = float(alert_data['entry'])
+            except (KeyError, ValueError, TypeError) as e:
+                logger.warning(f"[{symbol}] Wadliwy setup, brak kluczowych pól do otwarcia pozycji. Błąd: {e}. Czekam na nowy alert.")
+                continue
+
             should_open = False
             if last_price:
                 if direction == 'long' and last_price > entry_level and current_price <= entry_level: should_open = True
@@ -106,9 +111,7 @@ def _handle_open_new_positions(all_prices: Dict[str, float]):
                     entry_price=current_price, sl_price=float(alert_data['sl']),
                     tp_price=float(alert_data['tp']), alert_data=alert_data
                 )
-        except (KeyError, ValueError, TypeError) as e:
-            logger.error(f"[{symbol}] Wadliwy setup. Błąd: {e}. Setup zostanie nadpisany przy kolejnym alercie.")
-            continue
+
         except Exception as e:
             logger.error(f"[{symbol}] Nieoczekiwany błąd podczas sprawdzania wejścia: {e}", exc_info=True)
             continue
@@ -127,7 +130,6 @@ def _handle_manage_open_trades(all_prices: Dict[str, float]):
             trade_data = trade_doc.to_dict()
             symbol = trade_data['symbol']
             
-            # Używamy danych "zamrożonych" w dokumencie transakcji
             direction = trade_data['direction']
             sl_price = trade_data['sl_price']
             tp_price = trade_data['tp_price']
@@ -213,8 +215,14 @@ def log_and_finalize_trade(trade_data: dict, closed_result: str, close_price: fl
 def run_trading_logic(all_prices: Dict[str, float]):
     """Główna funkcja orkiestrująca, wywoływana z main.py."""
     
-    # Krok 1: Sprawdź, czy można otworzyć jakieś nowe pozycje
-    _handle_open_new_positions(all_prices)
-    
-    # Krok 2: Zarządzaj wszystkimi już otwartymi pozycjami
-    _handle_manage_open_trades(all_prices)
+    try:
+        # Krok 1: Sprawdź, czy można otworzyć jakieś nowe pozycje
+        _handle_open_new_positions(all_prices)
+    except Exception as e:
+        logger.error(f"Nieoczekiwany błąd w _handle_open_new_positions: {e}", exc_info=True)
+
+    try:
+        # Krok 2: Zarządzaj wszystkimi już otwartymi pozycjami
+        _handle_manage_open_trades(all_prices)
+    except Exception as e:
+        logger.error(f"Nieoczekiwany błąd w _handle_manage_open_trades: {e}", exc_info=True)
