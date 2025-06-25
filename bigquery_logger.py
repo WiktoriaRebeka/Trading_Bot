@@ -1,4 +1,4 @@
-# /trading_bot/bigquery_logger.py (Wersja Ostateczna)
+# /trading_bot/bigquery_logger.py (Wersja Ostateczna - Potwierdzona)
 
 import logging
 from typing import Dict, Any, Optional
@@ -9,7 +9,7 @@ import constants
 
 logger = logging.getLogger(__name__)
 
-# UPROSZCZONY SCHEMAT ZGODNY Z NOWYMI WYMAGANIAMI
+# SCHEMAT ZGODNY Z NOWĄ, UPROSZCZONĄ TABELĄ W BIGQUERY
 EXPECTED_SCHEMA = {
     "trade_id": str,
     "timestamp_entry": str,
@@ -17,7 +17,7 @@ EXPECTED_SCHEMA = {
     "symbol": str,
     "direction": str,
     "main_result": str,
-    "ob_type": str,
+    "ob_type": str,  # Kluczowe pole dla analizy Fresh/Used OB
     "rr_achieved": float,
     "rr_1_0_achieved": bool,
     "rr_1_5_achieved": bool,
