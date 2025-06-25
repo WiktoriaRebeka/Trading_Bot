@@ -1,4 +1,4 @@
-# /trading_bot/bigquery_logger.py (Wersja Finalna)
+# /trading_bot/bigquery_logger.py (Wersja Ostateczna)
 
 import logging
 from typing import Dict, Any, Optional
@@ -9,7 +9,7 @@ import constants
 
 logger = logging.getLogger(__name__)
 
-# Zaktualizowany schemat zgodny z nową logiką
+# UPROSZCZONY SCHEMAT ZGODNY Z NOWYMI WYMAGANIAMI
 EXPECTED_SCHEMA = {
     "trade_id": str,
     "timestamp_entry": str,
@@ -18,8 +18,6 @@ EXPECTED_SCHEMA = {
     "direction": str,
     "main_result": str,
     "ob_type": str,
-    "risk_amount_price_diff": float,
-    "max_profit_price_diff": float,
     "rr_achieved": float,
     "rr_1_0_achieved": bool,
     "rr_1_5_achieved": bool,
@@ -90,6 +88,8 @@ def log_trade_to_bigquery(trade_data: Dict):
         if not errors:
             logger.info(f"[BQ_LOGGER] Pomyślnie zapisano transakcję {sanitized_trade_data.get('trade_id')} do BigQuery.")
         else:
-            logger.error(f"[BQ_LOGGER] Wystąpiły błędy API podczas wstawiania danych do BigQuery dla {sanitized_trade_data.get('trade_id')}: {errors}")
+            # Ulepszony log błędu, aby był bardziej czytelny
+            error_details = errors[0]['errors'][0]['message'] if errors and errors[0].get('errors') else str(errors)
+            logger.error(f"[BQ_LOGGER] Wystąpiły błędy API podczas wstawiania danych do BigQuery dla {sanitized_trade_data.get('trade_id')}: {error_details}")
     except GoogleAPICallError as e:
         logger.error(f"[BQ_LOGGER] Błąd API podczas zapisu do BigQuery dla {sanitized_trade_data.get('trade_id')}: {e}", exc_info=True)
