@@ -14,8 +14,7 @@ LAST_FETCH_STATE_DOC_ID = "last_fetch_state"
 LAST_PROCESSED_TS_FIELD = "last_processed_firestore_timestamp"
 
 # NOWA, GŁÓWNA KOLEKCJA DO ZARZĄDZANIA STANEM TRANSAKCJI
-SETUP_COLLECTION = "active_setups"
-TRADE_COLLECTION = "active_trades"
+STATE_COLLECTION = "active_setups"
 
 # --- Bybit API ---
 BYBIT_API_URL_V5_TICKERS = "https://api.bybit.com/v5/market/tickers"
