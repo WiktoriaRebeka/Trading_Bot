@@ -1,8 +1,8 @@
-# /trading_bot/state_manager.py (WERSJA FINALNA - Architektura Dwustanowa)
+# /trading_bot/state_manager.py (WERSJA FINALNA v4.4 - z Poprawionym Importem)
 
 import logging
 from typing import Iterable, Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone  # <--- DODANY KLUCZOWY IMPORT
 from google.cloud.firestore_v1.document import DocumentSnapshot
 from google.cloud.firestore_v1.base_client import BaseClient
 from google.cloud import firestore
@@ -32,6 +32,17 @@ def get_active_setup(symbol: str) -> Optional[Dict[str, Any]]:
         return doc.to_dict()
     return None
 
+def update_last_known_price(symbol: str, price: float):
+    """
+    Bezpiecznie aktualizuje lub ustawia ostatnią znaną cenę dla danego setupu.
+    Używa .set(merge=True) aby uniknąć błędów 'race condition'.
+    """
+    if price is None:
+        return
+    db = _get_db()
+    doc_ref = db.collection(constants.SETUP_COLLECTION).document(symbol)
+    doc_ref.set({"last_known_price": price}, merge=True)
+
 def update_setup_entry_attempt(symbol: str):
     """Inkrementuje licznik prób wejścia dla danego setupu."""
     db = _get_db()
@@ -54,9 +65,9 @@ def is_position_open_for_symbol(symbol: str) -> bool:
 def create_open_trade(trade_id: str, symbol: str, direction: str, ob_type: str, entry_price: float, sl_price: float, tp_price: float, alert_data: dict):
     """Tworzy nowy, odizolowany dokument dla otwartej transakcji."""
     db = _get_db()
-    trade_doc_ref = db.collection(constants.TRADE_COLLECTION).document(trade_id)
     
-    timestamp_utc = datetime.now(timezone.utc)
+    trade_doc_ref = db.collection(constants.TRADE_COLLECTION).document(trade_id)
+    timestamp_utc = datetime.now(timezone.utc) # Ten kod teraz zadziała poprawnie
     
     trade_data = {
         "trade_id": trade_id,
@@ -64,17 +75,18 @@ def create_open_trade(trade_id: str, symbol: str, direction: str, ob_type: str, 
         "direction": direction,
         "ob_type": ob_type,
         "entry_price": entry_price,
-        "sl_price": sl_price,  # "Zamrożony" SL z momentu wejścia
-        "tp_price": tp_price,  # "Zamrożony" TP z momentu wejścia
+        "sl_price": sl_price,
+        "tp_price": tp_price,
         "opened_at_ms": int(timestamp_utc.timestamp() * 1000),
         "opened_at_iso": timestamp_utc.isoformat(),
-        "alert_data_snapshot": alert_data # Zapisujemy kopię alertu dla celów analitycznych
+        "alert_data_snapshot": alert_data
     }
     trade_doc_ref.set(trade_data)
-    logger.info(f"[{symbol}][{trade_id}] Zapisano otwartą pozycję do '{constants.TRADE_COLLECTION}'.")
     
     # Jednocześnie aktualizujemy licznik w setupie
     update_setup_entry_attempt(symbol)
+    
+    logger.info(f"[{symbol}][{trade_id}] Zapisano otwartą pozycję do '{constants.TRADE_COLLECTION}'.")
 
 def remove_closed_trade(trade_id: str):
     """Usuwa dokument zamkniętej transakcji z kolekcji monitorowania."""
