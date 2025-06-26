@@ -1,9 +1,10 @@
-# /trading_bot/main.py (WERSJA FINALNA - Architektura Dwustanowa)
+# /trading_bot/main.py (WERSJA FINALNA - Dostosowana do bot_logic v5.0)
 
 from flask import Flask, jsonify
 import logging
 import sys
 import os
+import uuid  # Dodajemy import uuid, jeśli go nie było
 from datetime import datetime, timezone
 
 # --- Importy modułów aplikacji ---
@@ -38,7 +39,7 @@ def warmup():
 
 @app.route('/run-bot-cycle', methods=['GET', 'POST'])
 def run_bot_cycle_endpoint():
-    logger.info("--- ROZPOCZĘCIE CYKLU BOTA (Architektura Dwustanowa) ---")
+    logger.info("--- ROZPOCZĘCIE CYKLU BOTA (Architektura Kline-Only) ---")
 
     if not firebase_initialized:
         logger.error("Błąd krytyczny: Firebase nie jest zainicjowane.")
@@ -46,35 +47,27 @@ def run_bot_cycle_endpoint():
 
     try:
         # === ETAP 1: ZARZĄDZANIE NOWYMI SETUPAMI ===
-        # Pobierz nowe alerty z kolejki `alerts`
         current_last_ts_dt = fetch_from_firestore.load_last_processed_timestamp()
         newly_fetched_alerts, new_max_ts_dt = fetch_from_firestore.fetch_new_alerts_since(current_last_ts_dt)
         
-        # Przetwórz nowe alerty, NADPISUJĄC setup w kolekcji `active_setups`
         if newly_fetched_alerts:
             db = get_db()
             for alert_data in newly_fetched_alerts:
                 if alert_data.get('type') == 'OrderBlock':
-                    # Logika do obsługi 'direction' pozostaje
                     direction_code = alert_data.get('directionCode')
                     if direction_code == 1: alert_data['direction'] = "LONG"
                     elif direction_code == -1: alert_data['direction'] = "SHORT"
-                    else:
-                        logger.warning(f"Otrzymano alert z nieprawidłowym directionCode: {direction_code}")
-                        continue
+                    else: continue
                     
                     symbol = alert_data.get('symbol')
-                    if not symbol:
-                        logger.warning(f"Otrzymano alert bez symbolu: {alert_data}")
-                        continue
+                    if not symbol: continue
 
-                    # Zapisujemy/nadpisujemy stan w dedykowanej kolekcji dla setupów.
-                    # To unieważnia stary OB dla NOWYCH wejść.
                     doc_ref = db.collection(constants.SETUP_COLLECTION).document(symbol)
                     
                     new_setup_state = {
                         "alert_data": alert_data,
                         "entry_attempts": 0,
+                        "last_known_price": None, # To pole może zostać, ale nie jest już krytyczne
                         "updated_at": datetime.now(timezone.utc)
                     }
                     doc_ref.set(new_setup_state)
@@ -83,17 +76,13 @@ def run_bot_cycle_endpoint():
             if new_max_ts_dt > current_last_ts_dt:
                 fetch_from_firestore.save_last_processed_timestamp(new_max_ts_dt)
 
-        # === ETAP 2: EGZEKUCJA LOGIKI TRADINGOWEJ ===
-        # Pobierz wszystkie ceny rynkowe
-        all_current_prices = bot_logic.get_all_prices_for_category()
-        if not all_current_prices:
-            logger.warning("Nie udało się pobrać cen rynkowych. Pomijam cykl logiki.")
-            return jsonify({"status": "warning", "message": "Failed to fetch prices"}), 200
+        # === ETAP 2: EGZEKUCJA GŁÓWNEJ LOGIKI TRADINGOWEJ ===
         
-        # Uruchom główną logikę, która zajmie się zarówno otwieraniem nowych
-        # pozycji (na podstawie `active_setups`), jak i monitorowaniem już
-        # otwartych (z `open_trades`).
-        bot_logic.run_trading_logic(all_current_prices)
+        # NIE pobieramy już cen w main.py. Robi to sama logika bota.
+        # all_current_prices = bot_logic.get_all_prices_for_category() <--- USUNIĘTE
+        
+        # Uruchamiamy główną logikę bez żadnych argumentów.
+        bot_logic.run_trading_logic()
 
         logger.info("--- ZAKOŃCZENIE CYKLU BOTA ---")
         return jsonify({"status": "success"}), 200
@@ -101,3 +90,7 @@ def run_bot_cycle_endpoint():
     except Exception as e:
         logger.error(f"Krytyczny błąd w głównym cyklu bota: {e}", exc_info=True)
         return jsonify({"status": "error", "message": str(e)}), 500
+
+if __name__ == '__main__':
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port, debug=True)
