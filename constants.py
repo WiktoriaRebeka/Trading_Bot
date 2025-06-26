@@ -1,4 +1,4 @@
-# /trading_bot/constants.py (Wersja Finalna)
+# /trading_bot/constants.py (WERSJA FINALNA v5.2)
 
 import os
 from dotenv import load_dotenv
@@ -13,14 +13,13 @@ BOT_CONFIG_COLLECTION = "bot_config"
 LAST_FETCH_STATE_DOC_ID = "last_fetch_state"
 LAST_PROCESSED_TS_FIELD = "last_processed_firestore_timestamp"
 
-# NOWA, GŁÓWNA KOLEKCJA DO ZARZĄDZANIA STANEM TRANSAKCJI
+# NOWE KOLEKCJE DO ZARZĄDZANIA STANEM (Architektura Wielo-Kolekcyjna)
 SETUP_COLLECTION = "active_setups"
 TRADE_COLLECTION = "open_trades"
 ANALYZED_COLLECTION = "analyzed_trades"
 
 # --- Bybit API ---
-BYBIT_API_URL_V5_TICKERS = "https://api.bybit.com/v5/market/tickers"
-BYBIT_API_URL_V5_KLINE = "https://api.bybit.com/v5/market/kline"  # <--- NOWA STAŁA
+BYBIT_API_URL_V5_KLINE = "https://api.bybit.com/v5/market/kline"
 BYBIT_DEFAULT_CATEGORY = "linear"
 
 # --- Ustawienia bota ---

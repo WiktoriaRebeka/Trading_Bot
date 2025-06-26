@@ -1,4 +1,4 @@
-# /trading_bot/main.py (WERSJA FINALNA - Architektura Wielo-Kolekcyjna)
+# /trading_bot/main.py (WERSJA FINALNA v5.2)
 
 from flask import Flask, jsonify
 import logging
@@ -38,7 +38,7 @@ def warmup():
 
 @app.route('/run-bot-cycle', methods=['GET', 'POST'])
 def run_bot_cycle_endpoint():
-    logger.info("--- ROZPOCZĘCIE CYKLU BOTA (Architektura v5.1) ---")
+    logger.info("--- ROZPOCZĘCIE CYKLU BOTA (Architektura v5.2) ---")
 
     if not firebase_initialized:
         logger.error("Błąd krytyczny: Firebase nie jest zainicjowane.")
@@ -78,7 +78,6 @@ def run_bot_cycle_endpoint():
                 fetch_from_firestore.save_last_processed_timestamp(new_max_ts_dt)
 
         # === ETAP 2: EGZEKUCJA GŁÓWNEJ LOGIKI TRADINGOWEJ ===
-        # Główna logika sama pobiera potrzebne dane kline.
         bot_logic.run_trading_logic()
 
         logger.info("--- ZAKOŃCZENIE CYKLU BOTA ---")

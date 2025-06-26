@@ -1,4 +1,4 @@
-# /trading_bot/bot_logic.py (WERSJA FINALNA v5.2 - Kompletna i Poprawiona)
+# /trading_bot/bot_logic.py (WERSJA FINALNA v5.2)
 
 import logging
 import requests
@@ -18,8 +18,7 @@ logger = logging.getLogger(__name__)
 
 def get_latest_klines_batch(symbols: List[str]) -> Dict[str, List[Any]]:
     """Pobiera ostatnią świecę 1-min dla listy symboli."""
-    if not symbols:
-        return {}
+    if not symbols: return {}
     
     klines_by_symbol = {}
     for symbol in symbols:
@@ -62,7 +61,8 @@ def _handle_open_new_positions(klines_data: Dict[str, List[Any]], active_setups:
     for setup_doc in active_setups:
         symbol = setup_doc.id
         try:
-            if state_manager.is_position_open_for_symbol(symbol):
+            setup_data = setup_doc.to_dict()
+            if setup_data.get("is_position_open_on_this_setup", False):
                 continue
 
             latest_kline = klines_data.get(symbol)
@@ -70,7 +70,6 @@ def _handle_open_new_positions(klines_data: Dict[str, List[Any]], active_setups:
 
             kline_high, kline_low = float(latest_kline[2]), float(latest_kline[3])
             
-            setup_data = setup_doc.to_dict()
             alert_data = setup_data.get('alert_data', {})
             direction = str(alert_data.get('direction', '')).lower()
             entry_level = float(alert_data['entry'])
@@ -114,21 +113,25 @@ def _handle_manage_open_trades(klines_data: Dict[str, List[Any]], open_trades: L
         trade_id = trade_doc.id
         try:
             trade_data = trade_doc.to_dict()
-            symbol = trade_data['symbol']
-            
+            symbol = trade_data.get('symbol')
+            if not symbol: continue
+
             latest_kline = klines_data.get(symbol)
             if not latest_kline: continue
             
             kline_high, kline_low = float(latest_kline[2]), float(latest_kline[3])
             
-            direction, sl_price, tp_price = trade_data['direction'], trade_data['sl_price'], trade_data['tp_price']
+            direction = trade_data.get('direction')
+            sl_price = trade_data.get('sl_price')
+            tp_price = trade_data.get('tp_price')
+            if not all([direction, sl_price, tp_price]): continue
             
             closed_result, close_price = None, float(latest_kline[4])
 
-            if direction == 'long':
+            if direction.lower() == 'long':
                 if kline_low <= sl_price: closed_result, close_price = "LOSE", sl_price
                 elif kline_high >= tp_price: closed_result, close_price = "WIN", tp_price
-            elif direction == 'short':
+            elif direction.lower() == 'short':
                 if kline_high >= sl_price: closed_result, close_price = "LOSE", sl_price
                 elif kline_low <= tp_price: closed_result, close_price = "WIN", tp_price
             
@@ -150,26 +153,29 @@ def _handle_post_mortem_analysis(klines_data: Dict[str, List[Any]], analyzed_tra
         trade_id = trade_doc.id
         try:
             analysis_data = trade_doc.to_dict()
-            symbol = analysis_data['symbol']
+            symbol = analysis_data.get('symbol')
+            if not symbol: continue
             
             latest_kline = klines_data.get(symbol)
             if not latest_kline: continue
 
             kline_high, kline_low = float(latest_kline[2]), float(latest_kline[3])
             
-            direction = analysis_data['direction']
-            original_sl = analysis_data['original_sl']
+            direction = analysis_data.get('direction')
+            original_sl = analysis_data.get('original_sl')
             alert_snapshot = analysis_data.get('alert_data_snapshot', {})
             tp5_price_raw = alert_snapshot.get('tp_5_0')
-            tp5_price = float(tp5_price_raw) if tp5_price_raw is not None else (kline_high + 1 if direction == 'long' else kline_low - 1)
+            
+            if not all([direction, original_sl, tp5_price_raw]): continue
+            tp5_price = float(tp5_price_raw)
 
             should_remove = False
-            if (direction == 'long' and kline_low <= original_sl) or \
-               (direction == 'short' and kline_high >= original_sl):
+            if (direction.lower() == 'long' and kline_low <= original_sl) or \
+               (direction.lower() == 'short' and kline_high >= original_sl):
                 should_remove = True
             
-            if (direction == 'long' and kline_high >= tp5_price) or \
-               (direction == 'short' and kline_low <= tp5_price):
+            if (direction.lower() == 'long' and kline_high >= tp5_price) or \
+               (direction.lower() == 'short' and kline_low <= tp5_price):
                 should_remove = True
             
             if should_remove:
@@ -180,16 +186,10 @@ def _handle_post_mortem_analysis(klines_data: Dict[str, List[Any]], analyzed_tra
 
 def log_and_finalize_trade(trade_data: dict, closed_result: str, close_price: float):
     """Helper do analizy klines i logowania ZAMKNIĘTEJ transakcji do BigQuery."""
-    trade_id = trade_data.get('trade_id')
-    symbol = trade_data.get('symbol')
-    direction = trade_data.get('direction')
-    
-    if not all([trade_id, symbol, direction]):
-        logger.error(f"Brak kluczowych danych w trade_data do finalizacji: {trade_data}")
-        return
+    trade_id, symbol, direction = trade_data.get('trade_id'), trade_data.get('symbol'), trade_data.get('direction')
+    if not all([trade_id, symbol, direction]): return
 
-    logger.info(f"--- [ZAMKNIĘCIE: {closed_result}] --- [{symbol}] | ID: {trade_id} | Cena: {close_price}")
-
+    logger.info(f"--- [FINALIZACJA] --- [{symbol}] | ID: {trade_id} | Wynik: {closed_result}")
     close_timestamp_utc = datetime.now(timezone.utc)
     start_time_ms = trade_data.get('opened_at_ms')
     
@@ -197,7 +197,7 @@ def log_and_finalize_trade(trade_data: dict, closed_result: str, close_price: fl
     
     extreme_profit_price = close_price
     if klines:
-        if direction == 'long': extreme_profit_price = max(float(k[2]) for k in klines)
+        if direction.lower() == 'long': extreme_profit_price = max(float(k[2]) for k in klines)
         else: extreme_profit_price = min(float(k[3]) for k in klines)
     logger.info(f"[{symbol}][{trade_id}] Analiza historyczna. Ekstremum ceny: {extreme_profit_price}")
 
@@ -217,8 +217,8 @@ def log_and_finalize_trade(trade_data: dict, closed_result: str, close_price: fl
             if tp_value is not None:
                 try:
                     tp_price_level = float(tp_value)
-                    if (direction == 'long' and extreme_profit_price >= tp_price_level) or \
-                       (direction == 'short' and extreme_profit_price <= tp_price_level):
+                    if (direction.lower() == 'long' and extreme_profit_price >= tp_price_level) or \
+                       (direction.lower() == 'short' and extreme_profit_price <= tp_price_level):
                         achieved_rr_flags[rr_key] = True
                     else:
                         achieved_rr_flags[rr_key] = False
@@ -226,14 +226,10 @@ def log_and_finalize_trade(trade_data: dict, closed_result: str, close_price: fl
                     achieved_rr_flags[rr_key] = False
     
     bq_data = {
-        "trade_id": trade_id,
-        "timestamp_entry": trade_data.get('opened_at_iso', close_timestamp_utc.isoformat()),
-        "timestamp_close": close_timestamp_utc.isoformat(),
-        "symbol": symbol,
-        "direction": direction.upper(),
-        "main_result": closed_result,
-        "ob_type": trade_data.get('ob_type', 'N/A'),
-        "rr_achieved": rr_achieved,
+        "trade_id": trade_id, "timestamp_entry": trade_data.get('opened_at_iso'),
+        "timestamp_close": close_timestamp_utc.isoformat(), "symbol": symbol,
+        "direction": direction.upper(), "main_result": closed_result,
+        "ob_type": trade_data.get('ob_type', 'N/A'), "rr_achieved": rr_achieved,
     }
     for i in ['1_0', '1_5', '2_0', '3_0', '4_0', '5_0']:
         key_name_bq = f"rr_{i}_achieved"

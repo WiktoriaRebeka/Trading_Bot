@@ -1,4 +1,4 @@
-# /trading_bot/state_manager.py (WERSJA FINALNA - Architektura Wielo-Kolekcyjna)
+# /trading_bot/state_manager.py (WERSJA FINALNA v5.2 - Architektura Wielo-Kolekcyjna)
 
 import logging
 from typing import Iterable, Optional, Dict, Any
@@ -35,16 +35,14 @@ def update_setup_after_trade_open(symbol: str):
     logger.info(f"[{symbol}] Zaktualizowano setup: pozycja otwarta, zwiększono licznik prób.")
 
 def update_setup_after_trade_close(symbol: str, is_loss: bool):
-    """
-    Aktualizuje setup po zamknięciu pozycji. Po przegranej (LOSE),
-    ustawia flagę wymagającą resetu ceny.
-    """
+    """Aktualizuje setup po zamknięciu pozycji."""
     doc_ref = _get_db().collection(constants.SETUP_COLLECTION).document(symbol)
     update_data = {
         "is_position_open_on_this_setup": False,
         "is_reset_needed_after_loss": is_loss
     }
-    doc_ref.update(update_data)
+    # Używamy .set(merge=True), aby uniknąć błędu, jeśli setup został w międzyczasie nadpisany
+    doc_ref.set(update_data, merge=True)
     logger.info(f"[{symbol}] Zresetowano flagę otwartej pozycji w setupie. is_loss={is_loss}")
 
 def update_setup_after_price_reset(symbol: str):
@@ -52,7 +50,6 @@ def update_setup_after_price_reset(symbol: str):
     doc_ref = _get_db().collection(constants.SETUP_COLLECTION).document(symbol)
     doc_ref.update({"is_reset_needed_after_loss": False})
     logger.info(f"[{symbol}] Warunek resetu ceny spełniony. Można ponownie wchodzić w pozycję.")
-
 
 # ==============================================================================
 # === ZARZĄDZANIE OTWARTYMI POZYCJAMI (KOLEKCJA `open_trades`) ===
@@ -77,7 +74,6 @@ def create_open_trade(trade_id: str, symbol: str, direction: str, ob_type: str, 
     trade_doc_ref.set(trade_data)
     logger.info(f"[{symbol}][{trade_id}] Utworzono dokument dla otwartej pozycji w '{constants.TRADE_COLLECTION}'.")
     
-    # Jednocześnie aktualizujemy stan głównego setupu
     update_setup_after_trade_open(symbol)
 
 def remove_open_trade(trade_id: str):
@@ -86,7 +82,6 @@ def remove_open_trade(trade_id: str):
     doc_ref = db.collection(constants.TRADE_COLLECTION).document(trade_id)
     doc_ref.delete()
     logger.info(f"[{trade_id}] Usunięto pozycję z aktywnego monitorowania.")
-
 
 # ==============================================================================
 # === ZARZĄDZANIE ANALIZOWANYMI POZYCJAMI (KOLEKCJA `analyzed_trades`) ===
@@ -102,12 +97,9 @@ def create_analyzed_trade(trade_data: Dict):
     trade_id = trade_data['trade_id']
     doc_ref = db.collection(constants.ANALYZED_COLLECTION).document(trade_id)
     
-    # Zapisujemy tylko niezbędne dane do dalszej analizy
     analysis_data = {
-        "trade_id": trade_id,
-        "symbol": trade_data['symbol'],
-        "direction": trade_data['direction'],
-        "original_sl": trade_data['sl_price'],
+        "trade_id": trade_id, "symbol": trade_data['symbol'],
+        "direction": trade_data['direction'], "original_sl": trade_data['sl_price'],
         "alert_data_snapshot": trade_data.get('alert_data_snapshot', {})
     }
     doc_ref.set(analysis_data)

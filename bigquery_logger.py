@@ -1,4 +1,4 @@
-# /trading_bot/bigquery_logger.py (WERSJA FINALNA - Architektura Wielo-Kolekcyjna)
+# /trading_bot/bigquery_logger.py (WERSJA FINALNA v5.2)
 
 import logging
 from typing import Dict, Any, Optional
@@ -9,7 +9,6 @@ import constants
 
 logger = logging.getLogger(__name__)
 
-# SCHEMAT ZGODNY Z FINALNĄ, UPROSZCZONĄ TABELĄ W BIGQUERY
 EXPECTED_SCHEMA = {
     "trade_id": str, "timestamp_entry": str, "timestamp_close": str,
     "symbol": str, "direction": str, "main_result": str, "ob_type": str,
@@ -26,44 +25,68 @@ except Exception as e:
     bigquery_client, TABLE_REF = None, None
     logger.critical(f"Nie udało się zainicjalizować klienta BigQuery: {e}", exc_info=True)
 
-
 def _validate_and_sanitize_data(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    # ... (ta funkcja pozostaje bez zmian)
-    pass
+    sanitized_data = {}
+    for key, expected_type in EXPECTED_SCHEMA.items():
+        value = data.get(key)
+        if value is None and key in data:
+            sanitized_data[key] = None
+            continue
+        if value is None:
+            if expected_type == str: sanitized_data[key] = "N/A"
+            elif expected_type == float: sanitized_data[key] = 0.0
+            elif expected_type == bool: sanitized_data[key] = False
+            else: sanitized_data[key] = None
+            continue
+        try:
+            if not isinstance(value, expected_type):
+                sanitized_data[key] = expected_type(value)
+            else:
+                sanitized_data[key] = value
+        except (ValueError, TypeError):
+            logger.error(f"[BQ_VALIDATOR] Błąd konwersji typu dla klucza '{key}'.")
+            return None
+    return sanitized_data
 
 def log_trade_to_bigquery(trade_data: Dict):
     """Wstawia nowy, kompletny wiersz do BigQuery po zamknięciu transakcji."""
-    # ... (ta funkcja pozostaje bez zmian)
-    pass
+    if not bigquery_client: return
+    
+    sanitized_trade_data = _validate_and_sanitize_data(trade_data)
+    if sanitized_trade_data is None:
+        logger.error(f"Błąd walidacji danych dla {trade_data.get('trade_id')}. Zapis do BQ przerwany.")
+        return
+
+    logger.info(f"[BQ_LOGGER] Zapisuję do BigQuery: {sanitized_trade_data}")
+    try:
+        errors = bigquery_client.insert_rows_json(TABLE_REF, [sanitized_trade_data])
+        if not errors:
+            logger.info(f"[BQ_LOGGER] Pomyślnie zapisano transakcję {sanitized_trade_data.get('trade_id')}.")
+        else:
+            logger.error(f"[BQ_LOGGER] Błędy API podczas wstawiania danych do BQ dla {sanitized_trade_data.get('trade_id')}: {errors}")
+    except Exception as e:
+        logger.error(f"[BQ_LOGGER] Błąd API podczas zapisu do BQ dla {sanitized_trade_data.get('trade_id')}: {e}", exc_info=True)
 
 def update_analyzed_trade_in_bigquery(trade_id: str, updates: Dict[str, Any]):
-    """
-    Aktualizuje istniejący wiersz w BigQuery danymi z analizy post-mortem.
-    UWAGA: Ta funkcja wymaga, aby tabela nie miała bufora strumieniowego lub
-    aby dane były już w magazynie trwałym.
-    """
-    if not bigquery_client or not TABLE_REF:
-        logger.error("[BQ_UPDATER] Klient BigQuery nie jest dostępny. Pomijam aktualizację.")
-        return
+    """Aktualizuje istniejący wiersz w BigQuery danymi z analizy post-mortem."""
+    if not bigquery_client or not updates: return
 
-    if not updates:
-        return
-
-    set_clauses = ", ".join([f"{key} = {repr(value)}" for key, value in updates.items()])
+    set_clauses = []
+    for key, value in updates.items():
+        if isinstance(value, str):
+            set_clauses.append(f"{key} = '{value}'")
+        else:
+            set_clauses.append(f"{key} = {value}")
     
-    query = f"""
-        UPDATE `{TABLE_REF}`
-        SET {set_clauses}
-        WHERE trade_id = '{trade_id}'
-    """
+    query = f"UPDATE `{TABLE_REF}` SET {', '.join(set_clauses)} WHERE trade_id = '{trade_id}'"
     
-    logger.info(f"[BQ_UPDATER] Wykonuję zapytanie aktualizujące dla {trade_id}: {query}")
+    logger.info(f"[BQ_UPDATER] Wykonuję zapytanie: {query}")
     try:
         query_job = bigquery_client.query(query)
-        query_job.result()  # Czeka na zakończenie zadania
+        query_job.result()
         if query_job.num_dml_affected_rows > 0:
-            logger.info(f"[BQ_UPDATER] Pomyślnie zaktualizowano wiersz dla transakcji {trade_id}.")
+            logger.info(f"[BQ_UPDATER] Pomyślnie zaktualizowano wiersz dla {trade_id}.")
         else:
-            logger.warning(f"[BQ_UPDATER] Nie znaleziono wiersza do aktualizacji dla transakcji {trade_id}. Może jeszcze być w buforze.")
+            logger.warning(f"[BQ_UPDATER] Nie znaleziono wiersza do aktualizacji dla {trade_id}.")
     except Exception as e:
         logger.error(f"[BQ_UPDATER] Błąd podczas aktualizacji wiersza dla {trade_id}: {e}", exc_info=True)
