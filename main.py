@@ -1,10 +1,9 @@
-# /trading_bot/main.py (WERSJA FINALNA - Dostosowana do bot_logic v5.0)
+# /trading_bot/main.py (WERSJA FINALNA - Architektura Wielo-Kolekcyjna)
 
 from flask import Flask, jsonify
 import logging
 import sys
 import os
-import uuid  # Dodajemy import uuid, jeśli go nie było
 from datetime import datetime, timezone
 
 # --- Importy modułów aplikacji ---
@@ -39,7 +38,7 @@ def warmup():
 
 @app.route('/run-bot-cycle', methods=['GET', 'POST'])
 def run_bot_cycle_endpoint():
-    logger.info("--- ROZPOCZĘCIE CYKLU BOTA (Architektura Kline-Only) ---")
+    logger.info("--- ROZPOCZĘCIE CYKLU BOTA (Architektura v5.1) ---")
 
     if not firebase_initialized:
         logger.error("Błąd krytyczny: Firebase nie jest zainicjowane.")
@@ -64,10 +63,12 @@ def run_bot_cycle_endpoint():
 
                     doc_ref = db.collection(constants.SETUP_COLLECTION).document(symbol)
                     
+                    # Nowy alert unieważnia stary setup i resetuje jego stan.
                     new_setup_state = {
                         "alert_data": alert_data,
                         "entry_attempts": 0,
-                        "last_known_price": None, # To pole może zostać, ale nie jest już krytyczne
+                        "is_position_open_on_this_setup": False,
+                        "is_reset_needed_after_loss": False,
                         "updated_at": datetime.now(timezone.utc)
                     }
                     doc_ref.set(new_setup_state)
@@ -77,11 +78,7 @@ def run_bot_cycle_endpoint():
                 fetch_from_firestore.save_last_processed_timestamp(new_max_ts_dt)
 
         # === ETAP 2: EGZEKUCJA GŁÓWNEJ LOGIKI TRADINGOWEJ ===
-        
-        # NIE pobieramy już cen w main.py. Robi to sama logika bota.
-        # all_current_prices = bot_logic.get_all_prices_for_category() <--- USUNIĘTE
-        
-        # Uruchamiamy główną logikę bez żadnych argumentów.
+        # Główna logika sama pobiera potrzebne dane kline.
         bot_logic.run_trading_logic()
 
         logger.info("--- ZAKOŃCZENIE CYKLU BOTA ---")
