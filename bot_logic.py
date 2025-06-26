@@ -1,4 +1,4 @@
-# /trading_bot/bot_logic.py (WERSJA FINALNA v5.2)
+# /trading_bot/bot_logic.py (WERSJA FINALNA v5.3 - Poprawiona Logika Sprawdzania Stanu)
 
 import logging
 import requests
@@ -52,8 +52,6 @@ def get_historical_klines(symbol: str, start_time_ms: int, end_time_ms: int) -> 
 
 # --- GŁÓWNE BLOKI LOGIKI ---
 
-# Fragment do podmiany w /trading_bot/bot_logic.py
-
 def _handle_open_new_positions(klines_data: Dict[str, List[Any]], active_setups: List[DocumentSnapshot]):
     """Logika otwierania nowych pozycji na podstawie `active_setups`."""
     if not active_setups: return
@@ -63,43 +61,35 @@ def _handle_open_new_positions(klines_data: Dict[str, List[Any]], active_setups:
     for setup_doc in active_setups:
         symbol = setup_doc.id
         try:
-            # === LOG DIAGNOSTYCZNY ===
-            logger.info(f"[{symbol}] Przetwarzam setup...")
+            setup_data = setup_doc.to_dict()
 
-            if state_manager.is_position_open_for_symbol(symbol):
-                logger.info(f"[{symbol}] Pozycja jest już otwarta. Pomijam sprawdzanie wejścia.")
+            # === KLUCZOWA POPRAWKA ===
+            # Sprawdzamy flagę bezpośrednio z danych setupu, które już mamy,
+            # zamiast wywoływać nieistniejącą funkcję.
+            if setup_data.get("is_position_open_on_this_setup", False):
                 continue
 
             latest_kline = klines_data.get(symbol)
-            if not latest_kline:
-                logger.warning(f"[{symbol}] Brak danych kline do sprawdzenia wejścia w tym cyklu.")
-                continue
+            if not latest_kline: continue
 
-            kline_high = float(latest_kline[2])
-            kline_low = float(latest_kline[3])
-
-            setup_data = setup_doc.to_dict()
+            kline_high, kline_low = float(latest_kline[2]), float(latest_kline[3])
+            
             alert_data = setup_data.get('alert_data', {})
             direction = str(alert_data.get('direction', '')).lower()
             entry_level = float(alert_data['entry'])
             
-            # === LOG DIAGNOSTYCZNY ===
-            logger.info(f"[{symbol}] Dane do sprawdzenia wejścia: "
-                        f"Direction={direction}, Entry={entry_level}, "
-                        f"Kline High={kline_high}, Kline Low={kline_low}")
-            
             is_reset_needed = setup_data.get("is_reset_needed_after_loss", False)
             if is_reset_needed:
-                # ... (ta logika pozostaje bez zmian)
+                if (direction == 'long' and kline_high > entry_level) or \
+                   (direction == 'short' and kline_low < entry_level):
+                    state_manager.update_setup_after_price_reset(symbol)
                 continue
             
             should_open = False
             if direction == 'long' and kline_low <= entry_level: should_open = True
             elif direction == 'short' and kline_high >= entry_level: should_open = True
             
-            # === LOG DIAGNOSTYCZNY ===
             if should_open:
-                logger.info(f"[{symbol}] Warunek wejścia SPEŁNIONY.")
                 entry_attempts = setup_data.get('entry_attempts', 0)
                 ob_type = "Fresh OB" if entry_attempts == 0 else "Used OB"
                 trade_id = str(uuid.uuid4())
@@ -112,14 +102,11 @@ def _handle_open_new_positions(klines_data: Dict[str, List[Any]], active_setups:
                     entry_price=entry_price, sl_price=float(alert_data['sl']),
                     tp_price=float(alert_data['tp']), alert_data=alert_data
                 )
-            else:
-                logger.info(f"[{symbol}] Warunek wejścia NIESPEŁNIONY.")
-
         except (KeyError, ValueError, TypeError) as e:
             logger.warning(f"[{symbol}] Wadliwy setup. Błąd: {e}. Czekam na nowy alert.")
         except Exception as e:
             logger.error(f"[{symbol}] Błąd podczas sprawdzania wejścia: {e}", exc_info=True)
-            
+
 def _handle_manage_open_trades(klines_data: Dict[str, List[Any]], open_trades: List[DocumentSnapshot]):
     """Logika monitorowania i zamykania aktywnych transakcji z `open_trades`."""
     if not open_trades: return
@@ -163,7 +150,7 @@ def _handle_manage_open_trades(klines_data: Dict[str, List[Any]], open_trades: L
 def _handle_post_mortem_analysis(klines_data: Dict[str, List[Any]], analyzed_trades: List[DocumentSnapshot]):
     """Logika pasywnej analizy "duchów" transakcji z `analyzed_trades`."""
     if not analyzed_trades: return
-
+    
     logger.info(f"Analizuję {len(analyzed_trades)} zamkniętych pozycji.")
     
     for trade_doc in analyzed_trades:
