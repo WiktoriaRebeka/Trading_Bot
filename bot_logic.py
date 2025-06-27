@@ -1,10 +1,10 @@
-# /trading_bot/bot_logic.py (WERSJA FINALNA v5.3 - Poprawiona Logika Sprawdzania Stanu)
+# /trading_bot/bot_logic.py (WERSJA FINALNA v6.0 - Model "Sędziego")
 
 import logging
 import requests
 import uuid
 from typing import Dict, Any, List, Optional, Set
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from google.cloud.firestore_v1.document import DocumentSnapshot
 
 # Importy modułów aplikacji
@@ -52,20 +52,16 @@ def get_historical_klines(symbol: str, start_time_ms: int, end_time_ms: int) -> 
 
 # --- GŁÓWNE BLOKI LOGIKI ---
 
-def _handle_open_new_positions(klines_data: Dict[str, List[Any]], active_setups: List[DocumentSnapshot]):
-    """Logika otwierania nowych pozycji na podstawie `active_setups`."""
+def _handle_setups(klines_data: Dict[str, List[Any]], active_setups: List[DocumentSnapshot]):
+    """Logika analizująca setupy pod kątem wejścia lub natychmiastowego zamknięcia."""
     if not active_setups: return
     
-    logger.info(f"Sprawdzam {len(active_setups)} setupów pod kątem wejścia.")
+    logger.info(f"Sprawdzam {len(active_setups)} setupów.")
     
     for setup_doc in active_setups:
         symbol = setup_doc.id
         try:
             setup_data = setup_doc.to_dict()
-
-            # === KLUCZOWA POPRAWKA ===
-            # Sprawdzamy flagę bezpośrednio z danych setupu, które już mamy,
-            # zamiast wywoływać nieistniejącą funkcję.
             if setup_data.get("is_position_open_on_this_setup", False):
                 continue
 
@@ -77,38 +73,59 @@ def _handle_open_new_positions(klines_data: Dict[str, List[Any]], active_setups:
             alert_data = setup_data.get('alert_data', {})
             direction = str(alert_data.get('direction', '')).lower()
             entry_level = float(alert_data['entry'])
-            
+            sl_price = float(alert_data['sl'])
+            tp_price = float(alert_data['tp'])
+
             is_reset_needed = setup_data.get("is_reset_needed_after_loss", False)
             if is_reset_needed:
-                if (direction == 'long' and kline_high > entry_level) or \
-                   (direction == 'short' and kline_low < entry_level):
+                if (direction == 'long' and kline_high > entry_level) or (direction == 'short' and kline_low < entry_level):
                     state_manager.update_setup_after_price_reset(symbol)
                 continue
+
+            entry_triggered = False
+            if direction == 'long' and kline_low <= entry_level: entry_triggered = True
+            elif direction == 'short' and kline_high >= entry_level: entry_triggered = True
             
-            should_open = False
-            if direction == 'long' and kline_low <= entry_level: should_open = True
-            elif direction == 'short' and kline_high >= entry_level: should_open = True
-            
-            if should_open:
+            if entry_triggered:
+                closed_result, close_price = None, entry_level
+                
+                if direction == 'long':
+                    if kline_low <= sl_price: closed_result, close_price = "LOSE", sl_price
+                    elif kline_high >= tp_price: closed_result, close_price = "WIN", tp_price
+                elif direction == 'short':
+                    if kline_high >= sl_price: closed_result, close_price = "LOSE", sl_price
+                    elif kline_low <= tp_price: closed_result, close_price = "WIN", tp_price
+                
                 entry_attempts = setup_data.get('entry_attempts', 0)
                 ob_type = "Fresh OB" if entry_attempts == 0 else "Used OB"
                 trade_id = str(uuid.uuid4())
-                entry_price = entry_level
-                
-                logger.info(f"--- [DECYZJA: WEJŚCIE {ob_type}] --- [{symbol}] | Cena: {entry_price} | ID: {trade_id}")
-                
-                state_manager.create_open_trade(
-                    trade_id=trade_id, symbol=symbol, direction=direction, ob_type=ob_type,
-                    entry_price=entry_price, sl_price=float(alert_data['sl']),
-                    tp_price=float(alert_data['tp']), alert_data=alert_data
-                )
+
+                if closed_result:
+                    logger.info(f"--- [WEJŚCIE I ZAMKNIĘCIE W 1 MIN] --- [{symbol}] | Wynik: {closed_result} | ID: {trade_id}")
+                    now_utc = datetime.now(timezone.utc)
+                    fake_trade_data = {
+                        "trade_id": trade_id, "symbol": symbol, "direction": direction, "ob_type": ob_type,
+                        "entry_price": entry_level, "sl_price": sl_price, "tp_price": tp_price,
+                        "opened_at_ms": int(now_utc.timestamp() * 1000) - 60000,
+                        "opened_at_iso": (now_utc - timedelta(minutes=1)).isoformat(),
+                        "alert_data_snapshot": alert_data
+                    }
+                    log_and_finalize_trade(fake_trade_data, closed_result, close_price)
+                    state_manager.update_setup_after_trade_close(symbol, is_loss=(closed_result == "LOSE"))
+                    state_manager.update_setup_entry_attempt(symbol)
+                else:
+                    logger.info(f"--- [DECYZJA: WEJŚCIE {ob_type}] --- [{symbol}] | Cena: {entry_level} | ID: {trade_id}")
+                    state_manager.create_open_trade(
+                        trade_id=trade_id, symbol=symbol, direction=direction, ob_type=ob_type,
+                        entry_price=entry_level, sl_price=sl_price, tp_price=tp_price, alert_data=alert_data
+                    )
         except (KeyError, ValueError, TypeError) as e:
-            logger.warning(f"[{symbol}] Wadliwy setup. Błąd: {e}. Czekam na nowy alert.")
+            logger.warning(f"[{symbol}] Wadliwy setup. Błąd: {e}.")
         except Exception as e:
             logger.error(f"[{symbol}] Błąd podczas sprawdzania wejścia: {e}", exc_info=True)
 
 def _handle_manage_open_trades(klines_data: Dict[str, List[Any]], open_trades: List[DocumentSnapshot]):
-    """Logika monitorowania i zamykania aktywnych transakcji z `open_trades`."""
+    """Logika monitorowania już otwartych pozycji (z poprzednich cykli)."""
     if not open_trades: return
     
     logger.info(f"Monitoruję {len(open_trades)} otwartych pozycji.")
@@ -262,14 +279,15 @@ def run_trading_logic():
     latest_klines = get_latest_klines_batch(list(symbols_to_watch))
     
     try:
+        # Zmieniamy nazwę funkcji, aby pasowała do nowej logiki
+        _handle_setups(latest_klines, all_setups)
+    except Exception as e:
+        logger.error(f"Krytyczny błąd w _handle_setups: {e}", exc_info=True)
+
+    try:
         _handle_manage_open_trades(latest_klines, all_open_trades)
     except Exception as e:
         logger.error(f"Krytyczny błąd w _handle_manage_open_trades: {e}", exc_info=True)
-
-    try:
-        _handle_open_new_positions(latest_klines, all_setups)
-    except Exception as e:
-        logger.error(f"Krytyczny błąd w _handle_open_new_positions: {e}", exc_info=True)
 
     try:
         _handle_post_mortem_analysis(latest_klines, all_analyzed_trades)
