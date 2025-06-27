@@ -17,9 +17,7 @@ logger = logging.getLogger(__name__)
 # --- FUNKCJE POMOCNICZE ---
 
 def get_latest_klines_batch(symbols: List[str]) -> Dict[str, List[Any]]:
-    """Pobiera ostatnią świecę 1-min dla listy symboli."""
     if not symbols: return {}
-    
     klines_by_symbol = {}
     for symbol in symbols:
         params = {"category": "linear", "symbol": symbol.replace('.P', ''), "interval": "1", "limit": 1}
@@ -32,6 +30,22 @@ def get_latest_klines_batch(symbols: List[str]) -> Dict[str, List[Any]]:
         except Exception as e:
             logger.warning(f"[{symbol}] Nie udało się pobrać ostatniej świecy kline: {e}")
     return klines_by_symbol
+
+def get_historical_klines(symbol: str, start_time_ms: int, end_time_ms: int) -> List[List[Any]]:
+    params = {
+        "category": "linear", "symbol": symbol.replace('.P', ''), "interval": "1",
+        "start": start_time_ms, "end": end_time_ms, "limit": 1000
+    }
+    logger.info(f"[{symbol}] Pobieram historię kline od {start_time_ms} do {end_time_ms}")
+    try:
+        response = requests.get(constants.BYBIT_API_URL_V5_KLINE, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        if data.get("retCode") == 0 and data.get("result") and data["result"].get("list"):
+            return list(reversed(data["result"]["list"]))
+    except Exception as e:
+        logger.error(f"[{symbol}] Błąd przy pobieraniu historii kline: {e}", exc_info=True)
+    return []
 
 def get_historical_klines(symbol: str, start_time_ms: int, end_time_ms: int) -> List[List[Any]]:
     """Pobiera dane historyczne do analizy po zamknięciu."""
@@ -52,10 +66,9 @@ def get_historical_klines(symbol: str, start_time_ms: int, end_time_ms: int) -> 
 
 # --- GŁÓWNE BLOKI LOGIKI ---
 
+
 def _handle_setups(klines_data: Dict[str, List[Any]], active_setups: List[DocumentSnapshot]):
-    """Logika analizująca setupy pod kątem wejścia lub natychmiastowego zamknięcia."""
     if not active_setups: return
-    
     logger.info(f"Sprawdzam {len(active_setups)} setupów.")
     
     for setup_doc in active_setups:
@@ -100,7 +113,13 @@ def _handle_setups(klines_data: Dict[str, List[Any]], active_setups: List[Docume
                 ob_type = "Fresh OB" if entry_attempts == 0 else "Used OB"
                 trade_id = str(uuid.uuid4())
 
+                # === KLUCZOWA POPRAWKA KOLEJNOŚCI ===
+                
+                # Krok 1: ZAWSZE inkrementujemy licznik, bo próba wejścia miała miejsce
+                state_manager.update_setup_entry_attempt(symbol)
+
                 if closed_result:
+                    # Krok 2A: Wejście i natychmiastowe zamknięcie
                     logger.info(f"--- [WEJŚCIE I ZAMKNIĘCIE W 1 MIN] --- [{symbol}] | Wynik: {closed_result} | ID: {trade_id}")
                     now_utc = datetime.now(timezone.utc)
                     fake_trade_data = {
@@ -112,8 +131,8 @@ def _handle_setups(klines_data: Dict[str, List[Any]], active_setups: List[Docume
                     }
                     log_and_finalize_trade(fake_trade_data, closed_result, close_price)
                     state_manager.update_setup_after_trade_close(symbol, is_loss=(closed_result == "LOSE"))
-                    state_manager.update_setup_entry_attempt(symbol)
                 else:
+                    # Krok 2B: Tylko wejście, bez zamknięcia
                     logger.info(f"--- [DECYZJA: WEJŚCIE {ob_type}] --- [{symbol}] | Cena: {entry_level} | ID: {trade_id}")
                     state_manager.create_open_trade(
                         trade_id=trade_id, symbol=symbol, direction=direction, ob_type=ob_type,
@@ -124,6 +143,7 @@ def _handle_setups(klines_data: Dict[str, List[Any]], active_setups: List[Docume
         except Exception as e:
             logger.error(f"[{symbol}] Błąd podczas sprawdzania wejścia: {e}", exc_info=True)
 
+            
 def _handle_manage_open_trades(klines_data: Dict[str, List[Any]], open_trades: List[DocumentSnapshot]):
     """Logika monitorowania już otwartych pozycji (z poprzednich cykli)."""
     if not open_trades: return
