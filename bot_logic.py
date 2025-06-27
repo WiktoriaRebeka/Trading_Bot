@@ -1,12 +1,13 @@
-# /trading_bot/bot_logic.py (WERSJA FINALNA v6.4 - Model "Sędziego")
+# /trading_bot/bot_logic.py (WERSJA FINALNA v6.5 - Poprawna i Kompletna)
 
 import logging
 import requests
 import uuid
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Set
 from datetime import datetime, timezone, timedelta
 from google.cloud.firestore_v1.document import DocumentSnapshot
 
+# Importy modułów aplikacji
 import state_manager
 from bigquery_logger import log_trade_to_bigquery, update_analyzed_trade_in_bigquery
 import constants
@@ -16,7 +17,9 @@ logger = logging.getLogger(__name__)
 # --- FUNKCJE POMOCNICZE ---
 
 def get_latest_klines_batch(symbols: List[str]) -> Dict[str, List[Any]]:
+    """Pobiera ostatnią świecę 1-min dla listy symboli."""
     if not symbols: return {}
+    
     klines_by_symbol = {}
     for symbol in symbols:
         params = {"category": "linear", "symbol": symbol.replace('.P', ''), "interval": "1", "limit": 1}
@@ -31,6 +34,7 @@ def get_latest_klines_batch(symbols: List[str]) -> Dict[str, List[Any]]:
     return klines_by_symbol
 
 def get_historical_klines(symbol: str, start_time_ms: int, end_time_ms: int) -> List[List[Any]]:
+    """Pobiera dane historyczne do analizy po zamknięciu."""
     params = {
         "category": "linear", "symbol": symbol.replace('.P', ''), "interval": "1",
         "start": start_time_ms, "end": end_time_ms, "limit": 1000
@@ -49,6 +53,7 @@ def get_historical_klines(symbol: str, start_time_ms: int, end_time_ms: int) -> 
 # --- GŁÓWNE BLOKI LOGIKI ---
 
 def _handle_setups(klines_data: Dict[str, List[Any]], active_setups: List[DocumentSnapshot]):
+    """Logika analizująca setupy pod kątem wejścia lub natychmiastowego zamknięcia w tej samej świecy."""
     if not active_setups: return
     logger.info(f"Sprawdzam {len(active_setups)} aktywnych setupów.")
     
@@ -56,7 +61,8 @@ def _handle_setups(klines_data: Dict[str, List[Any]], active_setups: List[Docume
         symbol = setup_doc.id
         try:
             setup_data = setup_doc.to_dict()
-            if setup_data.get("is_position_open_on_this_setup", False): continue
+            if setup_data.get("is_position_open_on_this_setup", False):
+                continue
 
             latest_kline = klines_data.get(symbol)
             if not latest_kline: continue
@@ -92,7 +98,7 @@ def _handle_setups(klines_data: Dict[str, List[Any]], active_setups: List[Docume
                 entry_attempts = setup_data.get('entry_attempts', 0)
                 ob_type = "Fresh OB" if entry_attempts == 0 else "Used OB"
                 trade_id = str(uuid.uuid4())
-
+                
                 if closed_result:
                     logger.info(f"--- [WEJŚCIE I ZAMKNIĘCIE W 1 MIN] --- [{symbol}] | Wynik: {closed_result} | ID: {trade_id}")
                     now_utc = datetime.now(timezone.utc)
@@ -155,16 +161,15 @@ def _handle_post_mortem_analysis(klines_data: Dict[str, List[Any]], analyzed_tra
         trade_id = trade_doc.id
         try:
             analysis_data = trade_doc.to_dict()
-            symbol = analysis_data.get('symbol')
-            if not symbol: continue
+            symbol, direction = analysis_data.get('symbol'), analysis_data.get('direction')
+            if not all([symbol, direction]): continue
             latest_kline = klines_data.get(symbol)
             if not latest_kline: continue
             kline_high, kline_low = float(latest_kline[2]), float(latest_kline[3])
-            direction = analysis_data.get('direction')
             original_sl = analysis_data.get('original_sl')
             alert_snapshot = analysis_data.get('alert_data_snapshot', {})
             tp5_price_raw = alert_snapshot.get('tp_5_0')
-            if not all([direction, original_sl, tp5_price_raw]): continue
+            if not all([original_sl, tp5_price_raw]): continue
             tp5_price = float(tp5_price_raw)
             should_remove = False
             if (direction.lower() == 'long' and kline_low <= original_sl) or (direction.lower() == 'short' and kline_high >= original_sl):
@@ -172,8 +177,20 @@ def _handle_post_mortem_analysis(klines_data: Dict[str, List[Any]], analyzed_tra
             if (direction.lower() == 'long' and kline_high >= tp5_price) or (direction.lower() == 'short' and kline_low <= tp5_price):
                 should_remove = True
             if should_remove:
-                logger.info(f"[{trade_id}] Kończę analizę post-mortem (osiągnięto SL lub TP5).")
+                logger.info(f"[{trade_id}] Kończę analizę post-mortem.")
                 state_manager.remove_analyzed_trade(trade_id)
+            else:
+                start_time_ms = analysis_data.get('opened_at_ms')
+                entry_price = analysis_data.get('entry_price')
+                if not start_time_ms or not entry_price: continue
+                klines = get_historical_klines(symbol, start_time_ms, int(datetime.now(timezone.utc).timestamp() * 1000))
+                if not klines: continue
+                extreme_profit_price = max(float(k[2]) for k in klines) if direction.lower() == 'long' else min(float(k[3]) for k in klines)
+                risk_price_diff = abs(entry_price - original_sl)
+                max_profit_price_diff = abs(extreme_profit_price - entry_price)
+                rr_achieved = (max_profit_price_diff / risk_price_diff) if risk_price_diff > 0 else 0.0
+                updates_for_bq = {"rr_achieved": rr_achieved}
+                update_analyzed_trade_in_bigquery(trade_id, updates_for_bq)
         except Exception as e:
             logger.error(f"[{trade_id}] Błąd podczas analizy post-mortem: {e}", exc_info=True)
 
@@ -243,12 +260,10 @@ def run_trading_logic():
         _handle_setups(latest_klines, all_setups)
     except Exception as e:
         logger.error(f"Krytyczny błąd w _handle_setups: {e}", exc_info=True)
-
     try:
         _handle_manage_open_trades(latest_klines, all_open_trades)
     except Exception as e:
         logger.error(f"Krytyczny błąd w _handle_manage_open_trades: {e}", exc_info=True)
-
     try:
         _handle_post_mortem_analysis(latest_klines, all_analyzed_trades)
     except Exception as e:

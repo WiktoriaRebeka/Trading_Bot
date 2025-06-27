@@ -67,7 +67,32 @@ def log_trade_to_bigquery(trade_data: Dict):
     except Exception as e:
         logger.error(f"[BQ_LOGGER] Błąd API podczas zapisu do BQ dla {sanitized_trade_data.get('trade_id')}: {e}", exc_info=True)
 
+
 def update_analyzed_trade_in_bigquery(trade_id: str, updates: Dict[str, Any]):
+    """Aktualizuje istniejący wiersz w BigQuery danymi z analizy post-mortem."""
+    if not bigquery_client or not updates: return
+
+    set_clauses = []
+    for key, value in updates.items():
+        if isinstance(value, str):
+            set_clauses.append(f"`{key}` = '{value}'")
+        elif isinstance(value, bool):
+             set_clauses.append(f"`{key}` = {str(value).upper()}")
+        else:
+            set_clauses.append(f"`{key}` = {value}")
+    
+    query = f"UPDATE `{TABLE_REF}` SET {', '.join(set_clauses)} WHERE trade_id = '{trade_id}'"
+    
+    logger.info(f"[BQ_UPDATER] Wykonuję zapytanie: {query}")
+    try:
+        query_job = bigquery_client.query(query)
+        query_job.result()
+        if query_job.num_dml_affected_rows > 0:
+            logger.info(f"[BQ_UPDATER] Pomyślnie zaktualizowano wiersz dla {trade_id}.")
+        else:
+            logger.warning(f"[BQ_UPDATER] Nie znaleziono wiersza do aktualizacji dla {trade_id}.")
+    except Exception as e:
+        logger.error(f"[BQ_UPDATER] Błąd podczas aktualizacji wiersza dla {trade_id}: {e}", exc_info=True)
     """Aktualizuje istniejący wiersz w BigQuery danymi z analizy post-mortem."""
     if not bigquery_client or not updates: return
 
