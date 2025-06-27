@@ -1,13 +1,12 @@
-# /trading_bot/bot_logic.py (WERSJA FINALNA v6.2 - Poprawiona i Kompletna)
+# /trading_bot/bot_logic.py (WERSJA FINALNA v6.4 - Model "Sędziego")
 
 import logging
 import requests
 import uuid
-from typing import Dict, Any, List, Optional, Set
+from typing import Dict, Any, List
 from datetime import datetime, timezone, timedelta
 from google.cloud.firestore_v1.document import DocumentSnapshot
 
-# Importy modułów aplikacji
 import state_manager
 from bigquery_logger import log_trade_to_bigquery, update_analyzed_trade_in_bigquery
 import constants
@@ -17,9 +16,7 @@ logger = logging.getLogger(__name__)
 # --- FUNKCJE POMOCNICZE ---
 
 def get_latest_klines_batch(symbols: List[str]) -> Dict[str, List[Any]]:
-    """Pobiera ostatnią świecę 1-min dla listy symboli."""
     if not symbols: return {}
-    
     klines_by_symbol = {}
     for symbol in symbols:
         params = {"category": "linear", "symbol": symbol.replace('.P', ''), "interval": "1", "limit": 1}
@@ -34,7 +31,6 @@ def get_latest_klines_batch(symbols: List[str]) -> Dict[str, List[Any]]:
     return klines_by_symbol
 
 def get_historical_klines(symbol: str, start_time_ms: int, end_time_ms: int) -> List[List[Any]]:
-    """Pobiera dane historyczne do analizy po zamknięciu."""
     params = {
         "category": "linear", "symbol": symbol.replace('.P', ''), "interval": "1",
         "start": start_time_ms, "end": end_time_ms, "limit": 1000
@@ -53,17 +49,14 @@ def get_historical_klines(symbol: str, start_time_ms: int, end_time_ms: int) -> 
 # --- GŁÓWNE BLOKI LOGIKI ---
 
 def _handle_setups(klines_data: Dict[str, List[Any]], active_setups: List[DocumentSnapshot]):
-    """Logika analizująca setupy pod kątem wejścia lub natychmiastowego zamknięcia w tej samej świecy."""
     if not active_setups: return
-    
     logger.info(f"Sprawdzam {len(active_setups)} aktywnych setupów.")
     
     for setup_doc in active_setups:
         symbol = setup_doc.id
         try:
             setup_data = setup_doc.to_dict()
-            if setup_data.get("is_position_open_on_this_setup", False):
-                continue
+            if setup_data.get("is_position_open_on_this_setup", False): continue
 
             latest_kline = klines_data.get(symbol)
             if not latest_kline: continue
@@ -100,8 +93,6 @@ def _handle_setups(klines_data: Dict[str, List[Any]], active_setups: List[Docume
                 ob_type = "Fresh OB" if entry_attempts == 0 else "Used OB"
                 trade_id = str(uuid.uuid4())
 
-                state_manager.update_setup_entry_attempt(symbol)
-
                 if closed_result:
                     logger.info(f"--- [WEJŚCIE I ZAMKNIĘCIE W 1 MIN] --- [{symbol}] | Wynik: {closed_result} | ID: {trade_id}")
                     now_utc = datetime.now(timezone.utc)
@@ -114,6 +105,7 @@ def _handle_setups(klines_data: Dict[str, List[Any]], active_setups: List[Docume
                     }
                     log_and_finalize_trade(fake_trade_data, closed_result, close_price)
                     state_manager.update_setup_after_trade_close(symbol, is_loss=(closed_result == "LOSE"))
+                    state_manager.update_setup_entry_attempt(symbol)
                 else:
                     logger.info(f"--- [DECYZJA: WEJŚCIE {ob_type}] --- [{symbol}] | Cena: {entry_level} | ID: {trade_id}")
                     state_manager.create_open_trade(
@@ -126,37 +118,28 @@ def _handle_setups(klines_data: Dict[str, List[Any]], active_setups: List[Docume
             logger.error(f"[{symbol}] Błąd podczas sprawdzania wejścia: {e}", exc_info=True)
 
 def _handle_manage_open_trades(klines_data: Dict[str, List[Any]], open_trades: List[DocumentSnapshot]):
-    """Logika monitorowania już otwartych pozycji (z poprzednich cykli)."""
     if not open_trades: return
-    
     logger.info(f"Monitoruję {len(open_trades)} otwartych pozycji.")
-
     for trade_doc in open_trades:
         trade_id = trade_doc.id
         try:
             trade_data = trade_doc.to_dict()
             symbol = trade_data.get('symbol')
             if not symbol: continue
-
             latest_kline = klines_data.get(symbol)
             if not latest_kline: continue
-            
             kline_high, kline_low = float(latest_kline[2]), float(latest_kline[3])
-            
             direction = trade_data.get('direction')
             sl_price = trade_data.get('sl_price')
             tp_price = trade_data.get('tp_price')
             if not all([direction, sl_price, tp_price]): continue
-            
             closed_result, close_price = None, float(latest_kline[4])
-
             if direction.lower() == 'long':
                 if kline_low <= sl_price: closed_result, close_price = "LOSE", sl_price
                 elif kline_high >= tp_price: closed_result, close_price = "WIN", tp_price
             elif direction.lower() == 'short':
                 if kline_high >= sl_price: closed_result, close_price = "LOSE", sl_price
                 elif kline_low <= tp_price: closed_result, close_price = "WIN", tp_price
-            
             if closed_result:
                 log_and_finalize_trade(trade_data, closed_result, close_price)
                 state_manager.remove_open_trade(trade_id)
@@ -166,40 +149,28 @@ def _handle_manage_open_trades(klines_data: Dict[str, List[Any]], open_trades: L
             logger.error(f"[{trade_id}] Błąd podczas monitorowania otwartej pozycji: {e}", exc_info=True)
 
 def _handle_post_mortem_analysis(klines_data: Dict[str, List[Any]], analyzed_trades: List[DocumentSnapshot]):
-    """Logika pasywnej analizy 'duchów' transakcji."""
     if not analyzed_trades: return
-    
     logger.info(f"Analizuję {len(analyzed_trades)} zamkniętych pozycji.")
-    
     for trade_doc in analyzed_trades:
         trade_id = trade_doc.id
         try:
             analysis_data = trade_doc.to_dict()
             symbol = analysis_data.get('symbol')
             if not symbol: continue
-            
             latest_kline = klines_data.get(symbol)
             if not latest_kline: continue
-
             kline_high, kline_low = float(latest_kline[2]), float(latest_kline[3])
-            
             direction = analysis_data.get('direction')
             original_sl = analysis_data.get('original_sl')
             alert_snapshot = analysis_data.get('alert_data_snapshot', {})
             tp5_price_raw = alert_snapshot.get('tp_5_0')
-            
             if not all([direction, original_sl, tp5_price_raw]): continue
             tp5_price = float(tp5_price_raw)
-
             should_remove = False
-            if (direction.lower() == 'long' and kline_low <= original_sl) or \
-               (direction.lower() == 'short' and kline_high >= original_sl):
+            if (direction.lower() == 'long' and kline_low <= original_sl) or (direction.lower() == 'short' and kline_high >= original_sl):
                 should_remove = True
-            
-            if (direction.lower() == 'long' and kline_high >= tp5_price) or \
-               (direction.lower() == 'short' and kline_low <= tp5_price):
+            if (direction.lower() == 'long' and kline_high >= tp5_price) or (direction.lower() == 'short' and kline_low <= tp5_price):
                 should_remove = True
-            
             if should_remove:
                 logger.info(f"[{trade_id}] Kończę analizę post-mortem (osiągnięto SL lub TP5).")
                 state_manager.remove_analyzed_trade(trade_id)
@@ -207,31 +178,24 @@ def _handle_post_mortem_analysis(klines_data: Dict[str, List[Any]], analyzed_tra
             logger.error(f"[{trade_id}] Błąd podczas analizy post-mortem: {e}", exc_info=True)
 
 def log_and_finalize_trade(trade_data: dict, closed_result: str, close_price: float):
-    """Helper do analizy klines i logowania ZAMKNIĘTEJ transakcji do BigQuery."""
     trade_id, symbol, direction = trade_data.get('trade_id'), trade_data.get('symbol'), trade_data.get('direction')
     if not all([trade_id, symbol, direction]): return
-
     logger.info(f"--- [FINALIZACJA] --- [{symbol}] | ID: {trade_id} | Wynik: {closed_result}")
     close_timestamp_utc = datetime.now(timezone.utc)
     start_time_ms = trade_data.get('opened_at_ms')
-    
     klines = get_historical_klines(symbol, start_time_ms, int(close_timestamp_utc.timestamp() * 1000)) if start_time_ms else []
-    
     extreme_profit_price = close_price
     if klines:
         if direction.lower() == 'long': extreme_profit_price = max(float(k[2]) for k in klines)
         else: extreme_profit_price = min(float(k[3]) for k in klines)
     logger.info(f"[{symbol}][{trade_id}] Analiza historyczna. Ekstremum ceny: {extreme_profit_price}")
-
     entry_price, sl_price = trade_data.get('entry_price'), trade_data.get('sl_price')
-    
     if entry_price is None or sl_price is None:
         rr_achieved, achieved_rr_flags = 0.0, {}
     else:
         risk_price_diff = abs(entry_price - sl_price)
         max_profit_price_diff = abs(extreme_profit_price - entry_price)
         rr_achieved = (max_profit_price_diff / risk_price_diff) if risk_price_diff > 0 else 0.0
-        
         achieved_rr_flags = {}
         alert_snapshot = trade_data.get('alert_data_snapshot', {})
         rr_targets = {k: v for k, v in alert_snapshot.items() if k.startswith('tp_')}
@@ -246,7 +210,6 @@ def log_and_finalize_trade(trade_data: dict, closed_result: str, close_price: fl
                         achieved_rr_flags[rr_key] = False
                 except (ValueError, TypeError):
                     achieved_rr_flags[rr_key] = False
-    
     bq_data = {
         "trade_id": trade_id, "timestamp_entry": trade_data.get('opened_at_iso'),
         "timestamp_close": close_timestamp_utc.isoformat(), "symbol": symbol,
@@ -257,12 +220,9 @@ def log_and_finalize_trade(trade_data: dict, closed_result: str, close_price: fl
         key_name_bq = f"rr_{i}_achieved"
         key_name_local = f"tp_{i}"
         bq_data[key_name_bq] = achieved_rr_flags.get(key_name_local, False)
-
     log_trade_to_bigquery(bq_data)
 
 def run_trading_logic():
-    """Główna funkcja orkiestrująca, wywoływana z main.py."""
-    
     all_setups = list(state_manager.get_all_active_setups())
     all_open_trades = list(state_manager.get_all_open_trades())
     all_analyzed_trades = list(state_manager.get_all_analyzed_trades())

@@ -1,4 +1,4 @@
-# /trading_bot/bigquery_logger.py (WERSJA FINALNA v5.2)
+# /trading_bot/bigquery_logger.py (WERSJA FINALNA v6.4)
 
 import logging
 from typing import Dict, Any, Optional
