@@ -1,4 +1,4 @@
-# /trading_bot/state_manager.py (WERSJA FINALNA v6.5)
+# /trading_bot/state_manager.py (WERSJA FINALNA)
 
 import logging
 from typing import Iterable, Dict, Any
@@ -20,33 +20,21 @@ def get_all_active_setups() -> Iterable[DocumentSnapshot]:
     return _get_db().collection(constants.SETUP_COLLECTION).stream()
 
 def update_setup_entry_attempt(symbol: str):
-    """Bezpiecznie inkrementuje licznik prób wejścia."""
     doc_ref = _get_db().collection(constants.SETUP_COLLECTION).document(symbol)
     doc_ref.set({"entry_attempts": firestore.Increment(1)}, merge=True)
     logger.info(f"[{symbol}] Zwiększono licznik prób wejścia.")
 
 def update_setup_after_trade_open(symbol: str):
-    """Bezpiecznie aktualizuje setup po otwarciu nowej pozycji i inkrementuje licznik."""
     doc_ref = _get_db().collection(constants.SETUP_COLLECTION).document(symbol)
-    update_data = {
-        "is_position_open_on_this_setup": True,
-        "entry_attempts": firestore.Increment(1)
-    }
-    doc_ref.set(update_data, merge=True)
-    logger.info(f"[{symbol}] Zaktualizowano setup: pozycja otwarta, zwiększono licznik prób.")
+    doc_ref.set({"is_position_open_on_this_setup": True}, merge=True)
+    logger.info(f"[{symbol}] Zaktualizowano setup: pozycja otwarta.")
 
 def update_setup_after_trade_close(symbol: str, is_loss: bool):
-    """Bezpiecznie aktualizuje setup po zamknięciu pozycji."""
     doc_ref = _get_db().collection(constants.SETUP_COLLECTION).document(symbol)
-    update_data = {
-        "is_position_open_on_this_setup": False,
-        "is_reset_needed_after_loss": is_loss
-    }
-    doc_ref.set(update_data, merge=True)
+    doc_ref.set({"is_position_open_on_this_setup": False, "is_reset_needed_after_loss": is_loss}, merge=True)
     logger.info(f"[{symbol}] Zresetowano flagę otwartej pozycji w setupie. is_loss={is_loss}")
 
 def update_setup_after_price_reset(symbol: str):
-    """Bezpiecznie oznacza, że warunek resetu ceny po przegranej został spełniony."""
     doc_ref = _get_db().collection(constants.SETUP_COLLECTION).document(symbol)
     doc_ref.set({"is_reset_needed_after_loss": False}, merge=True)
     logger.info(f"[{symbol}] Warunek resetu ceny spełniony.")
@@ -68,6 +56,7 @@ def create_open_trade(trade_id: str, symbol: str, direction: str, ob_type: str, 
     trade_doc_ref.set(trade_data)
     logger.info(f"[{symbol}][{trade_id}] Utworzono dokument dla otwartej pozycji w '{constants.TRADE_COLLECTION}'.")
     update_setup_after_trade_open(symbol)
+    update_setup_entry_attempt(symbol)
 
 def remove_open_trade(trade_id: str):
     _get_db().collection(constants.TRADE_COLLECTION).document(trade_id).delete()
@@ -82,13 +71,22 @@ def create_analyzed_trade(trade_data: Dict):
     trade_id = trade_data['trade_id']
     doc_ref = db.collection(constants.ANALYZED_COLLECTION).document(trade_id)
     analysis_data = {
-        "trade_id": trade_id, "symbol": trade_data['symbol'],
-        "direction": trade_data['direction'], "original_sl": trade_data['sl_price'],
-        "entry_price": trade_data['entry_price'], "opened_at_ms": trade_data['opened_at_ms'],
-        "alert_data_snapshot": trade_data.get('alert_data_snapshot', {})
+        "trade_id": trade_data['trade_id'],
+        "symbol": trade_data['symbol'],
+        "direction": trade_data['direction'],
+        "original_sl": trade_data['sl_price'],
+        "entry_price": trade_data.get('entry_price'),
+        "opened_at_ms": trade_data.get('opened_at_ms'),
+        "alert_data_snapshot": trade_data.get('alert_data_snapshot', {}),
+        "last_bq_update_iso": None
     }
     doc_ref.set(analysis_data)
     logger.info(f"[{trade_id}] Utworzono pozycję do analizy post-mortem.")
+
+def update_analyzed_trade_timestamp(trade_id: str):
+    """Zapisuje znacznik czasu ostatniej udanej aktualizacji BQ."""
+    doc_ref = _get_db().collection(constants.ANALYZED_COLLECTION).document(trade_id)
+    doc_ref.set({"last_bq_update_iso": datetime.now(timezone.utc).isoformat()}, merge=True)
 
 def remove_analyzed_trade(trade_id: str):
     _get_db().collection(constants.ANALYZED_COLLECTION).document(trade_id).delete()
