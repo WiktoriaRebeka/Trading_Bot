@@ -1,16 +1,14 @@
-# /trading_bot/data_collector.py (WERSJA OSTATECZNA z Poprawnymi Importami)
+# /trading_bot/data_collector.py (WERSJA FINALNA z Poprawnymi Importami)
 
 import logging
 import requests
 import time
 from typing import List, Dict, Any
 
-# Zmiana na importy względne, aby działały w środowisku Cloud Functions
-from .firebase_client import get_db, initialize_firebase
-from . import constants
+# Poprawione, bezwzględne importy
+import firebase_client
+import constants
 
-# Inicjalizacja jest kluczowa dla działania funkcji w chmurze
-initialize_firebase()
 logger = logging.getLogger("app.data_collector")
 
 # === LISTA SYMBOLI DO OBSERWACJI ===
@@ -22,7 +20,7 @@ SYMBOLS_TO_WATCH = [
 ]
 
 def get_latest_klines_for_all_symbols() -> Dict[str, Dict[str, Any]]:
-    """Pobiera ostatnią świecę dla wszystkich zdefiniowanych symboli."""
+    """Pobiera ostatnią świecę dla wszystkich zdefiniowanych symboli z mechanizmem retry."""
     
     klines_data = {}
     for symbol in SYMBOLS_TO_WATCH:
@@ -60,7 +58,7 @@ def save_klines_to_firestore(klines_data: Dict[str, Dict[str, Any]]):
         logger.warning("Brak danych kline do zapisania.")
         return
 
-    db = get_db()
+    db = firebase_client.get_db()
     batch = db.batch()
     
     for symbol, data in klines_data.items():
@@ -71,7 +69,14 @@ def save_klines_to_firestore(klines_data: Dict[str, Dict[str, Any]]):
     logger.info(f"Pomyślnie zapisano/zaktualizowano dane kline dla {len(klines_data)} symboli.")
 
 def run_data_collection_cycle(request=None):
-    """Główna funkcja wywoływana przez Cloud Scheduler."""
+    """
+    Główna funkcja wywoływana przez Cloud Scheduler.
+    `request` jest potrzebny dla triggera HTTP w Cloud Functions.
+    """
+    # Inicjalizacja Firebase wewnątrz funkcji, aby zapewnić, że jest wykonana przy każdym wywołaniu
+    if not firebase_client.db_client:
+        firebase_client.initialize_firebase()
+
     logger.info("--- ROZPOCZĘCIE CYKLU KOLEKTORA DANYCH ---")
     try:
         klines = get_latest_klines_for_all_symbols()
@@ -82,6 +87,7 @@ def run_data_collection_cycle(request=None):
         logger.error(f"Krytyczny błąd w cyklu kolektora danych: {e}", exc_info=True)
         return "Error during data collection cycle.", 500
 
+# Ten blok jest tylko do testów lokalnych i nie jest używany w chmurze
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     run_data_collection_cycle()
