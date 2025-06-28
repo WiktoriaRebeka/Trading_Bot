@@ -1,0 +1,46 @@
+# .github/workflows/deploy-collector.yml
+
+name: Deploy Data Collector to Cloud Run
+
+on:
+  push:
+    branches:
+      - div
+    # Uruchom ten workflow tylko, jeśli zmieniono plik data_collector.py
+    paths:
+      - 'trading_bot/data_collector.py'
+      - 'trading_bot/firebase_client.py'
+      - 'trading_bot/constants.py'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Authenticate to Google Cloud
+        uses: 'google-github-actions/auth@v1'
+        with:
+          workload_identity_provider: 'projects/785819958951/locations/global/workloadIdentityPools/github-pool/providers/github-provider'
+          service_account: 'github-actions-sa@trading-bot-463318.iam.gserviceaccount.com'
+
+      - name: Set up Cloud SDK
+        uses: 'google-github-actions/setup-gcloud@v1'
+
+      - name: Deploy Data Collector Function
+        run: |-
+          gcloud functions deploy data-collector-func \
+            --gen2 \
+            --runtime python311 \
+            --region europe-central2 \
+            --source ./trading_bot \
+            --entry-point run_data_collection_cycle \
+            --trigger-http \
+            --allow-unauthenticated \
+            --vpc-connector app-connector-warsaw \
+            --egress-settings all
