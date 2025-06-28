@@ -1,20 +1,19 @@
-# /trading_bot/data_collector.py (NOWY PLIK)
+# /trading_bot/data_collector.py (WERSJA OSTATECZNA z Poprawnymi Importami)
 
 import logging
 import requests
 import time
 from typing import List, Dict, Any
 
-# Zmiana: importy muszą być względne, jeśli to część tego samego pakietu
-# lub bezwzględne, jeśli to oddzielny projekt. Zakładam, że są w tym samym.
-from firebase_client import get_db, initialize_firebase
-import constants
+# Zmiana na importy względne, aby działały w środowisku Cloud Functions
+from .firebase_client import get_db, initialize_firebase
+from . import constants
 
-# Inicjalizacja, jeśli to osobny proces
+# Inicjalizacja jest kluczowa dla działania funkcji w chmurze
 initialize_firebase()
 logger = logging.getLogger("app.data_collector")
 
-# === LISTA SYMBOLI DO OBSERWACJI (z Twojego zrzutu ekranu) ===
+# === LISTA SYMBOLI DO OBSERWACJI ===
 SYMBOLS_TO_WATCH = [
     "QNTUSDT.P", "TIAUSDT.P", "FILUSDT.P", "ATOMUSDT.P", "ICPUSDT.P",
     "AAVEUSDT.P", "APTUSDT.P", "NEARUSDT.P", "TAOUSDT.P", "UNIUSDT.P",
@@ -28,7 +27,7 @@ def get_latest_klines_for_all_symbols() -> Dict[str, Dict[str, Any]]:
     klines_data = {}
     for symbol in SYMBOLS_TO_WATCH:
         api_symbol = symbol.replace('.P', '')
-        params = {"category": "linear", "symbol": api_symbol, "interval": "1", "limit": 2} # Pobieramy 2
+        params = {"category": "linear", "symbol": api_symbol, "interval": "1", "limit": 2}
         
         max_retries = 3
         for attempt in range(max_retries):
@@ -36,10 +35,8 @@ def get_latest_klines_for_all_symbols() -> Dict[str, Dict[str, Any]]:
                 response = requests.get(constants.BYBIT_API_URL_V5_KLINE, params=params, timeout=3)
                 response.raise_for_status()
                 data = response.json()
-                if data.get("retCode") == 0 and data["result"]["list"]:
+                if data.get("retCode") == 0 and data.get("result") and data["result"].get("list"):
                     kline_list = data["result"]["list"]
-                    # Bierzemy przedostatnią świecę (indeks 1), jeśli istnieje.
-                    # Jest to nasze zabezpieczenie przed opóźnieniem API.
                     target_kline = kline_list[1] if len(kline_list) > 1 else kline_list[0]
                     
                     klines_data[symbol] = {
@@ -48,11 +45,11 @@ def get_latest_klines_for_all_symbols() -> Dict[str, Dict[str, Any]]:
                         "close": float(target_kline[4]),
                         "kline_timestamp": int(target_kline[0])
                     }
-                    break # Sukces, przerywamy pętlę ponowień
+                    break 
             except Exception as e:
                 logger.warning(f"[{symbol}] Próba {attempt + 1}/{max_retries} nieudana: {e}")
                 if attempt < max_retries - 1:
-                    time.sleep(0.5) # Czekaj 500ms przed kolejną próbą
+                    time.sleep(0.5)
                 else:
                     logger.error(f"[{symbol}] Nie udało się pobrać danych po {max_retries} próbach.")
     return klines_data
@@ -74,11 +71,7 @@ def save_klines_to_firestore(klines_data: Dict[str, Dict[str, Any]]):
     logger.info(f"Pomyślnie zapisano/zaktualizowano dane kline dla {len(klines_data)} symboli.")
 
 def run_data_collection_cycle(request=None):
-    """
-    Główna funkcja wywoływana przez Cloud Scheduler.
-    Pobiera dane i zapisuje je do Firestore.
-    `request` jest potrzebny dla triggera HTTP.
-    """
+    """Główna funkcja wywoływana przez Cloud Scheduler."""
     logger.info("--- ROZPOCZĘCIE CYKLU KOLEKTORA DANYCH ---")
     try:
         klines = get_latest_klines_for_all_symbols()
@@ -89,7 +82,6 @@ def run_data_collection_cycle(request=None):
         logger.error(f"Krytyczny błąd w cyklu kolektora danych: {e}", exc_info=True)
         return "Error during data collection cycle.", 500
 
-# Ten blok pozwala na testowanie pliku lokalnie, uruchamiając go bezpośrednio
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     run_data_collection_cycle()
