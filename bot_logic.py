@@ -1,12 +1,14 @@
-# /trading_bot/bot_logic.py (WERSJA FINALNA v6.5)
+# /trading_bot/bot_logic.py (WERSJA FINALNA v6.7 - z Poprawionym Importem)
 
 import logging
 import requests
 import uuid
+import time  # <--- DODANY BRAKUJĄCY IMPORT
 from typing import Dict, Any, List, Set
 from datetime import datetime, timezone, timedelta
 from google.cloud.firestore_v1.document import DocumentSnapshot
 
+# Importy modułów aplikacji
 import state_manager
 from bigquery_logger import log_trade_to_bigquery, update_analyzed_trade_in_bigquery
 import constants
@@ -16,25 +18,34 @@ logger = logging.getLogger(__name__)
 # --- FUNKCJE POMOCNICZE ---
 
 def get_latest_klines_batch(symbols: List[str]) -> Dict[str, List[Any]]:
+    """Pobiera ostatnią świecę 1-min dla listy symboli z mechanizmem retry."""
     if not symbols: return {}
+    
     klines_by_symbol = {}
     for symbol in symbols:
         params = {"category": "linear", "symbol": symbol.replace('.P', ''), "interval": "1", "limit": 2}
-        try:
-            response = requests.get(constants.BYBIT_API_URL_V5_KLINE, params=params, timeout=3)
-            response.raise_for_status()
-            data = response.json()
-            if data.get("retCode") == 0 and data.get("result") and data["result"].get("list"):
-                kline_list = data["result"]["list"]
-                if len(kline_list) >= 2:
-                    klines_by_symbol[symbol] = kline_list[1]
-                elif len(kline_list) == 1:
-                    klines_by_symbol[symbol] = kline_list[0]
-        except Exception as e:
-            logger.warning(f"[{symbol}] Nie udało się pobrać ostatnich świec kline: {e}")
+        
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = requests.get(constants.BYBIT_API_URL_V5_KLINE, params=params, timeout=3)
+                response.raise_for_status()
+                data = response.json()
+                if data.get("retCode") == 0 and data.get("result") and data["result"].get("list"):
+                    kline_list = data["result"]["list"]
+                    target_kline = kline_list[1] if len(kline_list) > 1 else kline_list[0]
+                    klines_by_symbol[symbol] = target_kline
+                    break 
+            except Exception as e:
+                logger.warning(f"[{symbol}] Próba {attempt + 1}/{max_retries} nieudana: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(0.5)
+                else:
+                    logger.error(f"[{symbol}] Nie udało się pobrać danych po {max_retries} próbach.")
     return klines_by_symbol
 
 def get_historical_klines(symbol: str, start_time_ms: int, end_time_ms: int) -> List[List[Any]]:
+    """Pobiera dane historyczne do analizy po zamknięciu."""
     params = {
         "category": "linear", "symbol": symbol.replace('.P', ''), "interval": "1",
         "start": start_time_ms, "end": end_time_ms, "limit": 1000
@@ -53,6 +64,7 @@ def get_historical_klines(symbol: str, start_time_ms: int, end_time_ms: int) -> 
 # --- GŁÓWNE BLOKI LOGIKI ---
 
 def _handle_setups(klines_data: Dict[str, List[Any]], active_setups: List[DocumentSnapshot]):
+    """Logika analizująca setupy pod kątem wejścia lub natychmiastowego zamknięcia w tej samej świecy."""
     if not active_setups: return
     logger.info(f"Sprawdzam {len(active_setups)} aktywnych setupów.")
     
@@ -60,7 +72,8 @@ def _handle_setups(klines_data: Dict[str, List[Any]], active_setups: List[Docume
         symbol = setup_doc.id
         try:
             setup_data = setup_doc.to_dict()
-            if setup_data.get("is_position_open_on_this_setup", False): continue
+            if setup_data.get("is_position_open_on_this_setup", False):
+                continue
 
             latest_kline = klines_data.get(symbol)
             if not latest_kline: continue
@@ -109,7 +122,7 @@ def _handle_setups(klines_data: Dict[str, List[Any]], active_setups: List[Docume
                     }
                     log_and_finalize_trade(fake_trade_data, closed_result, close_price)
                     state_manager.update_setup_after_trade_close(symbol, is_loss=(closed_result == "LOSE"))
-                    state_manager.update_setup_entry_attempt(symbol) # Inkrementujemy licznik
+                    state_manager.update_setup_entry_attempt(symbol)
                 else:
                     logger.info(f"--- [DECYZJA: WEJŚCIE {ob_type}] --- [{symbol}] | Cena: {entry_level} | ID: {trade_id}")
                     state_manager.create_open_trade(
@@ -170,25 +183,43 @@ def _handle_post_mortem_analysis(klines_data: Dict[str, List[Any]], analyzed_tra
             if not all([original_sl, tp5_price_raw]): continue
             tp5_price = float(tp5_price_raw)
             should_remove = False
-            if (direction.lower() == 'long' and kline_low <= original_sl) or (direction.lower() == 'short' and kline_high >= original_sl):
+            if (direction.lower() == 'long' and kline_low <= original_sl) or \
+               (direction.lower() == 'short' and kline_high >= original_sl):
                 should_remove = True
-            if (direction.lower() == 'long' and kline_high >= tp5_price) or (direction.lower() == 'short' and kline_low <= tp5_price):
+            if (direction.lower() == 'long' and kline_high >= tp5_price) or \
+               (direction.lower() == 'short' and kline_low <= tp5_price):
                 should_remove = True
             if should_remove:
                 logger.info(f"[{trade_id}] Kończę analizę post-mortem.")
                 state_manager.remove_analyzed_trade(trade_id)
-            else:
-                start_time_ms = analysis_data.get('opened_at_ms')
-                entry_price = analysis_data.get('entry_price')
-                if not start_time_ms or not entry_price: continue
-                klines = get_historical_klines(symbol, start_time_ms, int(datetime.now(timezone.utc).timestamp() * 1000))
-                if not klines: continue
-                extreme_profit_price = max(float(k[2]) for k in klines) if direction.lower() == 'long' else min(float(k[3]) for k in klines)
-                risk_price_diff = abs(entry_price - original_sl)
-                max_profit_price_diff = abs(extreme_profit_price - entry_price)
-                rr_achieved = (max_profit_price_diff / risk_price_diff) if risk_price_diff > 0 else 0.0
-                updates_for_bq = {"rr_achieved": rr_achieved}
-                update_analyzed_trade_in_bigquery(trade_id, updates_for_bq)
+                continue
+            last_bq_update_str = analysis_data.get('last_bq_update_iso')
+            if last_bq_update_str:
+                last_bq_update = datetime.fromisoformat(last_bq_update_str)
+                if (datetime.now(timezone.utc) - last_bq_update).total_seconds() < 300:
+                    continue
+            start_time_ms = analysis_data.get('opened_at_ms')
+            entry_price = analysis_data.get('entry_price')
+            if not start_time_ms or not entry_price: continue
+            klines = get_historical_klines(symbol, start_time_ms, int(datetime.now(timezone.utc).timestamp() * 1000))
+            if not klines: continue
+            extreme_profit_price = max(float(k[2]) for k in klines) if direction.lower() == 'long' else min(float(k[3]) for k in klines)
+            risk_price_diff = abs(entry_price - original_sl)
+            max_profit_price_diff = abs(extreme_profit_price - entry_price)
+            rr_achieved = (max_profit_price_diff / risk_price_diff) if risk_price_diff > 0 else 0.0
+            updates_for_bq = {"rr_achieved": rr_achieved}
+            rr_targets = {k: v for k, v in alert_snapshot.items() if k.startswith('tp_')}
+            for rr_key, tp_value in rr_targets.items():
+                if tp_value is not None:
+                    tp_price_level = float(tp_value)
+                    key_name_bq = f"rr_{rr_key.split('_')[1]}_{rr_key.split('_')[2]}_achieved"
+                    if (direction.lower() == 'long' and extreme_profit_price >= tp_price_level) or \
+                       (direction.lower() == 'short' and extreme_profit_price <= tp_price_level):
+                        updates_for_bq[key_name_bq] = True
+                    else:
+                        updates_for_bq[key_name_bq] = False
+            update_analyzed_trade_in_bigquery(trade_id, updates_for_bq)
+            state_manager.update_analyzed_trade_timestamp(trade_id)
         except Exception as e:
             logger.error(f"[{trade_id}] Błąd podczas analizy post-mortem: {e}", exc_info=True)
 
