@@ -36,3 +36,5 @@ if not BYBIT_API_KEY or not BYBIT_API_SECRET:
 BIGQUERY_PROJECT_ID = os.getenv("GCP_PROJECT", "trading-bot-463318")
 BIGQUERY_DATASET_ID = "trading_analytics"
 BIGQUERY_TABLE_ID = "trades_history"
+
+KLINE_DATA_COLLECTION = "latest_klines"
