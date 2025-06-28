@@ -6,8 +6,8 @@ on:
       - div # Lub Twoja główna gałąź
     paths:
       - 'trading_bot/data_collector.py'
-      - 'trading_bot/collector_main.py'  # <-- NOWY PLIK
-      - 'Dockerfile.collector'           # <-- NOWY PLIK
+      - 'trading_bot/collector_main.py'
+      - 'Dockerfile.collector'
       - 'trading_bot/firebase_client.py'
       - 'trading_bot/constants.py'
 
@@ -32,14 +32,14 @@ jobs:
       - name: Set up Cloud SDK
         uses: 'google-github-actions/setup-gcloud@v1'
 
-      # --- POCZĄTEK ZMIAN: Budowanie i wdrażanie kontenera ---
-      
       - name: Configure Docker
         run: gcloud auth configure-docker europe-central2-docker.pkg.dev
 
+      # --- POCZĄTEK POPRAWKI ---
       - name: Build and Push Docker image for Collector
         run: |-
-          gcloud builds submit --tag europe-central2-docker.pkg.dev/trading-bot-463318/trading-bot-image/data-collector-service:latest --file=Dockerfile.collector
+          gcloud builds submit --tag europe-central2-docker.pkg.dev/trading-bot-463318/trading-bot-image/data-collector-service:latest --file Dockerfile.collector
+      # --- KONIEC POPRAWKI ---
 
       - name: Deploy Collector to Cloud Run
         run: |-
@@ -49,5 +49,3 @@ jobs:
             --allow-unauthenticated \
             --vpc-connector app-connector-warsaw \
             --vpc-egress all
-            
-      # --- KONIEC ZMIAN ---
