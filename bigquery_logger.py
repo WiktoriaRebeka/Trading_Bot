@@ -1,4 +1,4 @@
-# /trading_bot/bigquery_logger.py (WERSJA FINALNA v6.4)
+# /trading_bot/bigquery_logger.py (WERSJA FINALNA v6.5)
 
 import logging
 from typing import Dict, Any, Optional
@@ -29,13 +29,11 @@ def _validate_and_sanitize_data(data: Dict[str, Any]) -> Optional[Dict[str, Any]
     sanitized_data = {}
     for key, expected_type in EXPECTED_SCHEMA.items():
         value = data.get(key)
-        if value is None and key in data:
-            sanitized_data[key] = None
-            continue
         if value is None:
-            if expected_type == str: sanitized_data[key] = "N/A"
+            if key.endswith('_achieved'):
+                sanitized_data[key] = False # Flagi domyślnie na False
+            elif expected_type == str: sanitized_data[key] = "N/A"
             elif expected_type == float: sanitized_data[key] = 0.0
-            elif expected_type == bool: sanitized_data[key] = False
             else: sanitized_data[key] = None
             continue
         try:
@@ -67,7 +65,6 @@ def log_trade_to_bigquery(trade_data: Dict):
     except Exception as e:
         logger.error(f"[BQ_LOGGER] Błąd API podczas zapisu do BQ dla {sanitized_trade_data.get('trade_id')}: {e}", exc_info=True)
 
-
 def update_analyzed_trade_in_bigquery(trade_id: str, updates: Dict[str, Any]):
     """Aktualizuje istniejący wiersz w BigQuery danymi z analizy post-mortem."""
     if not bigquery_client or not updates: return
@@ -80,28 +77,6 @@ def update_analyzed_trade_in_bigquery(trade_id: str, updates: Dict[str, Any]):
              set_clauses.append(f"`{key}` = {str(value).upper()}")
         else:
             set_clauses.append(f"`{key}` = {value}")
-    
-    query = f"UPDATE `{TABLE_REF}` SET {', '.join(set_clauses)} WHERE trade_id = '{trade_id}'"
-    
-    logger.info(f"[BQ_UPDATER] Wykonuję zapytanie: {query}")
-    try:
-        query_job = bigquery_client.query(query)
-        query_job.result()
-        if query_job.num_dml_affected_rows > 0:
-            logger.info(f"[BQ_UPDATER] Pomyślnie zaktualizowano wiersz dla {trade_id}.")
-        else:
-            logger.warning(f"[BQ_UPDATER] Nie znaleziono wiersza do aktualizacji dla {trade_id}.")
-    except Exception as e:
-        logger.error(f"[BQ_UPDATER] Błąd podczas aktualizacji wiersza dla {trade_id}: {e}", exc_info=True)
-    """Aktualizuje istniejący wiersz w BigQuery danymi z analizy post-mortem."""
-    if not bigquery_client or not updates: return
-
-    set_clauses = []
-    for key, value in updates.items():
-        if isinstance(value, str):
-            set_clauses.append(f"{key} = '{value}'")
-        else:
-            set_clauses.append(f"{key} = {value}")
     
     query = f"UPDATE `{TABLE_REF}` SET {', '.join(set_clauses)} WHERE trade_id = '{trade_id}'"
     

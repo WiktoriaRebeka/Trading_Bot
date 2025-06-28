@@ -1,7 +1,7 @@
-# /trading_bot/state_manager.py (WERSJA FINALNA v6.4)
+# /trading_bot/state_manager.py (WERSJA FINALNA v6.5)
 
 import logging
-from typing import Iterable, Optional, Dict, Any
+from typing import Iterable, Dict, Any
 from datetime import datetime, timezone
 from google.cloud.firestore_v1.document import DocumentSnapshot
 from google.cloud.firestore_v1.base_client import BaseClient
@@ -26,16 +26,23 @@ def update_setup_entry_attempt(symbol: str):
     logger.info(f"[{symbol}] Zwiększono licznik prób wejścia.")
 
 def update_setup_after_trade_open(symbol: str):
-    """Bezpiecznie aktualizuje setup po otwarciu nowej pozycji."""
+    """Bezpiecznie aktualizuje setup po otwarciu nowej pozycji i inkrementuje licznik."""
     doc_ref = _get_db().collection(constants.SETUP_COLLECTION).document(symbol)
-    doc_ref.set({"is_position_open_on_this_setup": True}, merge=True)
-    logger.info(f"[{symbol}] Zaktualizowano setup: pozycja otwarta.")
-    update_setup_entry_attempt(symbol)
+    update_data = {
+        "is_position_open_on_this_setup": True,
+        "entry_attempts": firestore.Increment(1)
+    }
+    doc_ref.set(update_data, merge=True)
+    logger.info(f"[{symbol}] Zaktualizowano setup: pozycja otwarta, zwiększono licznik prób.")
 
 def update_setup_after_trade_close(symbol: str, is_loss: bool):
     """Bezpiecznie aktualizuje setup po zamknięciu pozycji."""
     doc_ref = _get_db().collection(constants.SETUP_COLLECTION).document(symbol)
-    doc_ref.set({"is_position_open_on_this_setup": False, "is_reset_needed_after_loss": is_loss}, merge=True)
+    update_data = {
+        "is_position_open_on_this_setup": False,
+        "is_reset_needed_after_loss": is_loss
+    }
+    doc_ref.set(update_data, merge=True)
     logger.info(f"[{symbol}] Zresetowano flagę otwartej pozycji w setupie. is_loss={is_loss}")
 
 def update_setup_after_price_reset(symbol: str):
@@ -52,7 +59,6 @@ def create_open_trade(trade_id: str, symbol: str, direction: str, ob_type: str, 
     db = _get_db()
     trade_doc_ref = db.collection(constants.TRADE_COLLECTION).document(trade_id)
     timestamp_utc = datetime.now(timezone.utc)
-    
     trade_data = {
         "trade_id": trade_id, "symbol": symbol, "direction": direction,
         "ob_type": ob_type, "entry_price": entry_price, "sl_price": sl_price,
@@ -78,6 +84,7 @@ def create_analyzed_trade(trade_data: Dict):
     analysis_data = {
         "trade_id": trade_id, "symbol": trade_data['symbol'],
         "direction": trade_data['direction'], "original_sl": trade_data['sl_price'],
+        "entry_price": trade_data['entry_price'], "opened_at_ms": trade_data['opened_at_ms'],
         "alert_data_snapshot": trade_data.get('alert_data_snapshot', {})
     }
     doc_ref.set(analysis_data)

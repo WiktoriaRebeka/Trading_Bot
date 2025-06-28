@@ -1,4 +1,4 @@
-# /trading_bot/main.py (WERSJA FINALNA v6.4)
+# /trading_bot/main.py (WERSJA FINALNA v6.5)
 
 from flask import Flask, jsonify
 import logging
@@ -27,7 +27,7 @@ def health_check():
 
 @app.route('/run-bot-cycle', methods=['GET', 'POST'])
 def run_bot_cycle_endpoint():
-    logger.info("--- ROZPOCZĘCIE CYKLU BOTA (Architektura v6.4) ---")
+    logger.info("--- ROZPOCZĘCIE CYKLU BOTA (Architektura v6.5) ---")
     if not firebase_initialized:
         return jsonify({"status": "error", "message": "Firestore not initialized"}), 500
 

@@ -1,4 +1,4 @@
-# /trading_bot/bot_logic.py (WERSJA FINALNA v6.5 - Poprawna i Kompletna)
+# /trading_bot/bot_logic.py (WERSJA FINALNA v6.5)
 
 import logging
 import requests
@@ -7,7 +7,6 @@ from typing import Dict, Any, List, Set
 from datetime import datetime, timezone, timedelta
 from google.cloud.firestore_v1.document import DocumentSnapshot
 
-# Importy modułów aplikacji
 import state_manager
 from bigquery_logger import log_trade_to_bigquery, update_analyzed_trade_in_bigquery
 import constants
@@ -17,24 +16,25 @@ logger = logging.getLogger(__name__)
 # --- FUNKCJE POMOCNICZE ---
 
 def get_latest_klines_batch(symbols: List[str]) -> Dict[str, List[Any]]:
-    """Pobiera ostatnią świecę 1-min dla listy symboli."""
     if not symbols: return {}
-    
     klines_by_symbol = {}
     for symbol in symbols:
-        params = {"category": "linear", "symbol": symbol.replace('.P', ''), "interval": "1", "limit": 1}
+        params = {"category": "linear", "symbol": symbol.replace('.P', ''), "interval": "1", "limit": 2}
         try:
-            response = requests.get(constants.BYBIT_API_URL_V5_KLINE, params=params, timeout=2)
+            response = requests.get(constants.BYBIT_API_URL_V5_KLINE, params=params, timeout=3)
             response.raise_for_status()
             data = response.json()
             if data.get("retCode") == 0 and data.get("result") and data["result"].get("list"):
-                klines_by_symbol[symbol] = data["result"]["list"][0]
+                kline_list = data["result"]["list"]
+                if len(kline_list) >= 2:
+                    klines_by_symbol[symbol] = kline_list[1]
+                elif len(kline_list) == 1:
+                    klines_by_symbol[symbol] = kline_list[0]
         except Exception as e:
-            logger.warning(f"[{symbol}] Nie udało się pobrać ostatniej świecy kline: {e}")
+            logger.warning(f"[{symbol}] Nie udało się pobrać ostatnich świec kline: {e}")
     return klines_by_symbol
 
 def get_historical_klines(symbol: str, start_time_ms: int, end_time_ms: int) -> List[List[Any]]:
-    """Pobiera dane historyczne do analizy po zamknięciu."""
     params = {
         "category": "linear", "symbol": symbol.replace('.P', ''), "interval": "1",
         "start": start_time_ms, "end": end_time_ms, "limit": 1000
@@ -53,7 +53,6 @@ def get_historical_klines(symbol: str, start_time_ms: int, end_time_ms: int) -> 
 # --- GŁÓWNE BLOKI LOGIKI ---
 
 def _handle_setups(klines_data: Dict[str, List[Any]], active_setups: List[DocumentSnapshot]):
-    """Logika analizująca setupy pod kątem wejścia lub natychmiastowego zamknięcia w tej samej świecy."""
     if not active_setups: return
     logger.info(f"Sprawdzam {len(active_setups)} aktywnych setupów.")
     
@@ -61,8 +60,7 @@ def _handle_setups(klines_data: Dict[str, List[Any]], active_setups: List[Docume
         symbol = setup_doc.id
         try:
             setup_data = setup_doc.to_dict()
-            if setup_data.get("is_position_open_on_this_setup", False):
-                continue
+            if setup_data.get("is_position_open_on_this_setup", False): continue
 
             latest_kline = klines_data.get(symbol)
             if not latest_kline: continue
@@ -98,7 +96,7 @@ def _handle_setups(klines_data: Dict[str, List[Any]], active_setups: List[Docume
                 entry_attempts = setup_data.get('entry_attempts', 0)
                 ob_type = "Fresh OB" if entry_attempts == 0 else "Used OB"
                 trade_id = str(uuid.uuid4())
-                
+
                 if closed_result:
                     logger.info(f"--- [WEJŚCIE I ZAMKNIĘCIE W 1 MIN] --- [{symbol}] | Wynik: {closed_result} | ID: {trade_id}")
                     now_utc = datetime.now(timezone.utc)
@@ -111,7 +109,7 @@ def _handle_setups(klines_data: Dict[str, List[Any]], active_setups: List[Docume
                     }
                     log_and_finalize_trade(fake_trade_data, closed_result, close_price)
                     state_manager.update_setup_after_trade_close(symbol, is_loss=(closed_result == "LOSE"))
-                    state_manager.update_setup_entry_attempt(symbol)
+                    state_manager.update_setup_entry_attempt(symbol) # Inkrementujemy licznik
                 else:
                     logger.info(f"--- [DECYZJA: WEJŚCIE {ob_type}] --- [{symbol}] | Cena: {entry_level} | ID: {trade_id}")
                     state_manager.create_open_trade(
