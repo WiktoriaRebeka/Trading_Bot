@@ -1,0 +1,95 @@
+# /trading_bot/data_collector.py (NOWY PLIK)
+
+import logging
+import requests
+import time
+from typing import List, Dict, Any
+
+# Zmiana: importy muszą być względne, jeśli to część tego samego pakietu
+# lub bezwzględne, jeśli to oddzielny projekt. Zakładam, że są w tym samym.
+from firebase_client import get_db, initialize_firebase
+import constants
+
+# Inicjalizacja, jeśli to osobny proces
+initialize_firebase()
+logger = logging.getLogger("app.data_collector")
+
+# === LISTA SYMBOLI DO OBSERWACJI (z Twojego zrzutu ekranu) ===
+SYMBOLS_TO_WATCH = [
+    "QNTUSDT.P", "TIAUSDT.P", "FILUSDT.P", "ATOMUSDT.P", "ICPUSDT.P",
+    "AAVEUSDT.P", "APTUSDT.P", "NEARUSDT.P", "TAOUSDT.P", "UNIUSDT.P",
+    "XMRUSDT.P", "DOTUSDT.P", "HYPEUSDT.P", "TONUSDT.P", "AVAXUSDT.P",
+    "LINKUSDT.P", "SUIUSDT.P", "SOLUSDT.P", "XRPUSDT.P", "LTCUSDT.P"
+]
+
+def get_latest_klines_for_all_symbols() -> Dict[str, Dict[str, Any]]:
+    """Pobiera ostatnią świecę dla wszystkich zdefiniowanych symboli."""
+    
+    klines_data = {}
+    for symbol in SYMBOLS_TO_WATCH:
+        api_symbol = symbol.replace('.P', '')
+        params = {"category": "linear", "symbol": api_symbol, "interval": "1", "limit": 2} # Pobieramy 2
+        
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = requests.get(constants.BYBIT_API_URL_V5_KLINE, params=params, timeout=3)
+                response.raise_for_status()
+                data = response.json()
+                if data.get("retCode") == 0 and data["result"]["list"]:
+                    kline_list = data["result"]["list"]
+                    # Bierzemy przedostatnią świecę (indeks 1), jeśli istnieje.
+                    # Jest to nasze zabezpieczenie przed opóźnieniem API.
+                    target_kline = kline_list[1] if len(kline_list) > 1 else kline_list[0]
+                    
+                    klines_data[symbol] = {
+                        "high": float(target_kline[2]),
+                        "low": float(target_kline[3]),
+                        "close": float(target_kline[4]),
+                        "kline_timestamp": int(target_kline[0])
+                    }
+                    break # Sukces, przerywamy pętlę ponowień
+            except Exception as e:
+                logger.warning(f"[{symbol}] Próba {attempt + 1}/{max_retries} nieudana: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(0.5) # Czekaj 500ms przed kolejną próbą
+                else:
+                    logger.error(f"[{symbol}] Nie udało się pobrać danych po {max_retries} próbach.")
+    return klines_data
+
+def save_klines_to_firestore(klines_data: Dict[str, Dict[str, Any]]):
+    """Zapisuje pobrane dane kline do dedykowanej kolekcji w Firestore."""
+    if not klines_data:
+        logger.warning("Brak danych kline do zapisania.")
+        return
+
+    db = get_db()
+    batch = db.batch()
+    
+    for symbol, data in klines_data.items():
+        doc_ref = db.collection(constants.KLINE_DATA_COLLECTION).document(symbol)
+        batch.set(doc_ref, data, merge=True)
+    
+    batch.commit()
+    logger.info(f"Pomyślnie zapisano/zaktualizowano dane kline dla {len(klines_data)} symboli.")
+
+def run_data_collection_cycle(request=None):
+    """
+    Główna funkcja wywoływana przez Cloud Scheduler.
+    Pobiera dane i zapisuje je do Firestore.
+    `request` jest potrzebny dla triggera HTTP.
+    """
+    logger.info("--- ROZPOCZĘCIE CYKLU KOLEKTORA DANYCH ---")
+    try:
+        klines = get_latest_klines_for_all_symbols()
+        save_klines_to_firestore(klines)
+        logger.info("--- ZAKOŃCZENIE CYKLU KOLEKTORA DANYCH ---")
+        return "Data collection cycle finished successfully.", 200
+    except Exception as e:
+        logger.error(f"Krytyczny błąd w cyklu kolektora danych: {e}", exc_info=True)
+        return "Error during data collection cycle.", 500
+
+# Ten blok pozwala na testowanie pliku lokalnie, uruchamiając go bezpośrednio
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    run_data_collection_cycle()
