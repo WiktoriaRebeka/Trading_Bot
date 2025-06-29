@@ -20,24 +20,29 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v3
 
+      # --- POCZĄTEK OSTATECZNEJ POPRAWKI ---
       - name: Authenticate to Google Cloud
         id: 'auth'
-        uses: 'google-github-actions/auth@v2'
+        uses: 'google-github-actions/auth@v2' # Używamy najnowszej wersji
         with:
+          # Przechodzimy na tę samą, nowoczesną metodę co w drugim pliku
           workload_identity_provider: 'projects/785819958951/locations/global/workloadIdentityPools/github-pool/providers/github-provider'
           service_account: 'github-actions-sa@trading-bot-463318.iam.gserviceaccount.com'
       
       - name: Set up Cloud SDK
-        uses: 'google-github-actions/setup-gcloud@v2'
+        uses: 'google-github-actions/setup-gcloud@v2' # Używamy najnowszej wersji
 
       - name: Configure Docker
         run: gcloud auth configure-docker europe-central2-docker.pkg.dev
       
+      # Używamy sprytnego obejścia z tymczasową zmianą nazwy pliku
       - name: Prepare Dockerfile for Bot
         run: mv Dockerfile.bot Dockerfile
 
+      # Używamy najprostszej, niezawodnej komendy budowania
       - name: Build and Push Bot Image
         run: gcloud builds submit --tag europe-central2-docker.pkg.dev/trading-bot-463318/trading-bot-image/trading-bot-service:latest .
+      # --- KONIEC OSTATECZNEJ POPRAWKI ---
       
       - name: Deploy Bot to Cloud Run
         run: |-
