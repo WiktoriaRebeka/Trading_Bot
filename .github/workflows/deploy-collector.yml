@@ -3,12 +3,13 @@ name: Deploy Data Collector to Cloud Run
 on:
   push:
     branches:
-      - div # Lub Twoja główna gałąź
+      - div
     paths:
+      # Ścieżki obserwujące zmiany - teraz obserwujemy domyślny Dockerfile
       - '.github/workflows/deploy-collector.yml'
       - 'data_collector.py'
       - 'collector_main.py'
-      - 'Dockerfile.collector'
+      - 'Dockerfile'  # <-- ZMIANA NAZWY
       - 'firebase_client.py'
       - 'constants.py'
 
@@ -36,10 +37,11 @@ jobs:
       - name: Configure Docker
         run: gcloud auth configure-docker europe-central2-docker.pkg.dev
 
+      # --- NAJWAŻNIEJSZA ZMIANA ---
       - name: Build and Push Docker image for Collector
         run: |-
-          gcloud builds submit --tag europe-central2-docker.pkg.dev/trading-bot-463318/trading-bot-image/data-collector-service:latest --file Dockerfile.collector .
-          # ^^^ NAJWAŻNIEJSZA ZMIANA: Dodaliśmy kropkę na końcu tej linii! ^^^
+          # Uproszczona komenda, która używa domyślnego pliku 'Dockerfile'
+          gcloud builds submit --tag europe-central2-docker.pkg.dev/trading-bot-463318/trading-bot-image/data-collector-service:latest .
 
       - name: Deploy Collector to Cloud Run
         run: |-
