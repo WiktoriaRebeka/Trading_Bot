@@ -62,7 +62,8 @@ def save_klines_to_firestore(klines_data: Dict[str, Dict[str, Any]]):
     batch = db.batch()
     
     for symbol, data in klines_data.items():
-        doc_ref = db.collection(constants.KLINE_DATA_COLLECTION).document(symbol)
+        # nowa, poprawna linia
+        doc_ref = db.collection(constants.LATEST_KLINES_COLLECTION).document(symbol)
         batch.set(doc_ref, data, merge=True)
     
     batch.commit()

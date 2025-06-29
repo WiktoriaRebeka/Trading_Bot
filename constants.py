@@ -24,3 +24,6 @@ BYBIT_API_URL_V5_KLINE = "https://api.bybit.com/v5/market/kline"
 BIGQUERY_PROJECT_ID = os.getenv("GCP_PROJECT", "trading-bot-463318")
 BIGQUERY_DATASET_ID = "trading_analytics"
 BIGQUERY_TABLE_ID = "trades_history"
+
+# Nazwa kolekcji dla cache'u danych rynkowych
+LATEST_KLINES_COLLECTION = "latest_klines"
