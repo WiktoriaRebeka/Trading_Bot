@@ -1,47 +1,45 @@
 name: Deploy Trading Bot to Cloud Run
-
 on:
   push:
-    branches:
-      - div
-    # Opcjonalna optymalizacja: dodajemy filtry, aby nie uruchamiać go bez potrzeby
+    branches: [div]
     paths:
       - '.github/workflows/deploy.yml'
       - 'main.py'
       - 'bot_logic.py'
-      - 'Dockerfile.bot' # <-- ZMIANA NAZWY
-      - 'firebase_client.py'
+      - 'Dockerfile.bot'
       - 'constants.py'
+      - 'firebase_client.py'
       - 'requirements.txt'
-
 jobs:
   deploy:
     runs-on: ubuntu-latest
     permissions:
       contents: 'read'
       id-token: 'write'
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
 
       - name: Authenticate to Google Cloud
-        # Sugeruję zmianę na bezpieczniejszą metodę WIF, ale na razie zostawiam
-        uses: 'google-github-actions/auth@v1'
+        id: 'auth'
+        uses: 'google-github-actions/auth@v2'
         with:
-          credentials_json: '${{ secrets.GCP_SA_KEY }}'
-
+          workload_identity_provider: 'projects/785819958951/locations/global/workloadIdentityPools/github-pool/providers/github-provider'
+          service_account: 'github-actions-sa@trading-bot-463318.iam.gserviceaccount.com'
+      
       - name: Set up Cloud SDK
-        uses: 'google-github-actions/setup-gcloud@v1'
+        uses: 'google-github-actions/setup-gcloud@v2'
 
-      - name: Build and Push Docker image
-        run: |-
-          gcloud auth configure-docker europe-central2-docker.pkg.dev
-          # --- NAJWAŻNIEJSZA ZMIANA ---
-          # Jawnie wskazujemy plik Dockerfile.bot i dodajemy kropkę na końcu
-          gcloud builds submit --tag europe-central2-docker.pkg.dev/trading-bot-463318/trading-bot-image/trading-bot-service:latest --file Dockerfile.bot .
+      - name: Configure Docker
+        run: gcloud auth configure-docker europe-central2-docker.pkg.dev
+      
+      - name: Prepare Dockerfile for Bot
+        run: mv Dockerfile.bot Dockerfile
 
-      - name: Deploy to Cloud Run
+      - name: Build and Push Bot Image
+        run: gcloud builds submit --tag europe-central2-docker.pkg.dev/trading-bot-463318/trading-bot-image/trading-bot-service:latest .
+      
+      - name: Deploy Bot to Cloud Run
         run: |-
           gcloud run deploy trading-bot-service \
             --image europe-central2-docker.pkg.dev/trading-bot-463318/trading-bot-image/trading-bot-service:latest \

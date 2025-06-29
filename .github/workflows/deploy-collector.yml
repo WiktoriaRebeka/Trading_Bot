@@ -1,47 +1,39 @@
 name: Deploy Data Collector to Cloud Run
-
 on:
   push:
-    branches:
-      - div
+    branches: [div]
     paths:
-      # Ścieżki obserwujące zmiany - teraz obserwujemy domyślny Dockerfile
       - '.github/workflows/deploy-collector.yml'
-      - 'data_collector.py'
       - 'collector_main.py'
-      - 'Dockerfile'  # <-- ZMIANA NAZWY
-      - 'firebase_client.py'
+      - 'data_collector.py'
+      - 'Dockerfile'
       - 'constants.py'
-
+      - 'firebase_client.py'
 jobs:
   deploy-collector:
     runs-on: ubuntu-latest
     permissions:
       contents: 'read'
       id-token: 'write'
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
 
       - name: Authenticate to Google Cloud
         id: 'auth'
-        uses: 'google-github-actions/auth@v1'
+        uses: 'google-github-actions/auth@v2'
         with:
           workload_identity_provider: 'projects/785819958951/locations/global/workloadIdentityPools/github-pool/providers/github-provider'
           service_account: 'github-actions-sa@trading-bot-463318.iam.gserviceaccount.com'
-
+      
       - name: Set up Cloud SDK
-        uses: 'google-github-actions/setup-gcloud@v1'
+        uses: 'google-github-actions/setup-gcloud@v2'
 
       - name: Configure Docker
         run: gcloud auth configure-docker europe-central2-docker.pkg.dev
 
-      # --- NAJWAŻNIEJSZA ZMIANA ---
-      - name: Build and Push Docker image for Collector
-        run: |-
-          # Uproszczona komenda, która używa domyślnego pliku 'Dockerfile'
-          gcloud builds submit --tag europe-central2-docker.pkg.dev/trading-bot-463318/trading-bot-image/data-collector-service:latest .
+      - name: Build and Push Collector Image
+        run: gcloud builds submit --tag europe-central2-docker.pkg.dev/trading-bot-463318/trading-bot-image/data-collector-service:latest .
 
       - name: Deploy Collector to Cloud Run
         run: |-
