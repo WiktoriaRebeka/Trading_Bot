@@ -23,16 +23,25 @@ jobs:
         id: 'auth'
         uses: 'google-github-actions/auth@v2'
         with:
-          # Używamy nowego, dedykowanego konta
           workload_identity_provider: 'projects/785819958951/locations/global/workloadIdentityPools/github-pool/providers/github-provider'
+          # Upewnij się, że to konto ma role: Cloud Run Admin, Cloud Build Editor, Service Account User, Workload Identity User
           service_account: 'collector-deployer@trading-bot-463318.iam.gserviceaccount.com'
       
       - name: Set up Cloud SDK
         uses: 'google-github-actions/setup-gcloud@v2'
 
+      # --- POCZĄTEK OSTATECZNEJ NAPRAWY ---
+      - name: Prepare Dockerfile for build
+        run: mv Dockerfile.collector Dockerfile
+
       - name: Build and Push Collector Image
-        run: gcloud builds submit --tag europe-central2-docker.pkg.dev/trading-bot-463318/trading-bot-image/data-collector-service:latest --file Dockerfile.collector .
+        run: gcloud builds submit --tag europe-central2-docker.pkg.dev/trading-bot-463318/trading-bot-image/data-collector-service:latest .
       
+      - name: Revert Dockerfile name (optional cleanup)
+        if: always() # Uruchom ten krok nawet, jeśli poprzedni się nie uda
+        run: mv Dockerfile Dockerfile.collector
+      # --- KONIEC OSTATECZNEJ NAPRAWY ---
+
       - name: Deploy Collector to Cloud Run
         run: |-
           gcloud run deploy data-collector-service \
