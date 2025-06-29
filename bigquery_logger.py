@@ -1,39 +1,108 @@
-# /trading_bot/bigquery_logger.py (WERSJA FINALNA)
+# /trading_bot/bigquery_logger.py
 
 import logging
+import time  # Upewnij się, że ten import jest na górze
 from typing import Dict, Any, Optional
 from google.cloud import bigquery
 from google.api_core.exceptions import GoogleAPICallError
 
 import constants
-# Import state_managera jest potrzebny do aktualizacji timestampu
 import state_manager
-import time 
 
 logger = logging.getLogger(__name__)
 
+# Oczekiwane pola i ich typy w danych wysyłanych do BigQuery.
+# To jest nasza "umowa" ze schematem tabeli.
 EXPECTED_SCHEMA = {
-    "trade_id": str, "timestamp_entry": str, "timestamp_close": str,
-    "symbol": str, "direction": str, "main_result": str, "ob_type": str,
-    "rr_achieved": float, "rr_1_0_achieved": bool, "rr_1_5_achieved": bool,
-    "rr_2_0_achieved": bool, "rr_3_0_achieved": bool, "rr_4_0_achieved": bool,
+    "trade_id": str,
+    "timestamp_entry": str,
+    "timestamp_close": str,
+    "symbol": str,
+    "direction": str,
+    "main_result": str,
+    "ob_type": str,
+    "rr_achieved": float,
+    "rr_1_0_achieved": bool,
+    "rr_1_5_achieved": bool,
+    "rr_2_0_achieved": bool,
+    "rr_3_0_achieved": bool,
+    "rr_4_0_achieved": bool,
     "rr_5_0_achieved": bool,
 }
 
+# Inicjalizacja klienta BigQuery
 try:
     bigquery_client = bigquery.Client()
     TABLE_REF = f"{constants.BIGQUERY_PROJECT_ID}.{constants.BIGQUERY_DATASET_ID}.{constants.BIGQUERY_TABLE_ID}"
+    logger.info(f"Klient BigQuery pomyślnie zainicjalizowany. Tabela docelowa: {TABLE_REF}")
 except Exception as e:
     bigquery_client, TABLE_REF = None, None
-    logger.critical(f"Nie udało się zainicjalizować klienta BigQuery: {e}", exc_info=True)
+    logger.critical(f"KRYTYCZNY BŁĄD: Nie udało się zainicjalizować klienta BigQuery: {e}", exc_info=True)
+
 
 def _validate_and_sanitize_data(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    # ... (kod bez zmian)
-    pass
+    """
+    Sprawdza, czy dane zawierają wszystkie oczekiwane pola i czy mają poprawne typy.
+    Zwraca oczyszczony słownik lub None w przypadku błędu.
+    """
+    sanitized = {}
+    for key, expected_type in EXPECTED_SCHEMA.items():
+        if key not in data:
+            logger.warning(f"[BQ_VALIDATOR] Brakujący klucz w danych: '{key}'.")
+            # Dla flag boolean ustawiamy domyślną wartość False
+            if expected_type is bool:
+                sanitized[key] = False
+            else:
+                # Jeśli brakuje kluczowego pola, zwracamy None, aby przerwać zapis
+                return None 
+        else:
+            value = data[key]
+            # Prosta konwersja typów, aby zapewnić zgodność
+            try:
+                if expected_type is float and not isinstance(value, float):
+                    sanitized[key] = float(value)
+                elif expected_type is bool and not isinstance(value, bool):
+                    sanitized[key] = bool(value)
+                else:
+                    sanitized[key] = value
+            except (ValueError, TypeError):
+                logger.error(f"[BQ_VALIDATOR] Nie można przekonwertować wartości dla klucza '{key}' na typ {expected_type}.")
+                return None
+    
+    return sanitized
+
 
 def log_trade_to_bigquery(trade_data: Dict):
-    # ... (kod bez zmian)
-    pass
+    """Loguje kompletną transakcję do tabeli historii w BigQuery."""
+    
+    # KROK 1: Sprawdzenie, czy klient BQ w ogóle istnieje
+    if not bigquery_client:
+        logger.error("[BQ_LOGGER] Klient BigQuery nie jest zainicjalizowany! Pomijam zapis.")
+        return
+
+    logger.info(f"[BQ_LOGGER] Otrzymano dane do zapisu: {trade_data}")
+
+    # KROK 2: Walidacja i czyszczenie danych
+    sanitized_data = _validate_and_sanitize_data(trade_data)
+    if not sanitized_data:
+        logger.error(f"[BQ_LOGGER] Dane transakcji nie przeszły walidacji. ID: {trade_data.get('trade_id')}. Pomijam zapis.")
+        return
+
+    # KROK 3: Próba zapisu
+    try:
+        table = bigquery_client.get_table(TABLE_REF)
+        # BigQuery oczekuje listy wierszy do wstawienia
+        rows_to_insert = [sanitized_data]
+        errors = bigquery_client.insert_rows_json(table, rows_to_insert)
+        
+        if not errors:
+            logger.info(f"[BQ_LOGGER] SUKCES! Pomyślnie wstawiono wiersz dla transakcji ID: {sanitized_data.get('trade_id')}")
+        else:
+            logger.error(f"[BQ_LOGGER] Błąd podczas wstawiania wierszy do BigQuery dla ID: {sanitized_data.get('trade_id')}. Błędy: {errors}")
+
+    except Exception as e:
+        logger.error(f"[BQ_LOGGER] Krytyczny błąd podczas zapisu do BigQuery dla ID: {sanitized_data.get('trade_id')}: {e}", exc_info=True)
+
 
 def update_analyzed_trade_in_bigquery(trade_id: str, updates: Dict[str, Any]):
     """Aktualizuje istniejący wiersz w BigQuery z mechanizmem ponawiania prób."""
@@ -53,7 +122,6 @@ def update_analyzed_trade_in_bigquery(trade_id: str, updates: Dict[str, Any]):
     
     logger.info(f"[BQ_UPDATER] Przygotowuję zapytanie: {query}")
 
-    # --- POCZĄTEK ZMIAN: Mechanizm ponawiania ---
     max_retries = 3
     for attempt in range(max_retries):
         try:
@@ -69,50 +137,15 @@ def update_analyzed_trade_in_bigquery(trade_id: str, updates: Dict[str, Any]):
                 return # Zakończ, nie ma sensu próbować ponownie
 
         except GoogleAPICallError as e:
-            # Sprawdzamy, czy to nasz oczekiwany błąd bufora
             if "streaming buffer" in str(e).lower():
                 logger.warning(f"[BQ_UPDATER] Oczekiwany błąd bufora dla {trade_id}. Próba {attempt + 1}/{max_retries}. Ponawiam za chwilę...")
                 if attempt < max_retries - 1:
-                    time.sleep(2 ** attempt)  # Czekaj 1, 2, 4 sekundy (exponential backoff)
+                    time.sleep(2 ** attempt)  # Czekaj 1, 2, 4 sekundy
                 else:
                     logger.error(f"[BQ_UPDATER] Nie udało się zaktualizować {trade_id} po {max_retries} próbach z powodu błędu bufora.")
             else:
-                # To inny, nieoczekiwany błąd API
                 logger.error(f"[BQ_UPDATER] Błąd API podczas aktualizacji wiersza dla {trade_id}: {e}", exc_info=True)
-                return # Przerwij po nieoczekiwanym błędzie
+                return
         except Exception as e:
             logger.error(f"[BQ_UPDATER] Nieoczekiwany błąd podczas aktualizacji dla {trade_id}: {e}", exc_info=True)
-            return # Przerwij po nieoczekiwanym błędzie
-    """Aktualizuje istniejący wiersz w BigQuery danymi z analizy post-mortem."""
-    if not bigquery_client or not updates: return
-
-    set_clauses = []
-    for key, value in updates.items():
-        if isinstance(value, str):
-            set_clauses.append(f"`{key}` = '{value}'")
-        elif isinstance(value, bool):
-             set_clauses.append(f"`{key}` = {str(value).upper()}")
-        else:
-            set_clauses.append(f"`{key}` = {value}")
-    
-    query = f"UPDATE `{TABLE_REF}` SET {', '.join(set_clauses)} WHERE trade_id = '{trade_id}'"
-    
-    logger.info(f"[BQ_UPDATER] Wykonuję zapytanie: {query}")
-    try:
-        query_job = bigquery_client.query(query)
-        query_job.result()
-        
-        if query_job.num_dml_affected_rows > 0:
-            logger.info(f"[BQ_UPDATER] Pomyślnie zaktualizowano wiersz dla {trade_id}.")
-            # Po udanej aktualizacji BQ, aktualizujemy timestamp w Firestore
-            state_manager.update_analyzed_trade_timestamp(trade_id)
-        else:
-            logger.warning(f"[BQ_UPDATER] Nie znaleziono wiersza do aktualizacji dla {trade_id} (prawdopodobnie wciąż w buforze).")
-
-    except GoogleAPICallError as e:
-        if "streaming buffer" in e.message:
-            logger.warning(f"[BQ_UPDATER] Oczekiwany błąd bufora strumieniowego dla {trade_id}. Spróbujemy ponownie później.")
-        else:
-            logger.error(f"[BQ_UPDATER] Błąd API podczas aktualizacji wiersza dla {trade_id}: {e}", exc_info=True)
-    except Exception as e:
-        logger.error(f"[BQ_UPDATER] Nieoczekiwany błąd podczas aktualizacji dla {trade_id}: {e}", exc_info=True)
+            return
