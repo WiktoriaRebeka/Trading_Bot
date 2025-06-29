@@ -5,10 +5,9 @@ on:
     branches:
       - div # Lub Twoja główna gałąź
     paths:
-      # --- ŚCIEŻKI POPRAWIONE DLA TWOJEJ STRUKTURY ---
-      - '.github/workflows/deploy-collector.yml'  # Obserwuj zmiany w tym pliku
-      - 'data_collector.py'                       # Poprawna ścieżka bez "trading_bot/"
-      - 'collector_main.py'                       # Poprawna ścieżka bez "trading_bot/"
+      - '.github/workflows/deploy-collector.yml'
+      - 'data_collector.py'
+      - 'collector_main.py'
       - 'Dockerfile.collector'
       - 'firebase_client.py'
       - 'constants.py'
@@ -39,7 +38,8 @@ jobs:
 
       - name: Build and Push Docker image for Collector
         run: |-
-          gcloud builds submit --tag europe-central2-docker.pkg.dev/trading-bot-463318/trading-bot-image/data-collector-service:latest --file Dockerfile.collector
+          gcloud builds submit --tag europe-central2-docker.pkg.dev/trading-bot-463318/trading-bot-image/data-collector-service:latest --file Dockerfile.collector .
+          # ^^^ NAJWAŻNIEJSZA ZMIANA: Dodaliśmy kropkę na końcu tej linii! ^^^
 
       - name: Deploy Collector to Cloud Run
         run: |-
