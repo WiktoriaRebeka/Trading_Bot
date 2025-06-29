@@ -14,23 +14,21 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: 'read'
-      id-token: 'write'
+      # id-token NIE jest potrzebne dla starej metody
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
 
+      # --- POCZĄTEK KLUCZOWEJ ZMIANY: Kopiujemy działającą metodę ---
       - name: Authenticate to Google Cloud
-        id: 'auth'
-        uses: 'google-github-actions/auth@v2'
+        uses: 'google-github-actions/auth@v1' # Wersja v1, tak jak w działającym bocie
         with:
-          workload_identity_provider: 'projects/785819958951/locations/global/workloadIdentityPools/github-pool/providers/github-provider'
-          # Upewnij się, że to konto ma role: Cloud Run Admin, Cloud Build Editor, Service Account User, Workload Identity User
-          service_account: 'collector-deployer@trading-bot-463318.iam.gserviceaccount.com'
-      
-      - name: Set up Cloud SDK
-        uses: 'google-github-actions/setup-gcloud@v2'
+          credentials_json: '${{ secrets.GCP_SA_KEY }}' # Używamy tego samego, sprawdzonego sekretu
 
-      # --- POCZĄTEK OSTATECZNEJ NAPRAWY ---
+      - name: Set up Cloud SDK
+        uses: 'google-github-actions/setup-gcloud@v1' # Wersja v1, tak jak w działającym bocie
+      # --- KONIEC KLUCZOWEJ ZMIANY ---
+      
       - name: Prepare Dockerfile for build
         run: mv Dockerfile.collector Dockerfile
 
@@ -38,9 +36,8 @@ jobs:
         run: gcloud builds submit --tag europe-central2-docker.pkg.dev/trading-bot-463318/trading-bot-image/data-collector-service:latest .
       
       - name: Revert Dockerfile name (optional cleanup)
-        if: always() # Uruchom ten krok nawet, jeśli poprzedni się nie uda
+        if: always()
         run: mv Dockerfile Dockerfile.collector
-      # --- KONIEC OSTATECZNEJ NAPRAWY ---
 
       - name: Deploy Collector to Cloud Run
         run: |-
