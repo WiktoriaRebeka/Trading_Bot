@@ -6,7 +6,7 @@ on:
       - '.github/workflows/deploy-collector.yml'
       - 'collector_main.py'
       - 'data_collector.py'
-      - 'Dockerfile'
+      - 'Dockerfile.collector'
       - 'constants.py'
       - 'firebase_client.py'
 jobs:
@@ -23,18 +23,16 @@ jobs:
         id: 'auth'
         uses: 'google-github-actions/auth@v2'
         with:
+          # Używamy nowego, dedykowanego konta
           workload_identity_provider: 'projects/785819958951/locations/global/workloadIdentityPools/github-pool/providers/github-provider'
-          service_account: 'github-actions-sa@trading-bot-463318.iam.gserviceaccount.com'
+          service_account: 'collector-deployer@trading-bot-463318.iam.gserviceaccount.com'
       
       - name: Set up Cloud SDK
         uses: 'google-github-actions/setup-gcloud@v2'
 
-      - name: Configure Docker
-        run: gcloud auth configure-docker europe-central2-docker.pkg.dev
-
       - name: Build and Push Collector Image
-        run: gcloud builds submit --tag europe-central2-docker.pkg.dev/trading-bot-463318/trading-bot-image/data-collector-service:latest .
-
+        run: gcloud builds submit --tag europe-central2-docker.pkg.dev/trading-bot-463318/trading-bot-image/data-collector-service:latest --file Dockerfile.collector .
+      
       - name: Deploy Collector to Cloud Run
         run: |-
           gcloud run deploy data-collector-service \
