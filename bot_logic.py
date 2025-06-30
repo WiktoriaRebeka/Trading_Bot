@@ -324,6 +324,7 @@ def log_and_finalize_trade(trade_data: dict, closed_result: str, close_price: fl
 
     log_trade_to_bigquery(bq_data)
 
+# W pliku /trading_bot/bot_logic.py
 
 def run_trading_logic():
     """Główna pętla sterująca logiką bota."""
@@ -341,12 +342,8 @@ def run_trading_logic():
         logger.info("Brak jakichkolwiek aktywnych operacji do monitorowania.")
         return
 
-    # Używamy wewnętrznego cache'u zamiast bezpośredniego zapytania API
-    # latest_klines = get_latest_klines_batch(list(symbols_to_watch))
-    latest_klines = state_manager.get_latest_klines_from_cache(list(symbols_to_watch))
-    if not latest_klines:
-        logger.warning("Nie udało się pobrać danych kline z cache'u Firestore. Przerywam cykl.")
-        return
+    # --- PRZYWRACAMY BEZPIECZNĄ, DZIAŁAJĄCĄ WERSJĘ ---
+    latest_klines = get_latest_klines_batch(list(symbols_to_watch))
     
     try:
         _handle_setups(latest_klines, all_setups)
