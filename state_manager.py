@@ -66,23 +66,32 @@ def remove_open_trade(trade_id: str):
 def get_all_analyzed_trades() -> Iterable[DocumentSnapshot]:
     return _get_db().collection(constants.ANALYZED_COLLECTION).stream()
 
+# W pliku /trading_bot/state_manager.py
+
 def create_analyzed_trade(trade_data: Dict):
+    """Tworzy dokument "ducha" w kolekcji 'analyzed_trades'."""
     db = _get_db()
-    trade_id = trade_data['trade_id']
+    trade_id = trade_data.get('trade_id')
+    if not trade_id:
+        logger.error("Próba utworzenia 'ducha' bez trade_id!")
+        return
+
     doc_ref = db.collection(constants.ANALYZED_COLLECTION).document(trade_id)
+    
+    # --- KLUCZOWA ZMIANA: Dodajemy pole 'original_sl' ---
     analysis_data = {
-        "trade_id": trade_data['trade_id'],
-        "symbol": trade_data['symbol'],
-        "direction": trade_data['direction'],
-        "original_sl": trade_data['sl_price'],
+        "trade_id": trade_id,
+        "symbol": trade_data.get('symbol'),
+        "direction": trade_data.get('direction'),
         "entry_price": trade_data.get('entry_price'),
+        "original_sl": trade_data.get('sl_price'), # <-- To pole jest niezbędne!
         "opened_at_ms": trade_data.get('opened_at_ms'),
         "alert_data_snapshot": trade_data.get('alert_data_snapshot', {}),
-        "last_bq_update_iso": None
+        "last_bq_update_iso": None # Inicjalizujemy jako puste
     }
+    
     doc_ref.set(analysis_data)
-    logger.info(f"[{trade_id}] Utworzono pozycję do analizy post-mortem.")
-
+    logger.info(f"[{trade_id}] Utworzono pozycję do analizy post-mortem w '{constants.ANALYZED_COLLECTION}'.")
 def update_analyzed_trade_timestamp(trade_id: str):
     """Zapisuje znacznik czasu ostatniej udanej aktualizacji BQ."""
     doc_ref = _get_db().collection(constants.ANALYZED_COLLECTION).document(trade_id)
