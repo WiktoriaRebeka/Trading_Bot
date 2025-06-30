@@ -6,11 +6,13 @@ name: Deploy Data Collector to Cloud Run
 on:
   push:
     branches:
-      - div # lub main, w zależności od Twojej gałęzi produkcyjnej
+      - div
     paths:
+      # ### POPRAWKA: Dodano ścieżkę do samego pliku workflow ###
+      - '.github/workflows/deploy-collector.yml'
       - 'data_collector.py'
       - 'collector_main.py'
-      - 'Dockerfile' # Upewnij się, że ta nazwa jest poprawna
+      - 'Dockerfile'
       - 'requirements.txt'
       - 'constants.py'
       - 'firebase_client.py'

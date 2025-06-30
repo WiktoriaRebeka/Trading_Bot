@@ -8,6 +8,7 @@ on:
     branches:
       - div # lub main
     paths:
+      - '.github/workflows/deploy.yml'
       - 'main.py'
       - 'bot_logic.py'
       - 'Dockerfile.bot' # Upewnij się, że ta nazwa jest poprawna
