@@ -263,7 +263,7 @@ def _handle_post_mortem_analysis(klines_data: Dict[str, List[Any]], analyzed_tra
 
 def log_and_finalize_trade(trade_data: dict, closed_result: str, close_price: float):
     """
-    Wykonuje pełną analizę historyczną PO RAZ PIERWSZY (w momencie zamknięcia) i zapisuje kompletny rekord do BigQuery.
+    Wykonuje JEDNORAZOWĄ, PEŁNĄ analizę historyczną po zamknięciu i zapisuje kompletny rekord do BigQuery.
     """
     trade_id, symbol, direction = trade_data.get('trade_id'), trade_data.get('symbol'), trade_data.get('direction')
     if not all([trade_id, symbol, direction]):
@@ -275,19 +275,28 @@ def log_and_finalize_trade(trade_data: dict, closed_result: str, close_price: fl
     close_timestamp_utc = datetime.now(timezone.utc)
     start_time_ms = trade_data.get('opened_at_ms')
     
+    # Pobierz historię świec od otwarcia aż do TERAZ (chwilę po zamknięciu)
     klines = get_historical_klines(symbol, start_time_ms, int(close_timestamp_utc.timestamp() * 1000)) if start_time_ms else []
     
-    extreme_profit_price = close_price
+    # --- KLUCZOWA ZMIANA LOGIKI ---
+    # Znajdź prawdziwą, ekstremalną cenę, jaka wystąpiła w całym okresie.
+    extreme_profit_price = close_price # Domyślnie cena zamknięcia
     if klines:
         if direction.lower() == 'long':
-            extreme_profit_price = max(float(k[2]) for k in klines)
-        else:
-            extreme_profit_price = min(float(k[3]) for k in klines)
-    logger.info(f"[{symbol}][{trade_id}] Analiza historyczna. Ekstremum ceny w okresie transakcji: {extreme_profit_price}")
+            # Szukamy najwyższego high ze wszystkich świec
+            all_highs = [float(k[2]) for k in klines]
+            extreme_profit_price = max(all_highs) if all_highs else close_price
+        else: # kierunek 'short'
+            # Szukamy najniższego low ze wszystkich świec
+            all_lows = [float(k[3]) for k in klines]
+            extreme_profit_price = min(all_lows) if all_lows else close_price
+            
+    logger.info(f"[{symbol}][{trade_id}] Pełna analiza historyczna. Ekstremum ceny w okresie transakcji: {extreme_profit_price}")
 
     entry_price = trade_data.get('entry_price')
     sl_price = trade_data.get('sl_price')
     
+    # Reszta funkcji pozostaje taka sama, ale teraz operuje na POPRAWNEJ cenie ekstremalnej
     if entry_price is None or sl_price is None:
         rr_achieved, achieved_rr_flags = 0.0, {}
         logger.warning(f"[{trade_id}] Brak ceny wejścia lub SL. R:R ustawione na 0.")
@@ -323,8 +332,6 @@ def log_and_finalize_trade(trade_data: dict, closed_result: str, close_price: fl
         bq_data[key_name] = achieved_rr_flags.get(key_name, False)
 
     log_trade_to_bigquery(bq_data)
-
-# W pliku /trading_bot/bot_logic.py
 
 def run_trading_logic():
     """Główna pętla sterująca logiką bota."""
