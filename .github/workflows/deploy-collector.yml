@@ -1,49 +1,48 @@
+# W pliku: .github/workflows/deploy-collector.yml
+# ZASTĄP CAŁĄ ZAWARTOŚĆ PLIKU
+
 name: Deploy Data Collector to Cloud Run
+
 on:
   push:
-    branches: [div]
+    branches:
+      - div # lub main, w zależności od Twojej gałęzi produkcyjnej
     paths:
-      - '.github/workflows/deploy-collector.yml'
-      - 'collector_main.py'
       - 'data_collector.py'
-      - 'Dockerfile.collector'
+      - 'collector_main.py'
+      - 'Dockerfile' # Upewnij się, że ta nazwa jest poprawna
+      - 'requirements.txt'
       - 'constants.py'
       - 'firebase_client.py'
+      - 'config_loader.py'
+
 jobs:
-  deploy-collector:
+  deploy:
     runs-on: ubuntu-latest
-    permissions:
-      contents: 'read'
-      # id-token NIE jest potrzebne dla starej metody
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v3
 
-      # --- POCZĄTEK KLUCZOWEJ ZMIANY: Kopiujemy działającą metodę ---
       - name: Authenticate to Google Cloud
-        uses: 'google-github-actions/auth@v1' # Wersja v1, tak jak w działającym bocie
+        uses: google-github-actions/auth@v1
         with:
-          credentials_json: '${{ secrets.GCP_SA_KEY }}' # Używamy tego samego, sprawdzonego sekretu
+          credentials_json: '${{ secrets.GCP_SA_KEY }}'
 
       - name: Set up Cloud SDK
-        uses: 'google-github-actions/setup-gcloud@v1' # Wersja v1, tak jak w działającym bocie
-      # --- KONIEC KLUCZOWEJ ZMIANY ---
-      
-      - name: Prepare Dockerfile for build
-        run: mv Dockerfile.collector Dockerfile
+        uses: google-github-actions/setup-gcloud@v1
 
-      - name: Build and Push Collector Image
-        run: gcloud builds submit --tag europe-central2-docker.pkg.dev/trading-bot-463318/trading-bot-image/data-collector-service:latest .
-      
-      - name: Revert Dockerfile name (optional cleanup)
-        if: always()
-        run: mv Dockerfile Dockerfile.collector
+      # ### POPRAWKA: USUNIĘTO BŁĘDNY KROK ZMIANY NAZWY ###
+      # - name: Adjust Dockerfile name for Collector
+      #   run: mv Dockerfile.collector Dockerfile
 
-      - name: Deploy Collector to Cloud Run
+      - name: Build and push image to Google Artifact Registry
+        run: |-
+          gcloud builds submit --tag europe-central2-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/trading-bot-image/data-collector-service:latest --file Dockerfile
+
+      - name: Deploy to Cloud Run
         run: |-
           gcloud run deploy data-collector-service \
-            --image europe-central2-docker.pkg.dev/trading-bot-463318/trading-bot-image/data-collector-service:latest \
+            --image europe-central2-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/trading-bot-image/data-collector-service:latest \
             --region europe-central2 \
-            --allow-unauthenticated \
-            --vpc-connector app-connector-warsaw \
-            --vpc-egress all
+            --platform managed \
+            --allow-unauthenticated

@@ -1,39 +1,51 @@
+# W pliku: .github/workflows/deploy.yml
+# ZASTĄP CAŁĄ ZAWARTOŚĆ PLIKU
+
 name: Deploy Trading Bot to Cloud Run
 
 on:
   push:
     branches:
-      - div
-
+      - div # lub main
+    paths:
+      - 'main.py'
+      - 'bot_logic.py'
+      - 'Dockerfile.bot' # Upewnij się, że ta nazwa jest poprawna
+      - 'requirements.txt'
+      - 'constants.py'
+      - 'firebase_client.py'
+      - 'bigquery_logger.py'
+      - 'state_manager.py'
+      - 'fetch_from_firestore.py'
+      - 'config_loader.py'
+      - 'models.py'
+      
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    permissions:
-      contents: 'read'
-      id-token: 'write'
-
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v3
 
       - name: Authenticate to Google Cloud
-        uses: 'google-github-actions/auth@v1'
+        uses: google-github-actions/auth@v1
         with:
-          credentials_json: '${{ secrets.GCP_SA_KEY }}' # Używamy starej, sprawdzonej metody
+          credentials_json: '${{ secrets.GCP_SA_KEY }}'
 
       - name: Set up Cloud SDK
-        uses: 'google-github-actions/setup-gcloud@v1'
+        uses: google-github-actions/setup-gcloud@v1
 
-      - name: Build and Push Docker image
+      - name: Build and push image to Google Artifact Registry
         run: |-
-          gcloud auth configure-docker europe-central2-docker.pkg.dev
-          gcloud builds submit --tag europe-central2-docker.pkg.dev/trading-bot-463318/trading-bot-image/trading-bot-service:latest
+          # ### POPRAWKA: DODANO FLAGĘ --file, ABY WSKAZAĆ WŁAŚCIWY Dockerfile ###
+          gcloud builds submit --tag europe-central2-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/trading-bot-image/trading-bot-service:latest --file Dockerfile.bot
 
       - name: Deploy to Cloud Run
         run: |-
           gcloud run deploy trading-bot-service \
-            --image europe-central2-docker.pkg.dev/trading-bot-463318/trading-bot-image/trading-bot-service:latest \
+            --image europe-central2-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/trading-bot-image/trading-bot-service:latest \
             --region europe-central2 \
+            --platform managed \
             --allow-unauthenticated \
-            --vpc-connector app-connector-warsaw \
+            --vpc-connector trading-bot-vpc \
             --vpc-egress all
