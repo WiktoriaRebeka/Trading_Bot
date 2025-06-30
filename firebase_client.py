@@ -1,9 +1,11 @@
-#trading_bot/firebase_client.py
+# W pliku: /firebase_client.py
+# ZASTĄP CAŁĄ ZAWARTOŚĆ PLIKU
 
 import os
 from google.cloud import firestore
 import logging
 
+# Używamy __name__, aby logger automatycznie przyjął nazwę modułu: 'firebase_client'
 logger = logging.getLogger(__name__)
 db_client = None
 
@@ -11,30 +13,32 @@ def initialize_firebase():
     global db_client
 
     if db_client is not None:
-        logger.info("Klient Firestore jest już zainicjalizowany.")
+        logger.debug("Klient Firestore jest już zainicjalizowany.")
         return True
 
     try:
+        # W środowisku GCP projekt jest zwykle wykrywany automatycznie.
+        project_id = os.getenv("GCP_PROJECT")
         database_name = "trading-bot-data"
-        logger.info(f"Inicjalizacja klienta Firestore dla domyślnego projektu GCP i bazy '{database_name}'...")
+        logger.info(f"Inicjalizacja klienta Firestore dla projektu '{project_id}' i bazy '{database_name}'...")
         
-        # NAJWAŻNIEJSZA ZMIANA: Usuwamy jawne podawanie `project`.
-        # To jest "tryb Google Cloud".
+        # Używamy standardowego, publicznego sposobu inicjalizacji klienta
         db_client = firestore.Client(database=database_name)
         
-        # Testowe zapytanie, aby upewnić się, że połączenie działa
+        # Proste zapytanie weryfikujące połączenie
         db_client.collection('_test_connection_').limit(1).get()
         
-        logger.info("Inicjalizacja Firestore ZAKOŃCZONA SUKCESEM.")
+        logger.info("Inicjalizacja Firestore zakończona sukcesem.")
         return True
-        
+    
     except Exception as e:
-        logger.critical(f"KRYTYCZNY BŁĄD podczas inicjalizacji Firestore w App Engine: {e}", exc_info=True)
+        logger.critical(f"KRYTYCZNY BŁĄD: Inicjalizacja klienta Firestore nie powiodła się: {e}", exc_info=True)
         db_client = None
         return False
 
 def get_db():
-    """Zwraca zainicjalizowanego klienta Firestore."""
+    """Zwraca zainicjalizowanego klienta Firestore lub zgłasza wyjątek."""
     if db_client is None:
-        raise Exception("Krytyczny błąd: Próba użycia klienta Firestore, który nie został pomyślnie zainicjalizowany.")
+        logger.critical("Próba użycia niezainicjalizowanego klienta Firestore.")
+        raise Exception("Krytyczny błąd: Klient Firestore nie został pomyślnie zainicjalizowany.")
     return db_client

@@ -1,3 +1,5 @@
+#trading_bot/bigquery_logger.py
+
 import logging
 from typing import Dict, Any, Optional
 from google.cloud import bigquery
@@ -77,41 +79,65 @@ def log_trade_to_bigquery(trade_data: Dict):
 
 
 # --- PRZYWRACAMY KLUCZOWĄ FUNKCJĘ ---
-def update_analyzed_trade_in_bigquery(trade_id: str, updates: Dict[str, Any]):
-    """Aktualizuje istniejący wiersz w BigQuery danymi z analizy post-mortem."""
-    if not bigquery_client or not updates: return
+# W pliku: /bigquery_logger.py
 
-    set_clauses = []
+# UWAGA: Ten kod zastępuje całą istniejącą funkcję update_analyzed_trade_in_bigquery
+
+def update_analyzed_trade_in_bigquery(trade_id: str, updates: Dict[str, Any]) -> bool:
+    """
+    Bezpiecznie aktualizuje istniejący wiersz w BigQuery danymi z analizy post-mortem
+    używając zapytań sparametryzowanych, aby zapobiec SQL Injection.
+
+    Zwraca:
+        bool: True, jeśli aktualizacja zakończyła się sukcesem (wiersz został zmieniony).
+              False, w przypadku błędu lub gdy wiersz nie został znaleziony.
+    """
+    if not bigquery_client or not updates:
+        return False
+
+    # Krok 1: Przygotuj klauzule SET z placeholderami zamiast wklejania wartości.
+    # To jest kluczowy element zabezpieczenia przed SQL Injection.
+    # Przykład: `rr_achieved` = @rr_achieved
+    set_clauses = [f"`{key}` = @{key}" for key in updates.keys()]
+
+    # Krok 2: Zbuduj szablon zapytania z placeholderami.
+    query = f"UPDATE `{TABLE_REF}` SET {', '.join(set_clauses)} WHERE trade_id = @trade_id"
+
+    # Krok 3: Przygotuj parametry, które zostaną bezpiecznie wstawione przez klienta BigQuery.
+    # Klient BigQuery zadba o poprawne escapowanie i typowanie danych.
+    query_params = [
+        bigquery.ScalarQueryParameter("trade_id", "STRING", trade_id)
+    ]
     for key, value in updates.items():
-        if isinstance(value, str):
-            set_clauses.append(f"`{key}` = '{value}'")
-        elif isinstance(value, bool):
-             set_clauses.append(f"`{key}` = {str(value).upper()}")
+        if isinstance(value, bool):
+            param_type = "BOOL"
+        elif isinstance(value, (float, int)):
+            param_type = "FLOAT64"
         else:
-            set_clauses.append(f"`{key}` = {value}")
-    
-    query = f"UPDATE `{TABLE_REF}` SET {', '.join(set_clauses)} WHERE trade_id = '{trade_id}'"
-    
-    logger.info(f"[BQ_UPDATER] Wykonuję zapytanie: {query}")
+            param_type = "STRING"
+        query_params.append(bigquery.ScalarQueryParameter(key, param_type, value))
+
+    job_config = bigquery.QueryJobConfig(query_parameters=query_params)
+
+    logger.info(f"[BQ_UPDATER] Wykonuję sparametryzowane zapytanie dla {trade_id}")
     try:
-        query_job = bigquery_client.query(query)
-        query_job.result()
-        
+        query_job = bigquery_client.query(query, job_config=job_config)
+        query_job.result()  # Czekaj na zakończenie zadania
+
         if query_job.num_dml_affected_rows > 0:
-            logger.info(f"[BQ_UPDATER] Pomyślnie zaktualizowano wiersz dla {trade_id}.")
-            
-            # --- Naprawiamy import cykliczny ---
-            import state_manager
-            state_manager.update_analyzed_trade_timestamp(trade_id)
-            
+            logger.info(f"[BQ_UPDATER] SUKCES. Pomyślnie zaktualizowano wiersz dla {trade_id}.")
+            return True
         else:
-            logger.warning(f"[BQ_UPDATER] Nie znaleziono wiersza do aktualizacji dla {trade_id} (prawdopodobnie wciąż w buforze).")
+            logger.warning(f"[BQ_UPDATER] Nie znaleziono wiersza do aktualizacji dla {trade_id} (możliwe, że jest w buforze strumieniowym lub został już usunięty).")
+            return False
 
     except GoogleAPICallError as e:
-        # Bezpieczniejsze sprawdzanie błędu
+        # Bezpieczniejsze sprawdzanie błędu bufora
         if "streaming buffer" in str(e):
-            logger.warning(f"[BQ_UPDATER] Oczekiwany błąd bufora strumieniowego dla {trade_id}. Spróbujemy ponownie później.")
+            logger.warning(f"[BQ_UPDATER] Oczekiwany błąd bufora strumieniowego dla {trade_id}. Spróbujemy ponownie w kolejnym cyklu.")
         else:
             logger.error(f"[BQ_UPDATER] Błąd API podczas aktualizacji wiersza dla {trade_id}: {e}", exc_info=True)
+        return False
     except Exception as e:
         logger.error(f"[BQ_UPDATER] Nieoczekiwany błąd podczas aktualizacji dla {trade_id}: {e}", exc_info=True)
+        return False
