@@ -1,0 +1,11 @@
+# Nowy plik: cloudbuild-bot.yaml
+steps:
+- name: 'gcr.io/cloud-builders/docker'
+  args: [
+    'build',
+    '-t', 'europe-central2-docker.pkg.dev/${PROJECT_ID}/trading-bot-image/trading-bot-service:latest',
+    '--file', 'Dockerfile.bot', # Wskazuje, którego pliku Dockerfile użyć
+    '.'
+  ]
+images:
+- 'europe-central2-docker.pkg.dev/${PROJECT_ID}/trading-bot-image/trading-bot-service:latest'

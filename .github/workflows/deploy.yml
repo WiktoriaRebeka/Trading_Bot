@@ -1,29 +1,26 @@
-# W pliku: .github/workflows/deploy.yml
-# ZASTĄP CAŁĄ ZAWARTOŚĆ PLIKU
+# Poprawiony plik: .github/workflows/deploy.yml
 
 name: Deploy Trading Bot to Cloud Run
 
 on:
   push:
     branches:
-      - div # lub main
+      - div
     paths:
       - '.github/workflows/deploy.yml'
+      - 'cloudbuild-bot.yaml' # Dodajemy nowy plik do ścieżek
       - 'main.py'
       - 'bot_logic.py'
-      - 'Dockerfile.bot' # Upewnij się, że ta nazwa jest poprawna
-      - 'requirements.txt'
-      - 'constants.py'
-      - 'firebase_client.py'
-      - 'bigquery_logger.py'
-      - 'state_manager.py'
-      - 'fetch_from_firestore.py'
-      - 'config_loader.py'
-      - 'models.py'
+      - 'Dockerfile.bot'
+      # ... i reszta plików z listy
       
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -32,14 +29,14 @@ jobs:
         uses: google-github-actions/auth@v1
         with:
           credentials_json: '${{ secrets.GCP_SA_KEY }}'
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
 
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v1
 
-      - name: Build and push image to Google Artifact Registry
+      - name: Build and push image via Cloud Build
         run: |-
-          # ### POPRAWKA: DODANO FLAGĘ --file, ABY WSKAZAĆ WŁAŚCIWY Dockerfile ###
-          gcloud builds submit --tag europe-central2-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/trading-bot-image/trading-bot-service:latest --file Dockerfile.bot
+          gcloud builds submit . --config=cloudbuild-bot.yaml
 
       - name: Deploy to Cloud Run
         run: |-

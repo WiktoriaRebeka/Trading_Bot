@@ -1,5 +1,4 @@
-# W pliku: .github/workflows/deploy-collector.yml
-# ZASTĄP CAŁĄ ZAWARTOŚĆ PLIKU
+# Poprawiony plik: .github/workflows/deploy-collector.yml
 
 name: Deploy Data Collector to Cloud Run
 
@@ -8,19 +7,20 @@ on:
     branches:
       - div
     paths:
-      # ### POPRAWKA: Dodano ścieżkę do samego pliku workflow ###
       - '.github/workflows/deploy-collector.yml'
+      - 'cloudbuild-collector.yaml' # Dodajemy nowy plik do ścieżek
       - 'data_collector.py'
       - 'collector_main.py'
       - 'Dockerfile'
-      - 'requirements.txt'
-      - 'constants.py'
-      - 'firebase_client.py'
-      - 'config_loader.py'
+      # ... i reszta plików z listy
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -29,17 +29,14 @@ jobs:
         uses: google-github-actions/auth@v1
         with:
           credentials_json: '${{ secrets.GCP_SA_KEY }}'
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
 
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v1
 
-      # ### POPRAWKA: USUNIĘTO BŁĘDNY KROK ZMIANY NAZWY ###
-      # - name: Adjust Dockerfile name for Collector
-      #   run: mv Dockerfile.collector Dockerfile
-
-      - name: Build and push image to Google Artifact Registry
+      - name: Build and push image via Cloud Build
         run: |-
-          gcloud builds submit --tag europe-central2-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/trading-bot-image/data-collector-service:latest --file Dockerfile
+          gcloud builds submit . --config=cloudbuild-collector.yaml
 
       - name: Deploy to Cloud Run
         run: |-
