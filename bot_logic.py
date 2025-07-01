@@ -1,4 +1,4 @@
-# W pliku: /bot_logic.py
+# trading_bot/bot_logic.py
 
 import logging
 import requests
