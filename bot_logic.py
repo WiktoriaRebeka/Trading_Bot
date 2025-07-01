@@ -1,19 +1,55 @@
-#trading_bot/bot_logic.py
-
 import logging
 import uuid
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone, timedelta
 from google.cloud.firestore_v1.document import DocumentSnapshot
 from pydantic import ValidationError
-import requests
+import asyncio
+import aiohttp
 
+from firebase_client import get_db
 import state_manager
 from bigquery_logger import log_trade_to_bigquery, update_analyzed_trade_in_bigquery
 import constants
 from models import SetupData, OpenTradeData, AnalyzedTradeData, AlertData
 
 logger = logging.getLogger(__name__)
+
+
+def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]]):
+    """
+    Przetwarza listę nowych alertów z Firestore, waliduje je i tworzy
+    lub aktualizuje aktywne setupy w kolekcji 'active_setups'.
+    """
+    if not newly_fetched_alerts:
+        return
+
+    logger.info(f"Przetwarzam {len(newly_fetched_alerts)} nowych alertów.")
+    db = get_db()
+    for alert_dict in newly_fetched_alerts:
+        try:
+            # Walidacja i wzbogacenie danych alertu
+            alert_data = AlertData.parse_obj(alert_dict)
+            if alert_data.direction_code == 1:
+                alert_data.direction = "LONG"
+            elif alert_data.direction_code == -1:
+                alert_data.direction = "SHORT"
+            else:
+                logger.warning(f"Pominięto alert z nieznanym direction_code: {alert_data.direction_code}")
+                continue
+            
+            # Stworzenie nowego obiektu setupu
+            new_setup = SetupData(alert_data=alert_data, updated_at=datetime.now(timezone.utc))
+            
+            # Zapis do Firestore (nadpisuje istniejący setup dla danego symbolu)
+            doc_ref = db.collection(constants.SETUP_COLLECTION).document(alert_data.symbol)
+            doc_ref.set(new_setup.dict(by_alias=True))
+            logger.info(f"[{alert_data.symbol}] Zarejestrowano/zaktualizowano aktywny setup.")
+            
+        except ValidationError as e:
+            logger.error(f"Błąd walidacji alertu. ID: {alert_dict.get('id')}. Błędy: {e}")
+        except Exception as e:
+            logger.error(f"Nieoczekiwany błąd podczas przetwarzania alertu ID: {alert_dict.get('id')}: {e}", exc_info=True)
 
 
 def _get_rr_flag_name(tp_key: str) -> Optional[str]:
@@ -24,15 +60,11 @@ def _get_rr_flag_name(tp_key: str) -> Optional[str]:
     if not isinstance(tp_key, str) or not tp_key.lower().startswith('tp'):
         return None
     
-    # Usuwamy 'tp' i ewentualne podkreślenia, zostawiając same cyfry
-    # 'tp_1_5' -> '15', 'tp1' -> '1', 'tp_2_0' -> '20'
     value_part = tp_key.lower().replace('tp', '').replace('_', '')
     
     if not value_part.isdigit():
         return None
 
-    # Rekonstruujemy do spójnego formatu z podkreśleniem
-    # '15' -> '1_5', '20' -> '2_0', '3' -> '3_0', '5' -> '5_0'
     if len(value_part) > 1:
         reconstructed_part = f"{value_part[0]}_{value_part[1:]}"
     else:
@@ -61,7 +93,6 @@ def _calculate_trade_analytics(
 
     analytics_results = {"rr_achieved": rr_achieved}
     
-    # Inicjalizacja wszystkich możliwych flag na False
     for key_suffix in ['1_0', '1_5', '2_0', '3_0', '4_0', '5_0']:
         analytics_results[f"rr_{key_suffix}_achieved"] = False
 
@@ -88,22 +119,52 @@ def _calculate_trade_analytics(
     return analytics_results
 
 
-def get_historical_klines(symbol: str, start_time_ms: int, end_time_ms: int) -> List[List[Any]]:
-    """Pobiera dane historyczne do analizy po zamknięciu."""
+async def get_historical_klines(session: aiohttp.ClientSession, symbol: str, start_time_ms: int, end_time_ms: int) -> List[List[Any]]:
+    """Asynchronicznie pobiera dane historyczne do analizy po zamknięciu."""
     params = {
         "category": "linear", "symbol": symbol.replace('.P', ''), "interval": "1",
         "start": start_time_ms, "end": end_time_ms, "limit": 1000
     }
     logger.debug(f"[{symbol}] Pobieram historię kline od {start_time_ms} do {end_time_ms}")
     try:
-        response = requests.get(constants.BYBIT_API_URL_V5_KLINE, params=params, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        if data.get("retCode") == 0 and data.get("result") and data["result"].get("list"):
-            return list(reversed(data["result"]["list"]))
+        async with session.get(constants.BYBIT_API_URL_V5_KLINE, params=params, timeout=10) as response:
+            response.raise_for_status()
+            data = await response.json()
+            if data.get("retCode") == 0 and data.get("result") and data["result"].get("list"):
+                return list(reversed(data["result"]["list"]))
     except Exception as e:
         logger.error(f"[{symbol}] Błąd przy pobieraniu historii kline: {e}", exc_info=True)
     return []
+
+
+async def log_and_finalize_trade(session: aiohttp.ClientSession, trade: OpenTradeData, closed_result: str, close_price: float):
+    logger.info(f"--- [FINALIZACJA I PEŁNA ANALIZA] --- [{trade.symbol}] | ID: {trade.trade_id} | Wynik: {closed_result}")
+
+    close_timestamp_utc = datetime.now(timezone.utc)
+    klines = await get_historical_klines(session, trade.symbol, trade.opened_at_ms, int(close_timestamp_utc.timestamp() * 1000))
+    
+    extreme_profit_price = close_price
+    if klines:
+        if trade.direction.lower() == 'long':
+            extreme_profit_price = max([float(k[2]) for k in klines] + [close_price])
+        else: # short
+            extreme_profit_price = min([float(k[3]) for k in klines] + [close_price])
+            
+    analytics_data = _calculate_trade_analytics(
+        trade.direction, trade.entry_price, trade.sl_price, extreme_profit_price, trade.alert_data_snapshot
+    )
+
+    bq_data = {
+        "trade_id": trade.trade_id,
+        "timestamp_entry": trade.opened_at_iso,
+        "timestamp_close": close_timestamp_utc.isoformat(),
+        "symbol": trade.symbol,
+        "direction": trade.direction.upper(),
+        "main_result": closed_result,
+        "ob_type": trade.ob_type,
+    }
+    bq_data.update(analytics_data)
+    log_trade_to_bigquery(bq_data)
 
 
 def _handle_setups(klines_data: Dict[str, List[Any]], active_setups: List[DocumentSnapshot]):
@@ -167,7 +228,11 @@ def _handle_setups(klines_data: Dict[str, List[Any]], active_setups: List[Docume
                         opened_at_iso=(now_utc - timedelta(minutes=1)).isoformat(),
                         alert_data_snapshot=setup.alert_data.dict(by_alias=True)
                     )
-                    log_and_finalize_trade(fake_trade, closed_result, close_price)
+                    # This call cannot be awaited here, as this function is sync.
+                    # For this specific edge case (1-min close), we run it synchronously.
+                    # This is acceptable as it's a rare event.
+                    asyncio.run(log_and_finalize_trade(aiohttp.ClientSession(), fake_trade, closed_result, close_price))
+
                     state_manager.update_setup_after_trade_close(symbol, is_loss=(closed_result == "LOSE"))
                     state_manager.update_setup_entry_attempt(symbol)
                 else:
@@ -183,10 +248,13 @@ def _handle_setups(klines_data: Dict[str, List[Any]], active_setups: List[Docume
             logger.error(f"[{symbol}] Błąd podczas sprawdzania wejścia: {e}", exc_info=True)
 
 
-def _handle_manage_open_trades(klines_data: Dict[str, List[Any]], open_trades: List[DocumentSnapshot]):
+async def _handle_manage_open_trades(session: aiohttp.ClientSession, klines_data: Dict[str, List[Any]], open_trades: List[DocumentSnapshot]):
     if not open_trades:
         return
     logger.info(f"Monitoruję {len(open_trades)} otwartych pozycji.")
+    
+    trades_to_finalize = []
+
     for trade_doc in open_trades:
         trade_id = trade_doc.id
         try:
@@ -212,7 +280,9 @@ def _handle_manage_open_trades(klines_data: Dict[str, List[Any]], open_trades: L
                     closed_result, close_price = "WIN", trade.tp_price
             
             if closed_result:
-                log_and_finalize_trade(trade, closed_result, close_price)
+                trades_to_finalize.append(
+                    log_and_finalize_trade(session, trade, closed_result, close_price)
+                )
                 state_manager.remove_open_trade(trade_id)
                 state_manager.create_analyzed_trade(trade)
                 state_manager.update_setup_after_trade_close(symbol, is_loss=(closed_result == "LOSE"))
@@ -221,17 +291,22 @@ def _handle_manage_open_trades(klines_data: Dict[str, List[Any]], open_trades: L
         except Exception as e:
             logger.error(f"[{trade_id}] Błąd podczas monitorowania otwartej pozycji: {e}", exc_info=True)
 
+    if trades_to_finalize:
+        await asyncio.gather(*trades_to_finalize)
 
-def _handle_post_mortem_analysis(klines_data: Dict[str, List[Any]], analyzed_trades: List[DocumentSnapshot]):
+
+async def _handle_post_mortem_analysis(session: aiohttp.ClientSession, klines_data: Dict[str, List[Any]], analyzed_trades: List[DocumentSnapshot]):
     if not analyzed_trades:
         return
     logger.info(f"Analizuję {len(analyzed_trades)} zamkniętych pozycji (post-mortem).")
+
+    trades_to_process = []
+    
     for trade_doc in analyzed_trades:
         trade_id = trade_doc.id
         try:
             analysis = AnalyzedTradeData.parse_obj(trade_doc.to_dict())
             
-            # Sprawdzenie warunku końca analizy
             is_finished = False
             latest_kline = klines_data.get(analysis.symbol)
             if latest_kline:
@@ -243,10 +318,10 @@ def _handle_post_mortem_analysis(klines_data: Dict[str, List[Any]], analyzed_tra
                     if analysis.direction.lower() == 'long':
                         if kline_low <= analysis.original_sl or kline_high >= tp5_price:
                             is_finished = True
-                    else:  # short
+                    else:
                         if kline_high >= analysis.original_sl or kline_low <= tp5_price:
                             is_finished = True
-                else: # Fallback jeśli nie ma tp5
+                else: 
                     if (analysis.direction.lower() == 'long' and kline_low <= analysis.original_sl) or \
                        (analysis.direction.lower() == 'short' and kline_high >= analysis.original_sl):
                         is_finished = True
@@ -256,16 +331,38 @@ def _handle_post_mortem_analysis(klines_data: Dict[str, List[Any]], analyzed_tra
                     state_manager.remove_analyzed_trade(trade_id)
                     continue
             
-            # Ograniczenie częstotliwości aktualizacji BQ
             if analysis.last_bq_update_iso and (datetime.now(timezone.utc) - analysis.last_bq_update_iso).total_seconds() < 300:
                 continue
 
-            now_ts_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-            new_klines = get_historical_klines(analysis.symbol, analysis.last_analysis_timestamp_ms, now_ts_ms)
-            if not new_klines:
-                state_manager.update_analyzed_trade_analysis_timestamp(trade_id, now_ts_ms)
-                continue
+            trades_to_process.append(analysis)
+        except (ValidationError, Exception) as e:
+            logger.error(f"[{trade_id}] Błąd w preselekcji analizy post-mortem: {e}")
 
+    if not trades_to_process:
+        return
+
+    klines_tasks = [
+        get_historical_klines(
+            session,
+            trade.symbol,
+            trade.last_analysis_timestamp_ms,
+            int(datetime.now(timezone.utc).timestamp() * 1000)
+        ) for trade in trades_to_process
+    ]
+    
+    results = await asyncio.gather(*klines_tasks, return_exceptions=True)
+
+    for analysis, new_klines in zip(trades_to_process, results):
+        trade_id = analysis.trade_id
+        now_ts_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+
+        if isinstance(new_klines, Exception) or not new_klines:
+            if isinstance(new_klines, Exception):
+                logger.error(f"[{trade_id}] Błąd API podczas pobierania klines dla analizy: {new_klines}")
+            state_manager.update_analyzed_trade_analysis_timestamp(trade_id, now_ts_ms)
+            continue
+        
+        try:
             current_extreme = analysis.last_known_extreme_price
             if analysis.direction.lower() == 'long':
                 new_max = max(float(k[2]) for k in new_klines)
@@ -280,56 +377,18 @@ def _handle_post_mortem_analysis(klines_data: Dict[str, List[Any]], analyzed_tra
                 state_manager.update_analyzed_trade_analysis_timestamp(trade_id, now_ts_ms)
                 continue
 
-            # Użycie centralnej funkcji analitycznej
             updates_for_bq = _calculate_trade_analytics(
                 analysis.direction, analysis.entry_price, analysis.original_sl, current_extreme, analysis.alert_data_snapshot
             )
             
-            # Wysyłamy do BQ tylko te wartości, które się zmieniły (są True lub jest to nowe rr_achieved)
-            updates_to_send = {
-                k: v for k, v in updates_for_bq.items() if v is True or k == 'rr_achieved'
-            }
+            updates_to_send = {k: v for k, v in updates_for_bq.items() if v is True or k == 'rr_achieved'}
 
             if updates_to_send and update_analyzed_trade_in_bigquery(trade_id, updates_to_send):
                 state_manager.update_analyzed_trade_timestamp(trade_id)
                 
             state_manager.update_analyzed_trade_analysis_state(trade_id, now_ts_ms, current_extreme)
-
-        except ValidationError as e:
-            logger.error(f"[{trade_id}] Błąd walidacji danych 'ducha': {e}")
         except Exception as e:
-            logger.error(f"[{trade_id}] Błąd podczas analizy post-mortem: {e}", exc_info=True)
-
-
-def log_and_finalize_trade(trade: OpenTradeData, closed_result: str, close_price: float):
-    logger.info(f"--- [FINALIZACJA I PEŁNA ANALIZA] --- [{trade.symbol}] | ID: {trade.trade_id} | Wynik: {closed_result}")
-
-    close_timestamp_utc = datetime.now(timezone.utc)
-    klines = get_historical_klines(trade.symbol, trade.opened_at_ms, int(close_timestamp_utc.timestamp() * 1000))
-    
-    extreme_profit_price = close_price
-    if klines:
-        if trade.direction.lower() == 'long':
-            extreme_profit_price = max([float(k[2]) for k in klines] + [close_price])
-        else: # short
-            extreme_profit_price = min([float(k[3]) for k in klines] + [close_price])
-            
-    # Użycie centralnej funkcji analitycznej
-    analytics_data = _calculate_trade_analytics(
-        trade.direction, trade.entry_price, trade.sl_price, extreme_profit_price, trade.alert_data_snapshot
-    )
-
-    bq_data = {
-        "trade_id": trade.trade_id,
-        "timestamp_entry": trade.opened_at_iso,
-        "timestamp_close": close_timestamp_utc.isoformat(),
-        "symbol": trade.symbol,
-        "direction": trade.direction.upper(),
-        "main_result": closed_result,
-        "ob_type": trade.ob_type,
-    }
-    bq_data.update(analytics_data)
-    log_trade_to_bigquery(bq_data)
+            logger.error(f"[{trade_id}] Błąd podczas przetwarzania analizy post-mortem: {e}", exc_info=True)
 
 
 def run_trading_logic():
@@ -366,19 +425,28 @@ def run_trading_logic():
         else:
             logger.warning(f"Brak kompletnych danych kline w cache'u dla symbolu: {symbol}")
 
+    async def async_main():
+        async with aiohttp.ClientSession() as session:
+            # Funkcje synchroniczne wykonujemy normalnie
+            try:
+                _handle_setups(klines_data_for_handlers, all_setups)
+            except Exception as e:
+                logger.error(f"Krytyczny błąd w _handle_setups: {e}", exc_info=True)
+            
+            # Zadania asynchroniczne zbieramy do wykonania równoległego
+            async_tasks = [
+                _handle_manage_open_trades(session, klines_data_for_handlers, all_open_trades),
+                _handle_post_mortem_analysis(session, klines_data_for_handlers, all_analyzed_trades)
+            ]
+            
+            results = await asyncio.gather(*async_tasks, return_exceptions=True)
+            for result in results:
+                if isinstance(result, Exception):
+                    logger.error(f"Wystąpił błąd podczas równoległego wykonywania zadań: {result}", exc_info=True)
+
     try:
-        _handle_setups(klines_data_for_handlers, all_setups)
+        asyncio.run(async_main())
     except Exception as e:
-        logger.error(f"Krytyczny błąd w _handle_setups: {e}", exc_info=True)
-    
-    try:
-        _handle_manage_open_trades(klines_data_for_handlers, all_open_trades)
-    except Exception as e:
-        logger.error(f"Krytyczny błąd w _handle_manage_open_trades: {e}", exc_info=True)
-    
-    try:
-        _handle_post_mortem_analysis(klines_data_for_handlers, all_analyzed_trades)
-    except Exception as e:
-        logger.error(f"Krytyczny błąd w _handle_post_mortem_analysis: {e}", exc_info=True)
+        logger.error(f"Błąd podczas uruchamiania pętli asyncio w run_trading_logic: {e}", exc_info=True)
 
     logger.info("Zakończono główną pętlę logiki tradingowej.")
