@@ -1,4 +1,4 @@
-# Nowy plik: cloudbuild-bot.yaml
+#trading_bot/cloudbuild-bot.yaml
 steps:
 - name: 'gcr.io/cloud-builders/docker'
   args: [
