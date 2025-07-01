@@ -1,5 +1,4 @@
 # W pliku: /bot_logic.py
-# ZASTĄP CAŁĄ ZAWARTOŚĆ PLIKU
 
 import logging
 import requests
