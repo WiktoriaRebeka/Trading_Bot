@@ -50,3 +50,4 @@ jobs:
             --allow-unauthenticated \
             --vpc-connector trading-bot-vpc \
             --vpc-egress all
+            --service-account github-actions-sa@${{ secrets.GCP_PROJECT_ID }}.iam.gserviceaccount.com
