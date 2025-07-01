@@ -1,4 +1,4 @@
-# Poprawiony plik: .github/workflows/deploy-collector.yml
+# Pełna zawartość pliku: .github/workflows/deploy-collector.yml
 
 name: Deploy Data Collector to Cloud Run
 
@@ -7,15 +7,16 @@ on:
     branches:
       - div
     paths:
+      # Ścieżki, które wyzwalają to wdrożenie
       - '.github/workflows/deploy-collector.yml'
       - 'cloudbuild-collector.yaml'
-      - 'collector_main.py'
       - 'data_collector.py'
+      - 'collector_main.py'
       - 'Dockerfile'
-      - 'requirements.txt'
       - 'config_loader.py'
-      - 'firebase_client.py'
       - 'constants.py'
+      - 'firebase_client.py'
+      - 'requirements.txt'
 
 jobs:
   deploy:
@@ -32,7 +33,7 @@ jobs:
         uses: google-github-actions/auth@v1
         with:
           credentials_json: '${{ secrets.GCP_SA_KEY }}'
-          project_id: ${{ secrets.GCP_PROJECT_ID }}
+          project_id: '${{ secrets.GCP_PROJECT_ID }}'
 
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v1
@@ -47,5 +48,5 @@ jobs:
             --image europe-central2-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/trading-bot-image/data-collector-service:latest \
             --region europe-central2 \
             --platform managed \
-            --allow-unauthenticated
-            --service-account github-actions-sa@${{ secrets.GCP_PROJECT_ID }}.iam.gserviceaccount.com
+            --allow-unauthenticated \
+            --service-account trading-bot-463318@appspot.gserviceaccount.com
