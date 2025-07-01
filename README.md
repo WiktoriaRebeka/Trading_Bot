@@ -1,19 +1,3 @@
-Oczywiście. Masz absolutną rację – po tak gruntownej refaktoryzacji dokumentacja musi zostać zaktualizowana, aby odzwierciedlała nową, ulepszoną architekturę.
-
-Poniżej znajduje się poprawiona wersja pliku README.md. Wprowadziłem zmiany, które precyzyjnie opisują nowy, wydajniejszy i bezpieczniejszy sposób działania systemu, w tym:
-
-Zaktualizowany przepływ danych (bot korzysta z cache'u).
-
-Dynamiczną konfigurację symboli.
-
-Bezpieczne zarządzanie sekretami.
-
-Zrównoleglone pobieranie danych.
-
-Nową strukturę plików z models.py i config_loader.py.
-
-Możesz po prostu skopiować i wkleić całą poniższą zawartość do swojego pliku README.md.
-
 Automated Trading Bot v7.0 (GCP)
 1. Project Description and Main Goal
 
