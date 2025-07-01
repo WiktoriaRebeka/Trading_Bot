@@ -1,3 +1,5 @@
+# Pełna zawartość pliku: .github/workflows/deploy.yml
+
 name: Deploy Trading Bot to Cloud Run
 
 on:
@@ -5,16 +7,19 @@ on:
     branches:
       - div
     paths:
+      # Ścieżki, które wyzwalają to wdrożenie
       - '.github/workflows/deploy.yml'
       - 'cloudbuild-bot.yaml'
       - 'main.py'
       - 'bot_logic.py'
       - 'Dockerfile.bot'
+      - 'bigquery_logger.py'
+      - 'config_loader.py'
+      - 'constants.py'
+      - 'fetch_from_firestore.py'
+      - 'firebase_client.py'
       - 'models.py'
       - 'state_manager.py'
-      - 'constants.py'
-      - 'firebase_client.py'
-      - 'bigquery_logger.py'
       - 'requirements.txt'
 
 jobs:
@@ -32,7 +37,7 @@ jobs:
         uses: google-github-actions/auth@v1
         with:
           credentials_json: '${{ secrets.GCP_SA_KEY }}'
-          project_id: ${{ secrets.GCP_PROJECT_ID }}
+          project_id: '${{ secrets.GCP_PROJECT_ID }}'
 
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v1
@@ -49,5 +54,5 @@ jobs:
             --platform managed \
             --allow-unauthenticated \
             --vpc-connector trading-bot-vpc \
-            --vpc-egress all
-            --service-account github-actions-sa@${{ secrets.GCP_PROJECT_ID }}.iam.gserviceaccount.com
+            --vpc-egress all \
+            --service-account trading-bot-463318@appspot.gserviceaccount.com
