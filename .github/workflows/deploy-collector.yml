@@ -8,11 +8,14 @@ on:
       - div
     paths:
       - '.github/workflows/deploy-collector.yml'
-      - 'cloudbuild-collector.yaml' # Dodajemy nowy plik do ścieżek
-      - 'data_collector.py'
+      - 'cloudbuild-collector.yaml'
       - 'collector_main.py'
+      - 'data_collector.py'
       - 'Dockerfile'
-      # ... i reszta plików z listy
+      - 'requirements.txt'
+      - 'config_loader.py'
+      - 'firebase_client.py'
+      - 'constants.py'
 
 jobs:
   deploy:
@@ -45,3 +48,4 @@ jobs:
             --region europe-central2 \
             --platform managed \
             --allow-unauthenticated
+            --service-account github-actions-sa@${{ secrets.GCP_PROJECT_ID }}.iam.gserviceaccount.com
