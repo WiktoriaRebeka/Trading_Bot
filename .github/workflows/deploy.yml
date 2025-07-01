@@ -1,14 +1,4 @@
-.github/workflows/deploy.yml
-
-- name: Deploy to Cloud Run
-  run: |-
-    gcloud run deploy trading-bot-service \ # <-- POPRAWKA: wdraża właściwą usługę
-      --image europe-central2-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/trading-bot-image/trading-bot-service:latest \
-      --region europe-central2 \
-      --platform managed \
-      --allow-unauthenticated \
-      --vpc-connector trading-bot-vpc \
-      --vpc-egress all
+name: Deploy Trading Bot to Cloud Run
 
 on:
   push:
@@ -16,12 +6,17 @@ on:
       - div
     paths:
       - '.github/workflows/deploy.yml'
-      - 'cloudbuild-bot.yaml' # Dodajemy nowy plik do ścieżek
+      - 'cloudbuild-bot.yaml'
       - 'main.py'
       - 'bot_logic.py'
       - 'Dockerfile.bot'
-      # ... i reszta plików z listy
-      
+      - 'models.py'
+      - 'state_manager.py'
+      - 'constants.py'
+      - 'firebase_client.py'
+      - 'bigquery_logger.py'
+      - 'requirements.txt'
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
