@@ -4,8 +4,8 @@ from google.cloud import firestore
 from datetime import datetime, timezone, timedelta
 import logging
 
-from firebase_client import get_db 
-from constants import (
+from shared_lib.firebase_client import get_db 
+from shared_lib.constants import (
     FIRESTORE_COLLECTION_ALERTS,
     BOT_CONFIG_COLLECTION,
     LAST_FETCH_STATE_DOC_ID,

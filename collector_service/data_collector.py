@@ -5,8 +5,8 @@ import asyncio
 import aiohttp
 from typing import List, Dict, Any, Optional
 
-import firebase_client
-import constants
+from shared_lib import firebase_client
+from shared_lib import constants
 
 logger = logging.getLogger(__name__)
 

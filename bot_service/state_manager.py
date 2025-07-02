@@ -6,9 +6,10 @@ from datetime import datetime, timezone
 from google.cloud import firestore
 from google.cloud.firestore_v1.document import DocumentSnapshot
 
-from firebase_client import get_db
-import constants
-from models import AlertData, OpenTradeData, AnalyzedTradeData
+from shared_lib.firebase_client import get_db
+from shared_lib import constants
+from shared_lib.models import AlertData, OpenTradeData, AnalyzedTradeData
+
 
 # Używamy __name__, aby logger automatycznie przyjął nazwę modułu: 'state_manager'
 logger = logging.getLogger(__name__)

@@ -5,7 +5,7 @@ from typing import Dict, Any, Optional
 from google.cloud import bigquery
 from google.api_core.exceptions import GoogleAPICallError
 
-import constants
+from shared_lib import constants
 
 logger = logging.getLogger(__name__)
 
