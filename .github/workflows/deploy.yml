@@ -49,6 +49,6 @@ jobs:
             --region europe-central2 \
             --platform managed \
             --allow-unauthenticated \
-            --vpc-connector trading-bot-vpc \
+            --vpc-connector app-connector-warsaw \
             --vpc-egress all \
             --service-account trading-bot-463318@appspot.gserviceaccount.com
