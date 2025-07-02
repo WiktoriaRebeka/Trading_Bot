@@ -1,5 +1,4 @@
-#trading_bot/collector_service/Dockerfile
-
+# Lokalizacja: collector_service/Dockerfile
 FROM python:3.11-slim
 ENV PYTHONUNBUFFERED 1
 
@@ -12,4 +11,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY shared_lib/ /app/shared_lib/
 COPY collector_service/ /app/collector_service/
 
-CMD exec gunicorn --bind :$PORT --workers 1 --threads 8 --timeout 0 "collector_service.collector_main:app"
+# Wskazujemy na funkcję 'create_app' w module 'collector_main'.
+CMD exec gunicorn --bind :$PORT --workers 1 --threads 8 --timeout 0 "collector_service.collector_main:create_app()"
