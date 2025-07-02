@@ -1,5 +1,4 @@
-# W pliku: /data_collector.py
-# ZASTĄP CAŁĄ ZAWARTOŚĆ PLIKU
+#trading_bot/collector_service/data_collector.py
 
 import logging
 import asyncio

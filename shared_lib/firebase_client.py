@@ -1,5 +1,5 @@
-# W pliku: /firebase_client.py
-# ZASTĄP CAŁĄ ZAWARTOŚĆ PLIKU
+#trading_bot/shared_lib/firebase_client.py
+
 
 import os
 from google.cloud import firestore

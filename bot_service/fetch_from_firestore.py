@@ -1,4 +1,4 @@
-#trading_bot/fetch_from_firestore.py
+#trading_bot/bot_service/fetch_from_firestore.py
 
 from google.cloud import firestore
 from datetime import datetime, timezone, timedelta

@@ -1,4 +1,4 @@
-#trading_bot/bigquery_logger.py
+# trading_bot/bot_service/bigquery_logger.py
 
 import logging
 from typing import Dict, Any, Optional
@@ -9,7 +9,13 @@ import constants
 
 logger = logging.getLogger(__name__)
 
-# Schemat pozostaje taki sam
+# --- KLUCZOWA ZMIANA ---
+# Usuwamy globalną inicjalizację przy imporcie modułu.
+# Zamiast tego tworzymy globalne placeholdery, które zostaną wypełnione
+# przez funkcję inicjalizacyjną.
+bigquery_client: Optional[bigquery.Client] = None
+TABLE_REF: Optional[str] = None
+
 EXPECTED_SCHEMA = {
     "trade_id": str, "timestamp_entry": str, "timestamp_close": str,
     "symbol": str, "direction": str, "main_result": str, "ob_type": str,
@@ -18,14 +24,37 @@ EXPECTED_SCHEMA = {
     "rr_5_0_achieved": bool,
 }
 
-# Inicjalizacja klienta pozostaje taka sama
-try:
-    bigquery_client = bigquery.Client()
-    TABLE_REF = f"{constants.BIGQUERY_PROJECT_ID}.{constants.BIGQUERY_DATASET_ID}.{constants.BIGQUERY_TABLE_ID}"
-    logger.info(f"Klient BigQuery pomyślnie zainicjalizowany. Tabela docelowa: {TABLE_REF}")
-except Exception as e:
-    bigquery_client, TABLE_REF = None, None
-    logger.critical(f"KRYTYCZNY BŁĄD: Nie udało się zainicjalizować klienta BigQuery: {e}", exc_info=True)
+# --- NOWA FUNKCJA INICJALIZACYJNA ---
+def initialize_bigquery():
+    """
+    Inicjalizuje globalnego klienta BigQuery. Powinna być wywołana raz 
+    na starcie aplikacji wewnątrz fabryki aplikacji (np. w create_app).
+    """
+    global bigquery_client, TABLE_REF
+
+    # Sprawdzamy, czy klient nie został już zainicjalizowany, aby uniknąć powtórnej pracy.
+    if bigquery_client is not None:
+        logger.debug("Klient BigQuery jest już zainicjalizowany.")
+        return
+
+    try:
+        # Tworzymy klienta
+        client = bigquery.Client()
+        table_ref_str = f"{constants.BIGQUERY_PROJECT_ID}.{constants.BIGQUERY_DATASET_ID}.{constants.BIGQUERY_TABLE_ID}"
+        
+        # Proste, ale skuteczne sprawdzenie połączenia i uprawnień przez próbę pobrania metadanych tabeli.
+        # Jeśli tabela nie istnieje lub brakuje uprawnień, to polecenie zgłosi wyjątek.
+        client.get_table(table_ref_str)
+        
+        # Jeśli wszystko się udało, przypisujemy klienta i referencję do zmiennych globalnych.
+        bigquery_client = client
+        TABLE_REF = table_ref_str
+        logger.info(f"Klient BigQuery pomyślnie zainicjalizowany. Tabela docelowa: {TABLE_REF}")
+
+    except Exception as e:
+        # W przypadku błędu logujemy krytyczną informację i pozostawiamy zmienne jako None.
+        logger.critical(f"KRYTYCZNY BŁĄD: Nie udało się zainicjalizować klienta BigQuery: {e}", exc_info=True)
+        bigquery_client, TABLE_REF = None, None
 
 
 def _validate_and_sanitize_data(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -58,18 +87,21 @@ def _validate_and_sanitize_data(data: Dict[str, Any]) -> Optional[Dict[str, Any]
 
 def log_trade_to_bigquery(trade_data: Dict):
     """Loguje kompletną transakcję do tabeli historii w BigQuery."""
-    if not bigquery_client:
+    # Sprawdzanie, czy klient został pomyślnie zainicjalizowany.
+    if not bigquery_client or not TABLE_REF:
         logger.error("[BQ_LOGGER] Klient BigQuery nie jest zainicjalizowany! Pomijam zapis.")
         return
+    
     logger.info(f"[BQ_LOGGER] Przygotowuję do zapisu w BigQuery: {trade_data}")
     sanitized_data = _validate_and_sanitize_data(trade_data)
     if not sanitized_data:
         logger.error(f"[BQ_LOGGER] Dane transakcji nie przeszły walidacji. ID: {trade_data.get('trade_id')}. Pomijam zapis.")
         return
+        
     try:
-        table = bigquery_client.get_table(TABLE_REF)
+        # get_table nie jest już potrzebne, bo weryfikacja była przy inicjalizacji
         rows_to_insert = [sanitized_data]
-        errors = bigquery_client.insert_rows_json(table, rows_to_insert)
+        errors = bigquery_client.insert_rows_json(TABLE_REF, rows_to_insert)
         if not errors:
             logger.info(f"[BQ_LOGGER] SUKCES! Pomyślnie wstawiono wiersz dla transakcji ID: {sanitized_data.get('trade_id')}")
         else:
@@ -78,33 +110,19 @@ def log_trade_to_bigquery(trade_data: Dict):
         logger.error(f"[BQ_LOGGER] Krytyczny błąd podczas zapisu do BigQuery dla ID: {sanitized_data.get('trade_id')}: {e}", exc_info=True)
 
 
-# --- PRZYWRACAMY KLUCZOWĄ FUNKCJĘ ---
-# W pliku: /bigquery_logger.py
-
-# UWAGA: Ten kod zastępuje całą istniejącą funkcję update_analyzed_trade_in_bigquery
-
 def update_analyzed_trade_in_bigquery(trade_id: str, updates: Dict[str, Any]) -> bool:
     """
     Bezpiecznie aktualizuje istniejący wiersz w BigQuery danymi z analizy post-mortem
     używając zapytań sparametryzowanych, aby zapobiec SQL Injection.
-
-    Zwraca:
-        bool: True, jeśli aktualizacja zakończyła się sukcesem (wiersz został zmieniony).
-              False, w przypadku błędu lub gdy wiersz nie został znaleziony.
     """
-    if not bigquery_client or not updates:
+    # Sprawdzanie, czy klient został pomyślnie zainicjalizowany.
+    if not bigquery_client or not TABLE_REF or not updates:
+        logger.error("[BQ_UPDATER] Klient BigQuery nie jest zainicjalizowany lub brak danych do aktualizacji. Pomijam zapis.")
         return False
 
-    # Krok 1: Przygotuj klauzule SET z placeholderami zamiast wklejania wartości.
-    # To jest kluczowy element zabezpieczenia przed SQL Injection.
-    # Przykład: `rr_achieved` = @rr_achieved
     set_clauses = [f"`{key}` = @{key}" for key in updates.keys()]
-
-    # Krok 2: Zbuduj szablon zapytania z placeholderami.
     query = f"UPDATE `{TABLE_REF}` SET {', '.join(set_clauses)} WHERE trade_id = @trade_id"
 
-    # Krok 3: Przygotuj parametry, które zostaną bezpiecznie wstawione przez klienta BigQuery.
-    # Klient BigQuery zadba o poprawne escapowanie i typowanie danych.
     query_params = [
         bigquery.ScalarQueryParameter("trade_id", "STRING", trade_id)
     ]
@@ -122,7 +140,7 @@ def update_analyzed_trade_in_bigquery(trade_id: str, updates: Dict[str, Any]) ->
     logger.info(f"[BQ_UPDATER] Wykonuję sparametryzowane zapytanie dla {trade_id}")
     try:
         query_job = bigquery_client.query(query, job_config=job_config)
-        query_job.result()  # Czekaj na zakończenie zadania
+        query_job.result()
 
         if query_job.num_dml_affected_rows > 0:
             logger.info(f"[BQ_UPDATER] SUKCES. Pomyślnie zaktualizowano wiersz dla {trade_id}.")
@@ -132,7 +150,6 @@ def update_analyzed_trade_in_bigquery(trade_id: str, updates: Dict[str, Any]) ->
             return False
 
     except GoogleAPICallError as e:
-        # Bezpieczniejsze sprawdzanie błędu bufora
         if "streaming buffer" in str(e):
             logger.warning(f"[BQ_UPDATER] Oczekiwany błąd bufora strumieniowego dla {trade_id}. Spróbujemy ponownie w kolejnym cyklu.")
         else:

@@ -1,5 +1,4 @@
-# W pliku: /state_manager.py
-# ZASTĄP CAŁĄ ZAWARTOŚĆ PLIKU
+#trading_bot/bot_service/state_manager.py
 
 import logging
 from typing import Iterable, Dict, Any

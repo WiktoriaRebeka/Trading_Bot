@@ -1,4 +1,4 @@
-# Pełna zawartość pliku: .github/workflows/deploy.yml
+#trading_bot/.github/workflows/deploy.yml
 
 name: Deploy Trading Bot to Cloud Run
 
@@ -7,20 +7,14 @@ on:
     branches:
       - div
     paths:
-      # Ścieżki, które wyzwalają to wdrożenie
+      # --- KLUCZOWA ZMIANA ---
+      # Teraz workflow reaguje na zmiany w dedykowanym katalogu usługi,
+      # plikach współdzielonych oraz plikach konfiguracyjnych.
       - '.github/workflows/deploy.yml'
       - 'cloudbuild-bot.yaml'
-      - 'main.py'
-      - 'bot_logic.py'
-      - 'Dockerfile.bot'
-      - 'bigquery_logger.py'
-      - 'config_loader.py'
-      - 'constants.py'
-      - 'fetch_from_firestore.py'
-      - 'firebase_client.py'
-      - 'models.py'
-      - 'state_manager.py'
-      - 'requirements.txt'
+      - 'bot_service/**'        # Zmiany w kodzie bota
+      - 'shared_lib/**'         # Zmiany we współdzielonym kodzie
+      - 'requirements.txt'      # Zmiany w zależnościach
 
 jobs:
   deploy:
@@ -44,10 +38,12 @@ jobs:
 
       - name: Build and push image via Cloud Build
         run: |-
+          # To polecenie pozostaje bez zmian.
           gcloud builds submit . --config=cloudbuild-bot.yaml
 
       - name: Deploy to Cloud Run
         run: |-
+          # Ta sekcja pozostaje bez zmian.
           gcloud run deploy trading-bot-service \
             --image europe-central2-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/trading-bot-image/trading-bot-service:latest \
             --region europe-central2 \

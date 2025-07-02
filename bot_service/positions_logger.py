@@ -1,4 +1,4 @@
-#trading_bot/positions_logger.py
+#trading_bot/bot_service/positions_logger.py
 
 from datetime import datetime, timezone
 from typing import Optional, Literal

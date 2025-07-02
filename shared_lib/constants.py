@@ -1,5 +1,5 @@
-# W pliku: /constants.py
-# ZASTĄP CAŁĄ ZAWARTOŚĆ PLIKU
+#trading_bot/shared_lib/constants.py
+
 
 import os
 

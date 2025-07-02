@@ -1,5 +1,5 @@
-# W pliku: /models.py
-# NOWY PLIK
+#trading_bot/shared_lib/models.py
+
 
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any

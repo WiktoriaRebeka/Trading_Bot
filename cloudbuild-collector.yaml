@@ -1,10 +1,16 @@
-# Nowy plik: cloudbuild-collector.yaml
+# trading_bot/cloudbuild-collector.yaml
 steps:
 - name: 'gcr.io/cloud-builders/docker'
   args: [
     'build',
     '-t', 'europe-central2-docker.pkg.dev/${PROJECT_ID}/trading-bot-image/data-collector-service:latest',
-    '--file', 'Dockerfile', # Wskazuje, którego pliku Dockerfile użyć
+    
+    # --- KLUCZOWA ZMIANA ---
+    # Wskazujemy na plik Dockerfile w jego nowej lokalizacji wewnątrz katalogu usługi.
+    '--file', 'collector_service/Dockerfile',
+
+    # Kontekst budowania to wciąż '.', czyli główny katalog repozytorium,
+    # aby Docker mógł znaleźć 'collector_service/', 'shared_lib/' i 'requirements.txt'.
     '.'
   ]
 images:

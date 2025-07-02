@@ -1,4 +1,4 @@
-# Pełna zawartość pliku: .github/workflows/deploy-collector.yml
+# trading_bot/.github/workflows/deploy-collector.yml
 
 name: Deploy Data Collector to Cloud Run
 
@@ -7,16 +7,14 @@ on:
     branches:
       - div
     paths:
-      # Ścieżki, które wyzwalają to wdrożenie
+      # --- KLUCZOWA ZMIANA ---
+      # Teraz workflow reaguje na zmiany w dedykowanym katalogu usługi,
+      # plikach współdzielonych oraz plikach konfiguracyjnych.
       - '.github/workflows/deploy-collector.yml'
       - 'cloudbuild-collector.yaml'
-      - 'data_collector.py'
-      - 'collector_main.py'
-      - 'Dockerfile'
-      - 'config_loader.py'
-      - 'constants.py'
-      - 'firebase_client.py'
-      - 'requirements.txt'
+      - 'collector_service/**' # Zmiany w kodzie kolektora
+      - 'shared_lib/**'        # Zmiany we współdzielonym kodzie
+      - 'requirements.txt'     # Zmiany w zależnościach
 
 jobs:
   deploy:
@@ -40,10 +38,13 @@ jobs:
 
       - name: Build and push image via Cloud Build
         run: |-
+          # To polecenie pozostaje bez zmian. Kontekstem jest całe repozytorium,
+          # a plik cloudbuild-collector.yaml wie, które pliki wybrać.
           gcloud builds submit . --config=cloudbuild-collector.yaml
 
       - name: Deploy to Cloud Run
         run: |-
+          # Ta sekcja pozostaje bez zmian.
           gcloud run deploy data-collector-service \
             --image europe-central2-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/trading-bot-image/data-collector-service:latest \
             --region europe-central2 \

@@ -1,3 +1,5 @@
+# trading_bot/bot_service/bot_logic.py
+
 import logging
 import uuid
 from typing import Dict, Any, List, Optional
@@ -7,15 +9,17 @@ from pydantic import ValidationError
 import asyncio
 import aiohttp
 
-from firebase_client import get_db
-import state_manager
-from bigquery_logger import log_trade_to_bigquery, update_analyzed_trade_in_bigquery
-import constants
-from models import SetupData, OpenTradeData, AnalyzedTradeData, AlertData
+# Poprawione importy uwzględniające nową strukturę katalogów
+from shared_lib.firebase_client import get_db
+from bot_service import state_manager
+from bot_service.bigquery_logger import log_trade_to_bigquery, update_analyzed_trade_in_bigquery
+from shared_lib import constants
+from shared_lib.models import SetupData, OpenTradeData, AnalyzedTradeData, AlertData
 
 logger = logging.getLogger(__name__)
 
-
+# --- PRZYWRÓCONA FUNKCJA ---
+# Ta funkcja była nieumyślnie pominięta w poprzedniej wersji.
 def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]]):
     """
     Przetwarza listę nowych alertów z Firestore, waliduje je i tworzy
@@ -167,11 +171,15 @@ async def log_and_finalize_trade(session: aiohttp.ClientSession, trade: OpenTrad
     log_trade_to_bigquery(bq_data)
 
 
-def _handle_setups(klines_data: Dict[str, List[Any]], active_setups: List[DocumentSnapshot]):
-    """Logika analizująca setupy pod kątem wejścia lub natychmiastowego zamknięcia."""
+def _handle_setups(klines_data: Dict[str, List[Any]], active_setups: List[DocumentSnapshot]) -> List[Dict[str, Any]]:
+    """
+    Logika analizująca setupy. Zwraca listę transakcji do natychmiastowego sfinalizowania.
+    """
     if not active_setups:
-        return
+        return []
+
     logger.info(f"Sprawdzam {len(active_setups)} aktywnych setupów.")
+    trades_to_finalize_immediately = []
 
     for setup_doc in active_setups:
         symbol = setup_doc.id
@@ -222,16 +230,18 @@ def _handle_setups(klines_data: Dict[str, List[Any]], active_setups: List[Docume
                     logger.info(f"--- [WEJŚCIE I ZAMKNIĘCIE W 1 MIN] --- [{symbol}] | Wynik: {closed_result} | ID: {trade_id}")
                     now_utc = datetime.now(timezone.utc)
                     fake_trade = OpenTradeData(
-                        trade_id=trade_id, symbol=symbol, direction=direction, ob_type=ob_type,
+                        trade_id=trade_id, symbol=symbol, direction=direction.upper(), ob_type=ob_type,
                         entry_price=entry_level, sl_price=sl_price, tp_price=tp_price,
                         opened_at_ms=int(now_utc.timestamp() * 1000) - 60000,
                         opened_at_iso=(now_utc - timedelta(minutes=1)).isoformat(),
                         alert_data_snapshot=setup.alert_data.dict(by_alias=True)
                     )
-                    # This call cannot be awaited here, as this function is sync.
-                    # For this specific edge case (1-min close), we run it synchronously.
-                    # This is acceptable as it's a rare event.
-                    asyncio.run(log_and_finalize_trade(aiohttp.ClientSession(), fake_trade, closed_result, close_price))
+                    
+                    trades_to_finalize_immediately.append({
+                        "trade": fake_trade,
+                        "result": closed_result,
+                        "price": close_price
+                    })
 
                     state_manager.update_setup_after_trade_close(symbol, is_loss=(closed_result == "LOSE"))
                     state_manager.update_setup_entry_attempt(symbol)
@@ -246,6 +256,8 @@ def _handle_setups(klines_data: Dict[str, List[Any]], active_setups: List[Docume
             logger.error(f"[{symbol}] Błąd walidacji danych setupu: {e}")
         except Exception as e:
             logger.error(f"[{symbol}] Błąd podczas sprawdzania wejścia: {e}", exc_info=True)
+    
+    return trades_to_finalize_immediately
 
 
 async def _handle_manage_open_trades(session: aiohttp.ClientSession, klines_data: Dict[str, List[Any]], open_trades: List[DocumentSnapshot]):
@@ -427,22 +439,29 @@ def run_trading_logic():
 
     async def async_main():
         async with aiohttp.ClientSession() as session:
-            # Funkcje synchroniczne wykonujemy normalnie
+            async_tasks = []
+            
+            immediate_finalization_jobs = []
             try:
-                _handle_setups(klines_data_for_handlers, all_setups)
+                immediate_finalization_jobs = _handle_setups(klines_data_for_handlers, all_setups)
             except Exception as e:
                 logger.error(f"Krytyczny błąd w _handle_setups: {e}", exc_info=True)
-            
-            # Zadania asynchroniczne zbieramy do wykonania równoległego
-            async_tasks = [
+
+            for job in immediate_finalization_jobs:
+                async_tasks.append(
+                    log_and_finalize_trade(session, job["trade"], job["result"], job["price"])
+                )
+
+            async_tasks.extend([
                 _handle_manage_open_trades(session, klines_data_for_handlers, all_open_trades),
                 _handle_post_mortem_analysis(session, klines_data_for_handlers, all_analyzed_trades)
-            ]
+            ])
             
-            results = await asyncio.gather(*async_tasks, return_exceptions=True)
-            for result in results:
-                if isinstance(result, Exception):
-                    logger.error(f"Wystąpił błąd podczas równoległego wykonywania zadań: {result}", exc_info=True)
+            if async_tasks:
+                results = await asyncio.gather(*async_tasks, return_exceptions=True)
+                for result in results:
+                    if isinstance(result, Exception):
+                        logger.error(f"Wystąpił błąd podczas równoległego wykonywania zadań: {result}", exc_info=True)
 
     try:
         asyncio.run(async_main())

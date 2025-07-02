@@ -1,5 +1,5 @@
-# W pliku: /collector_main.py
-# ZASTĄP CAŁĄ ZAWARTOŚĆ PLIKU
+#trading_bot/collector_service/collector_main.py
+
 
 import logging
 import sys

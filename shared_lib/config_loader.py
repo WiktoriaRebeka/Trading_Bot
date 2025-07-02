@@ -1,5 +1,5 @@
-# W pliku: /config_loader.py
-# NOWY PLIK
+#trading_bot/shared_lib/config_loader.py
+
 
 import os
 import logging
