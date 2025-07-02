@@ -3,7 +3,7 @@
 import logging
 import sys
 import os
-
+#szybki test
 def create_app():
     """Tworzy i konfiguruje instancję aplikacji Flask dla głównego bota."""
     
