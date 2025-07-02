@@ -1,6 +1,6 @@
 #trading_bot/collector_service/collector_main.py
 
-
+# Test collector deploy.
 import logging
 import sys
 import asyncio
