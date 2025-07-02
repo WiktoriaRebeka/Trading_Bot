@@ -9,10 +9,6 @@ import constants
 
 logger = logging.getLogger(__name__)
 
-# --- KLUCZOWA ZMIANA ---
-# Usuwamy globalną inicjalizację przy imporcie modułu.
-# Zamiast tego tworzymy globalne placeholdery, które zostaną wypełnione
-# przez funkcję inicjalizacyjną.
 bigquery_client: Optional[bigquery.Client] = None
 TABLE_REF: Optional[str] = None
 
