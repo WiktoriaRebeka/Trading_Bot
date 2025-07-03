@@ -1,9 +1,10 @@
-#trading_bot/bot_service/fetch_from_firestore.py
+# Lokalizacja: bot_service/fetch_from_firestore.py
 
 from google.cloud import firestore
 from datetime import datetime, timezone, timedelta
 import logging
 
+# --- POPRAWIONE IMPORTY ---
 from shared_lib.firebase_client import get_db 
 from shared_lib.constants import (
     FIRESTORE_COLLECTION_ALERTS,
@@ -15,7 +16,6 @@ from shared_lib.constants import (
 logger = logging.getLogger(__name__)
 
 def load_last_processed_timestamp() -> datetime:
-    """Odczytuje ostatni timestamp z Firestore jako obiekt datetime."""
     db = get_db()
     try:
         doc_ref = db.collection(BOT_CONFIG_COLLECTION).document(LAST_FETCH_STATE_DOC_ID)
@@ -27,14 +27,11 @@ def load_last_processed_timestamp() -> datetime:
                 return timestamp
     except Exception as e:
         logger.error(f"[FETCHER_ERROR] Nie udało się odczytać timestampa z Firestore: {e}", exc_info=True)
-    
     fallback_ts = datetime.now(timezone.utc) - timedelta(days=1)
     logger.warning(f"[FETCHER] Nie znaleziono timestampa w Firestore, używam wartości domyślnej: {fallback_ts.isoformat()}")
     return fallback_ts
 
-
 def save_last_processed_timestamp(timestamp_dt: datetime):
-    """Zapisuje nowy timestamp (jako obiekt datetime) do Firestore."""
     db = get_db()
     try:
         doc_ref = db.collection(BOT_CONFIG_COLLECTION).document(LAST_FETCH_STATE_DOC_ID)
@@ -43,36 +40,26 @@ def save_last_processed_timestamp(timestamp_dt: datetime):
     except Exception as e:
         logger.error(f"[FETCHER_ERROR] Nie udało się zapisać timestampu {timestamp_dt.isoformat()} do Firestore: {e}", exc_info=True)
 
-
 def fetch_new_alerts_since(last_ts_dt: datetime):
-    """Pobiera nowe alerty z Firestore i zwraca je wraz z najnowszym timestampem."""
     db = get_db()
     new_alerts_list = []
-    new_max_ts = last_ts_dt 
-    
+    new_max_ts = last_ts_dt
     try:
-        # Zmieniamy sposób tworzenia zapytania, aby pasował do nowej biblioteki
         query = db.collection(FIRESTORE_COLLECTION_ALERTS) \
                   .where(field_path='received_at', op_string='>', value=last_ts_dt) \
-                  .order_by('received_at') # Domyślnie kierunek jest ASCENDING
-        
+                  .order_by('received_at')
         docs = query.stream()
-
         for doc in docs:
             alert_data = doc.to_dict()
             alert_data['id'] = doc.id
             new_alerts_list.append(alert_data)
-            
             current_doc_ts = alert_data.get('received_at')
             if current_doc_ts and current_doc_ts > new_max_ts:
                 new_max_ts = current_doc_ts
-        
         if new_alerts_list:
             logger.info(f"[FETCHER] Pobrano {len(new_alerts_list)} nowych alertów.")
         else:
             logger.info("[FETCHER] Brak nowych alertów od ostatniego sprawdzenia.")
-            
     except Exception as e:
         logger.error(f"[FETCHER_FIRESTORE_ERROR] Błąd podczas pobierania alertów: {e}", exc_info=True)
-    
     return new_alerts_list, new_max_ts
