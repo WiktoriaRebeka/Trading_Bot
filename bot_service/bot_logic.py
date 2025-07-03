@@ -19,22 +19,6 @@ from shared_lib.models import SetupData, OpenTradeData, AnalyzedTradeData, Alert
 logger = logging.getLogger(__name__)
 
 
-import logging
-import uuid
-from typing import Dict, Any, List, Optional
-from datetime import datetime, timezone, timedelta
-from pydantic import ValidationError
-import asyncio
-import aiohttp
-
-from shared_lib.firebase_client import get_db
-from bot_service import state_manager
-from bot_service.bigquery_logger import log_trade_to_bigquery, update_analyzed_trade_in_bigquery
-from shared_lib import constants
-from shared_lib.models import SetupData, OpenTradeData, AnalyzedTradeData, AlertData
-
-logger = logging.getLogger(__name__)
-
 def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]]):
     if not newly_fetched_alerts:
         return
@@ -405,7 +389,6 @@ async def _handle_post_mortem_analysis(session: aiohttp.ClientSession, klines_da
         except Exception as e:
             logger.error(f"[{trade_id}] Błąd podczas przetwarzania analizy post-mortem: {e}", exc_info=True)
 
-
 def run_trading_logic():
     logger.info("Rozpoczynam główną pętlę logiki tradingowej.")
     
@@ -422,13 +405,23 @@ def run_trading_logic():
     for doc in all_analyzed_trades:
         if data := doc.to_dict():
             symbols_to_watch.add(data.get('symbol'))
-    symbols_to_watch.discard(None)
+    
+    # --- KLUCZOWA POPRAWKA: Filtrowanie nieprawidłowych wartości ---
+    # Używamy list comprehension do stworzenia nowej, czystej listy
+    valid_symbols_to_watch = {s for s in symbols_to_watch if isinstance(s, str) and s}
+    
+    # Logowanie diagnostyczne, aby zobaczyć, co się dzieje
+    if len(valid_symbols_to_watch) != len(symbols_to_watch):
+        invalid_symbols = symbols_to_watch - valid_symbols_to_watch
+        logger.warning(f"Odrzucono nieprawidłowe symbole z listy do obserwacji: {invalid_symbols}")
 
-    if not symbols_to_watch:
-        logger.info("Brak jakichkolwiek aktywnych operacji do monitorowania. Kończę cykl.")
+    if not valid_symbols_to_watch:
+        logger.info("Brak poprawnych symboli do monitorowania. Kończę cykl.")
         return
 
-    latest_klines_from_cache = state_manager.get_latest_klines_from_cache(list(symbols_to_watch))
+    # Używamy już przefiltrowanej, bezpiecznej listy
+    latest_klines_from_cache = state_manager.get_latest_klines_from_cache(list(valid_symbols_to_watch))
+    
     if not latest_klines_from_cache:
         logger.warning("Nie udało się pobrać danych z cache'u klines. Nie można kontynuować cyklu decyzyjnego.")
         return
@@ -443,29 +436,21 @@ def run_trading_logic():
     async def async_main():
         async with aiohttp.ClientSession() as session:
             async_tasks = []
-            
             immediate_finalization_jobs = []
             try:
                 immediate_finalization_jobs = _handle_setups(klines_data_for_handlers, all_setups)
             except Exception as e:
                 logger.error(f"Krytyczny błąd w _handle_setups: {e}", exc_info=True)
-
             for job in immediate_finalization_jobs:
-                async_tasks.append(
-                    log_and_finalize_trade(session, job["trade"], job["result"], job["price"])
-                )
-
+                async_tasks.append(log_and_finalize_trade(session, job["trade"], job["result"], job["price"]))
             async_tasks.extend([
                 _handle_manage_open_trades(session, klines_data_for_handlers, all_open_trades),
                 _handle_post_mortem_analysis(session, klines_data_for_handlers, all_analyzed_trades)
             ])
-            
             if async_tasks:
                 results = await asyncio.gather(*async_tasks, return_exceptions=True)
                 for result in results:
-                    if isinstance(result, Exception):
-                        logger.error(f"Wystąpił błąd podczas równoległego wykonywania zadań: {result}", exc_info=True)
-
+                    if isinstance(result, Exception): logger.error(f"Wystąpił błąd podczas zadań równoległych: {result}", exc_info=True)
     try:
         asyncio.run(async_main())
     except Exception as e:
