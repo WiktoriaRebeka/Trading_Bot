@@ -1,10 +1,10 @@
-#trading_bot/bot_service/positions_logger.py
+# Lokalizacja: bot_service/positions_logger.py
 
 from datetime import datetime, timezone
 from typing import Optional, Literal
 import logging
-from firebase_client import get_db
-# Poprawiony, prawidłowy import
+# --- POPRAWIONY IMPORT ---
+from shared_lib.firebase_client import get_db
 from google.cloud import firestore
 
 logger = logging.getLogger(__name__)
@@ -24,9 +24,7 @@ def log_position_event(
     db = get_db()
     doc_id = f"{symbol}_{status}_{datetime.now(timezone.utc).isoformat()}"
     doc_ref = db.collection(POSITIONS_COLLECTION_FIRESTORE).document(doc_id)
-
     log_data = {
-        # Używamy poprawnej ścieżki do SERVER_TIMESTAMP
         "timestamp": firestore.SERVER_TIMESTAMP,
         "symbol": symbol,
         "direction": direction,
@@ -35,7 +33,6 @@ def log_position_event(
         "price": price,
         "result": result
     }
-
     try:
         doc_ref.set(log_data)
         logger.info(f"[POS_LOGGER] Zalogowano zdarzenie: {status} dla {symbol} ({ob_type})")
