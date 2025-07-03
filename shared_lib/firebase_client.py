@@ -8,8 +8,8 @@ import logging
 # Używamy __name__, aby logger automatycznie przyjął nazwę modułu: 'firebase_client'
 logger = logging.getLogger(__name__)
 db_client = None
-
-def initialize_firebase():
+def initialize_firebase() -> bool:
+    """Inicjalizuje globalnego klienta Firestore. Zwraca True w przypadku sukcesu."""
     global db_client
 
     if db_client is not None:
@@ -17,15 +17,18 @@ def initialize_firebase():
         return True
 
     try:
-        # W środowisku GCP projekt jest zwykle wykrywany automatycznie.
         project_id = os.getenv("GCP_PROJECT")
-        database_name = "trading-bot-data"
-        logger.info(f"Inicjalizacja klienta Firestore dla projektu '{project_id}' i bazy '{database_name}'...")
         
-        # Używamy standardowego, publicznego sposobu inicjalizacji klienta
-        db_client = firestore.Client(database=database_name)
+        # --- UŻYWAMY NAZWANEJ BAZY DANYCH (potwierdzone zrzutem ekranu) ---
+        database_id = "trading-bot-data"
         
-        # Proste zapytanie weryfikujące połączenie
+        logger.info(f"Inicjalizacja klienta Firestore dla projektu '{project_id}' i bazy '{database_id}'...")
+        
+        # Przekazujemy ID bazy danych do konstruktora klienta.
+        db_client = firestore.Client(project=project_id, database=database_id)
+        
+        # Proste zapytanie weryfikujące połączenie i uprawnienia.
+        # Jeśli kolekcja nie istnieje, nie rzuci to błędu, ale potwierdzi połączenie.
         db_client.collection('_test_connection_').limit(1).get()
         
         logger.info("Inicjalizacja Firestore zakończona sukcesem.")
@@ -36,9 +39,8 @@ def initialize_firebase():
         db_client = None
         return False
 
-def get_db():
-    """Zwraca zainicjalizowanego klienta Firestore lub zgłasza wyjątek."""
+def get_db() -> firestore.Client:
+    """Zwraca zainicjalizowanego klienta Firestore lub zgłasza wyjątek, jeśli inicjalizacja się nie powiodła."""
     if db_client is None:
-        logger.critical("Próba użycia niezainicjalizowanego klienta Firestore.")
-        raise Exception("Krytyczny błąd: Klient Firestore nie został pomyślnie zainicjalizowany.")
+        raise RuntimeError("Krytyczny błąd: Klient Firestore nie został pomyślnie zainicjalizowany.")
     return db_client

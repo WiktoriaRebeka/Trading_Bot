@@ -12,4 +12,4 @@ COPY shared_lib/ /app/shared_lib/
 COPY bot_service/ /app/bot_service/
 
 # --- PRZYWRÓCENIE POLECENIA PRODUKCYJNEGO ---
-CMD exec gunicorn --bind :$PORT --workers 1 --threads 8 --timeout 0 "bot_service.main:create_app()"
+CMD exec gunicorn --bind :$PORT --workers 1 --threads 8 --timeout 300 "bot_service.main:create_app()"

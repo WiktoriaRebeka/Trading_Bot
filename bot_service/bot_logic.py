@@ -76,11 +76,16 @@ def _calculate_trade_analytics(
     Zwraca słownik z wynikami gotowymi do zapisu w BigQuery.
     """
     risk_diff = abs(entry_price - sl_price)
+    profit_diff = abs(extreme_price - entry_price)
+    rr_achieved = round(profit_diff / risk_diff, 4)
+
     if risk_diff > 0:
         profit_diff = abs(extreme_price - entry_price)
         rr_achieved = round(profit_diff / risk_diff, 4)
     else:
         rr_achieved = 0.0
+        logger.warning(f"Różnica ryzyka wynosi zero (entry={entry_price}, sl={sl_price}). Ustawiono rr_achieved na 0.0.")
+
 
     analytics_results = {"rr_achieved": rr_achieved}
     
@@ -406,11 +411,10 @@ def run_trading_logic():
         if data := doc.to_dict():
             symbols_to_watch.add(data.get('symbol'))
     
-    # --- KLUCZOWA POPRAWKA: Filtrowanie nieprawidłowych wartości ---
-    # Używamy list comprehension do stworzenia nowej, czystej listy
+
+
     valid_symbols_to_watch = {s for s in symbols_to_watch if isinstance(s, str) and s}
     
-    # Logowanie diagnostyczne, aby zobaczyć, co się dzieje
     if len(valid_symbols_to_watch) != len(symbols_to_watch):
         invalid_symbols = symbols_to_watch - valid_symbols_to_watch
         logger.warning(f"Odrzucono nieprawidłowe symbole z listy do obserwacji: {invalid_symbols}")
@@ -419,9 +423,8 @@ def run_trading_logic():
         logger.info("Brak poprawnych symboli do monitorowania. Kończę cykl.")
         return
 
-    # Używamy już przefiltrowanej, bezpiecznej listy
     latest_klines_from_cache = state_manager.get_latest_klines_from_cache(list(valid_symbols_to_watch))
-    
+
     if not latest_klines_from_cache:
         logger.warning("Nie udało się pobrać danych z cache'u klines. Nie można kontynuować cyklu decyzyjnego.")
         return

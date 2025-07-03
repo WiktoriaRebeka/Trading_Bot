@@ -113,24 +113,22 @@ def get_latest_klines_from_cache(symbols: Iterable[str]) -> Dict[str, Dict[str, 
     db = _get_db()
     klines_cache = {}
     unique_symbols = list(set(symbols))
-    # Zmieniamy limit na 29 dla bezpieczeństwa, limit Firestore to 30.
+    # Limit Firestore dla operatora "in" to 30. Użycie 29 jest bezpieczne.
     for i in range(0, len(unique_symbols), 29):
         chunk = unique_symbols[i:i + 29]
-        # --- KLUCZOWA POPRAWKA: Zabezpieczenie przed pustym chunk'iem ---
+        
+        # --- KLUCZOWA POPRAWKA ---
         if not chunk:
             continue
         
         try:
-            # Używamy stałej firestore.DOCUMENT_ID, która jest poprawna
             docs = db.collection(constants.LATEST_KLINES_COLLECTION).where(firestore.DOCUMENT_ID, "in", chunk).stream()
             for doc in docs:
                 klines_cache[doc.id] = doc.to_dict()
         except Exception as e:
             logger.error(f"Błąd podczas pobierania danych kline z cache'u dla chunk'a: {chunk}. Błąd: {e}", exc_info=True)
-            raise
-    if klines_cache:
-        logger.info(f"Pobrano {len(klines_cache)} rekordów kline z cache'u w Firestore.")
-    return klines_cache
+            # Nie rzucamy wyjątku dalej, aby błąd w jednym chunk'u nie zatrzymał całości.
+    
     if klines_cache:
         logger.info(f"Pobrano {len(klines_cache)} rekordów kline z cache'u w Firestore.")
     return klines_cache

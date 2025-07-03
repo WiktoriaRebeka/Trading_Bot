@@ -1,108 +1,126 @@
-Automated Trading Bot v8.0 (GCP)
-1. Project Description and Main Goal
-The Automated Trading Bot v8.0 is a fully automated, serverless trading system running 24/7 on the Google Cloud Platform (GCP). Its primary objective is the autonomous execution and advanced analysis of a trading strategy based on the "Smart Money" concept, specifically targeting Order Block (OB) formations.
-The system is designed for maximum reliability, security, and performance by decoupling data collection from the core trading logic. It aims to minimize operational costs and ensure analytical precision through a robust, multi-component serverless architecture, where all custom logic is deployed as containerized services on Cloud Run.
-2. Operational Cycle and Core Business Logic
-The system operates based on a precisely defined, multi-stage data and decision flow:
-Stage 1: Signal Generation (TradingView)
-Source: A custom Pine Script indicator on the TradingView platform.
-Indicator Logic: The indicator analyzes the price chart in real-time for New OB (Order Block) formations.
-Action: Upon identifying a new, valid OB, the indicator triggers an alert via a webhook.
-Stage 2: Alert Ingestion and Queuing (GCP)
-Service: A lightweight Cloud Function (gcp-webhook) acting as a webhook endpoint.
-Flow:
-The webhook from TradingView sends a POST request with the alert data (JSON) to the function's public URL.
-The function immediately saves the raw alert as a new document in the alerts collection in Cloud Firestore, which serves as a persistent input queue.
-Stage 3: High-Performance Data Collection (Independent Microservice on Cloud Run)
-To ensure reliability and mitigate API latency, a dedicated data collection service runs independently and asynchronously.
-Service: A containerized Python application (data-collector-service) on Cloud Run, triggered every minute by Cloud Scheduler.
-Flow:
-The service reads a dynamic list of symbols to monitor from a configuration document in Firestore (bot_config/symbols_config). This allows for live updates without redeploying the code.
-It queries the Bybit API for the latest 1-minute kline data for all symbols in parallel (asynchronously), drastically reducing collection time.
-It saves the high, low, and close prices for each symbol into a dedicated Firestore collection: latest_klines. This collection acts as a fast, reliable, internal data cache.
-Stage 4: Cyclical Processing and Execution (Main Bot on Cloud Run)
-Orchestration: A separate Cloud Scheduler job invokes the main bot service (trading-bot-service) every minute.
-Main Bot Flow:
-4.1. Setup Management
-The bot reads new alerts from the alerts queue and validates them using Pydantic models. Each new alert for a given symbol overwrites the previous "active setup" in the active_setups collection, invalidating the Old OB.
-4.2. Opening New Positions
-Data Source: The bot reads the latest price data for all monitored symbols directly from the latest_klines cache in Firestore. It no longer queries the Bybit API, making the process faster and more fault-tolerant.
-Decision Logic: It iterates through all active setups and, based on the cached high and low of the latest candle, decides whether to open a new position.
-State Management: It correctly identifies Fresh OB (first entry) vs. Used OB (subsequent entries) and handles the price reset logic after a LOSE. Upon entry, it creates an isolated document in the open_trades collection, "freezing" all transaction parameters (SL, TP, etc.).
-4.3. Monitoring Open Positions
-The bot iterates through all documents in the open_trades collection. It uses the fresh kline data from the Firestore cache to check if any position's "frozen" SL or TP has been breached.
-4.4. Finalization and Optimized Post-Mortem Analysis
-Initial Log to BigQuery: When a position is closed (WIN/LOSE), the bot fetches the historical kline data for the trade's duration, calculates the maximum achieved R:R, and writes a complete, initial record to BigQuery.
-"Ghost" Creation: A "ghost" of the closed trade is created in the analyzed_trades collection in Firestore, storing its initial state.
-Efficient Passive Tracking: In subsequent cycles, the bot optimally tracks this ghost. Instead of re-fetching the entire trade history, it only fetches new klines since the last check. If the price reaches a new, higher TP level, it sends a secure, parameterized UPDATE query to BigQuery to enrich the existing record. This continues until tp_5_0 or the original sl is hit, at which point the ghost is deleted.
-3. Technical Architecture
-The system employs a decoupled, secure, and high-performance microservice architecture on GCP.
-Data Ingestion: TradingView (Webhook) -> Cloud Function -> Cloud Firestore (alerts collection).
-Data Collection (Cache): Cloud Scheduler -> Cloud Run (data-collector-service) -> Bybit API -> Cloud Firestore (latest_klines collection).
-Orchestration: Cloud Scheduler (1-minute cron triggers for both services).
-Application Core: Cloud Run (Docker containers for trading-bot-service and data-collector-service), built using the Application Factory pattern for robustness.
-Security:
-GCP Secret Manager: All sensitive configurations (like API keys) are stored securely and accessed via IAM roles, not in code or .env files in production.
-Parameterized Queries: All UPDATE operations on BigQuery are parameterized to prevent SQL Injection vulnerabilities.
-State Management (Firestore):
-bot_config: Stores dynamic application configuration, such as the list of symbols to watch.
-alerts: Persistent queue for incoming signals.
-latest_klines: Real-time price cache, updated by the collector.
-active_setups, open_trades, analyzed_trades: Collections managing the state of the trading logic.
-Analytics & Logging:
-Cloud Logging: Central hub for real-time monitoring, with structured log names for easy filtering.
-BigQuery: Analytical data warehouse for all closed trades.
-Network Infrastructure:
-Serverless VPC Access Connector & Cloud NAT: Provide a static IP address for all outbound traffic.
-Deployment Automation (CI/CD):
-GitHub Actions & Cloud Build: Workflows in GitHub Actions trigger builds in Google Cloud Build. Each service has a dedicated cloudbuild-*.yaml configuration file to ensure correct and isolated builds, using the appropriate Dockerfile.
-4. Key Design Principles
-Decoupling: Data collection is fully separated from trading logic. The main bot is resilient to API failures as it relies on an internal cache.
-Security First: Secrets are managed by GCP Secret Manager, and database queries are secured against injection attacks.
-High Performance: Asynchronous, parallel data fetching in the collector minimizes latency.
-Robustness & Fault Tolerance: The application is written defensively, using Pydantic models for data validation and the Application Factory pattern to prevent process management issues with Gunicorn.
-Flexibility: The list of traded symbols is managed dynamically in Firestore without code changes.
-5. Project Structure
-The project is organized into a main application directory and a separate directory for the webhook function.
+# Automatyczny Bot Tradingowy v8.0 (Google Cloud Platform)
 
+## 1. Opis Projektu i Cel Główny
+
+Automated Trading Bot v8.0 to w pełni zautomatyzowany, bezserwerowy system tradingowy działający 24/7 na platformie Google Cloud (GCP). Jego głównym celem jest autonomiczne wykonywanie i zaawansowana analiza strategii tradingowej opartej na koncepcji "Smart Money", w szczególności na formacjach typu Order Block (OB).
+
+System został zaprojektowany z myślą o maksymalnej niezawodności, bezpieczeństwie i wydajności poprzez **rozdzielenie procesu zbierania danych od rdzenia logiki tradingowej**. Dąży do minimalizacji kosztów operacyjnych i zapewnienia precyzji analitycznej dzięki solidnej, wielokomponentowej architekturze bezserwerowej, gdzie cała logika jest wdrożona jako skonteneryzowane mikroserwisy w usłudze Cloud Run.
+
+## 2. Cykl Operacyjny i Rdzeń Logiki Biznesowej
+
+System działa w oparciu o precyzyjnie zdefiniowany, wieloetapowy przepływ danych i decyzji:
+
+**Etap 1: Generowanie Sygnału (TradingView)**
+*   **Źródło:** Niestandardowy wskaźnik w języku Pine Script na platformie TradingView.
+*   **Logika wskaźnika:** Wskaźnik analizuje wykres cenowy w czasie rzeczywistym w poszukiwaniu formacji New OB (Nowy Blok Zleceń).
+*   **Akcja:** Po zidentyfikowaniu nowego, ważnego OB, wskaźnik wyzwala alert za pomocą webhooka.
+
+**Etap 2: Przyjmowanie i Kolejkowanie Alertów (GCP)**
+*   **Usługa:** Lekka funkcja Cloud Function (`gcp-webhook`) działająca jako endpoint dla webhooka.
+*   **Przepływ:**
+    1.  Webhook z TradingView wysyła żądanie POST z danymi alertu (JSON) na publiczny URL funkcji.
+    2.  Funkcja natychmiast zapisuje surowy alert jako nowy dokument w kolekcji `alerts` w bazie Cloud Firestore, która służy jako trwała kolejka wejściowa.
+
+**Etap 3: Wysokowydajne Zbieranie Danych (Niezależny Mikroserwis na Cloud Run)**
+Aby zapewnić niezawodność i zniwelować opóźnienia API, dedykowany serwis zbierający dane działa niezależnie i asynchronicznie.
+*   **Usługa:** Skonteneryzowana aplikacja w Pythonie (`data-collector-service`) w Cloud Run, wyzwalana co minutę przez Cloud Scheduler.
+*   **Przepływ:**
+    1.  Serwis odczytuje dynamiczną listę symboli do monitorowania z dokumentu konfiguracyjnego w Firestore (`bot_config/symbols_config`). Pozwala to na aktualizacje na żywo bez potrzeby wdrażania nowego kodu.
+    2.  **Równolegle i asynchronicznie** odpytuje API Bybit o najnowsze 1-minutowe świece (kline) dla wszystkich symboli, drastycznie skracając czas zbierania danych.
+    3.  Zapisuje ceny high, low i close dla każdego symbolu do dedykowanej kolekcji w Firestore: `latest_klines`. Ta kolekcja działa jak szybki i niezawodny wewnętrzny cache danych.
+
+**Etap 4: Cykliczne Przetwarzanie i Egzekucja (Główny Bot na Cloud Run)**
+*   **Orkiestracja:** Oddzielne zadanie Cloud Scheduler wywołuje główny serwis bota (`trading-bot-service`) co minutę.
+*   **Przepływ Głównego Bota:**
+    *   **4.1. Zarządzanie Setupami:** Bot odczytuje nowe alerty z kolejki `alerts` i waliduje je przy użyciu modeli Pydantic. Każdy nowy alert dla danego symbolu nadpisuje poprzedni "aktywny setup" w kolekcji `active_setups`, unieważniając Stary OB (Old OB).
+    *   **4.2. Otwieranie Nowych Pozycji:**
+        *   **Źródło danych:** Bot odczytuje najnowsze dane cenowe dla wszystkich monitorowanych symboli **bezpośrednio z cache'u `latest_klines` w Firestore**. Nie odpytuje już API Bybit, co czyni proces szybszym i bardziej odpornym na błędy.
+        *   **Logika decyzyjna:** Iteruje po wszystkich aktywnych setupach i na podstawie zbuforowanych cen high i low ostatniej świecy, decyduje, czy otworzyć nową pozycję.
+        *   **Zarządzanie stanem:** Poprawnie identyfikuje Świeży OB (Fresh OB - pierwsze wejście) vs. Użyty OB (Used OB - kolejne wejścia) i obsługuje logikę resetu ceny po stracie (LOSE). Po wejściu tworzy odizolowany dokument w kolekcji `open_trades`, "zamrażając" wszystkie parametry transakcji (SL, TP itp.).
+    *   **4.3. Monitorowanie Otwartych Pozycji:** Bot iteruje po wszystkich dokumentach w kolekcji `open_trades`. Używa świeżych danych z cache'u Firestore, aby sprawdzić, czy "zamrożone" poziomy SL lub TP którejkolwiek z pozycji zostały naruszone.
+    *   **4.4. Finalizacja i Zoptymalizowana Analiza Post-Mortem:**
+        *   **Początkowy zapis do BigQuery:** Gdy pozycja jest zamykana (WIN/LOSE), bot pobiera historyczne dane kline dla czasu trwania transakcji, oblicza maksymalne osiągnięte R:R i zapisuje kompletny, początkowy rekord do BigQuery.
+        *   **Tworzenie "Ducha":** "Duch" zamkniętej transakcji jest tworzony w kolekcji `analyzed_trades` w Firestore, przechowując jej początkowy stan.
+        *   **Wydajne Śledzenie Pasywne:** W kolejnych cyklach, bot optymalnie śledzi tego "ducha". Zamiast pobierać całą historię transakcji, pobiera tylko nowe świece od ostatniego sprawdzenia. Jeśli cena osiągnie nowy, wyższy poziom TP, wysyła bezpieczne, sparametryzowane zapytanie `UPDATE` do BigQuery, aby wzbogacić istniejący rekord. Proces ten trwa do momentu osiągnięcia `tp_5_0` lub pierwotnego `sl`, po czym "duch" jest usuwany.
+
+## 3. Architektura Techniczna
+
+System wykorzystuje rozdzieloną, bezpieczną i wysokowydajną architekturę mikroserwisów na platformie GCP.
+
+*   **Przyjmowanie Danych:** TradingView (Webhook) -> Cloud Function -> Cloud Firestore (kolekcja `alerts`).
+*   **Zbieranie Danych (Cache):** Cloud Scheduler -> Cloud Run (`data-collector-service`) -> Bybit API -> Cloud Firestore (kolekcja `latest_klines`).
+*   **Orkiestracja:** Cloud Scheduler (1-minutowe wyzwalacze cron dla obu serwisów).
+*   **Rdzeń Aplikacji:** Cloud Run (kontenery Docker dla `trading-bot-service` i `data-collector-service`), zbudowane z użyciem wzorca Application Factory dla solidności.
+*   **Bezpieczeństwo:**
+    *   **GCP Secret Manager:** Wszystkie wrażliwe dane (jak klucze API) są przechowywane bezpiecznie i dostępne poprzez role IAM, a nie w kodzie czy plikach `.env` w środowisku produkcyjnym.
+    *   **Zapytania sparametryzowane:** Wszystkie operacje `UPDATE` na BigQuery są sparametryzowane, aby zapobiec podatnościom SQL Injection.
+*   **Zarządzanie Stanem (Firestore):**
+    *   `bot_config`: Przechowuje dynamiczną konfigurację aplikacji, taką jak lista symboli do obserwacji.
+    *   `alerts`: Trwała kolejka dla przychodzących sygnałów.
+    *   `latest_klines`: Cache cenowy w czasie rzeczywistym, aktualizowany przez kolektor.
+    *   `active_setups`, `open_trades`, `analyzed_trades`: Kolekcje zarządzające stanem logiki tradingowej.
+*   **Analityka i Logowanie:**
+    *   **Cloud Logging:** Centralny hub do monitorowania w czasie rzeczywistym, ze strukturalnymi nazwami logów dla łatwego filtrowania.
+    *   **BigQuery:** Analityczna hurtownia danych dla wszystkich zamkniętych transakcji.
+*   **Infrastruktura Sieciowa:**
+    *   **Serverless VPC Access Connector i Cloud NAT:** Zapewniają stały adres IP dla całego ruchu wychodzącego.
+*   **Automatyzacja Wdrożeń (CI/CD):**
+    *   **GitHub Actions i Cloud Build:** Workflowy w GitHub Actions wyzwalają budowanie w Google Cloud Build. Każdy serwis ma dedykowany plik konfiguracyjny `cloudbuild-*.yaml`, aby zapewnić poprawne i odizolowane budowanie, używając odpowiedniego pliku `Dockerfile`.
+
+## 4. Kluczowe Zasady Projektowe
+
+*   **Rozdzielenie (Decoupling):** Zbieranie danych jest w pełni oddzielone od logiki tradingowej. Główny bot jest odporny na awarie API, ponieważ opiera się na wewnętrznym cache'u.
+*   **Bezpieczeństwo Przede Wszystkim:** Sekrety są zarządzane przez GCP Secret Manager, a zapytania do bazy danych są zabezpieczone przed atakami injection.
+*   **Wysoka Wydajność:** Asynchroniczne, równoległe pobieranie danych w kolektorze minimalizuje opóźnienia.
+*   **Solidność i Odporność na Błędy:** Aplikacja jest napisana defensywnie, używając modeli Pydantic do walidacji danych i wzorca Application Factory, aby zapobiegać problemom z zarządzaniem procesami przez Gunicorn.
+*   **Elastyczność:** Lista handlowanych symboli jest zarządzana dynamicznie w Firestore bez konieczności zmian w kodzie.
+
+## 5. Struktura Projektu
+
+Projekt jest zorganizowany w dedykowane, odizolowane katalogi dla każdego mikroserwisu, bibliotekę współdzieloną oraz funkcję webhooka.
 .
 ├── .github/
-│   └── workflows/
-│       ├── deploy-collector.yml
-│       └── deploy.yml
-├── gcp-webhook/
-│   ├── main.py
-│   └── requirements.txt
-├── .env
+│ └── workflows/
+│ ├── deploy-collector.yml # Workflow dla kolektora danych
+│ └── deploy.yml # Workflow dla głównego bota
+├── bot_service/ # Kod głównego bota tradingowego
+│ ├── init.py
+│ ├── Dockerfile
+│ ├── main.py
+│ ├── bot_logic.py
+│ └── ...
+├── collector_service/ # Kod mikroserwisu zbierającego dane
+│ ├── init.py
+│ ├── Dockerfile
+│ ├── collector_main.py
+│ └── data_collector.py
+├── shared_lib/ # Współdzielony kod (modele, klienci, stałe)
+│ ├── init.py
+│ ├── models.py
+│ ├── firebase_client.py
+│ └── ...
+├── gcp-webhook/ # Kod izolowanej funkcji Cloud Function
+│ ├── main.py
+│ └── requirements.txt
+├── .env.example # Przykładowy plik zmiennych środowiskowych
 ├── .gitignore
-├── cloudbuild-bot.yaml       # New: Cloud Build config for the bot
-├── cloudbuild-collector.yaml # New: Cloud Build config for the collector
-├── Dockerfile                # For data-collector-service
-├── Dockerfile.bot            # For trading-bot-service
+├── cloudbuild-bot.yaml # Konfiguracja Cloud Build dla bota
+├── cloudbuild-collector.yaml # Konfiguracja Cloud Build dla kolektora
 ├── README.md
-├── requirements.txt
-├── bot_logic.py
-├── bigquery_logger.py
-├── collector_main.py
-├── config_loader.py
-├── constants.py
-├── data_collector.py
-├── fetch_from_firestore.py
-├── firebase_client.py
-├── main.py
-├── models.py
-└── state_manager.py
+└── requirements.txt # Centralny plik zależności dla obu serwisów
 
-Key File Descriptions:
-main.py / collector_main.py: Entry points (Flask) for the services, using the Application Factory pattern.
-bot_logic.py: The brain of the system, containing the core business logic.
-data_collector.py: The core logic for the data collector, performing asynchronous data fetching.
-config_loader.py: A module for loading configuration securely from GCP Secret Manager or a local .env file.
-models.py: Defines Pydantic data models to ensure data integrity and improve code readability.
-state_manager.py: A module abstracting all state management operations on Firestore.
-bigquery_logger.py: The module responsible for all secure communication with BigQuery.
-constants.py: A central place for constants and configuration parameters.
-gcp-webhook/main.py: The isolated code for the alert ingestion Cloud Function.
-Dockerfile / Dockerfile.bot: Definitions for building the container images.
-cloudbuild-*.yaml: Dedicated configuration files for Google Cloud Build, ensuring each service is built correctly.
-.github/workflows/*.yml: CI/CD pipeline definitions that trigger the appropriate Cloud Build configurations.
+
+### Kluczowe Opisy Plików:
+
+*   **`bot_service/main.py` i `collector_service/collector_main.py`**: Punkty wejścia (Flask) dla obu serwisów, używające wzorca Application Factory.
+*   **`bot_service/bot_logic.py`**: "Mózg" systemu, zawierający rdzeń logiki biznesowej.
+*   **`collector_service/data_collector.py`**: Rdzeń logiki dla kolektora danych, wykonujący asynchroniczne pobieranie danych.
+*   **`shared_lib/`**: Katalog zawierający moduły współdzielone przez oba mikroserwisy:
+    *   **`config_loader.py`**: Moduł do bezpiecznego ładowania konfiguracji z GCP Secret Manager lub lokalnego pliku `.env`.
+    *   **`models.py`**: Definiuje modele danych Pydantic, zapewniając integralność danych i poprawiając czytelność kodu.
+    *   **`firebase_client.py`, `bigquery_logger.py`**: Moduły abstrahujące komunikację z usługami GCP.
+    *   **`constants.py`**: Centralne miejsce na stałe i parametry konfiguracyjne.
+*   **`gcp-webhook/main.py`**: Izolowany kod dla funkcji Cloud Function przyjmującej alerty.
+*   **`.../Dockerfile`**: Definicje do budowania obrazów kontenerów dla każdego serwisu.
+*   **`cloudbuild-*.yaml`**: Dedykowane pliki konfiguracyjne dla Google Cloud Build, zapewniające poprawne budowanie każdego serwisu.
+*   **`.github/workflows/*.yml`**: Definicje potoku CI/CD, które wyzwalają odpowiednie konfiguracje Cloud Build na podstawie zmienionych plików.
