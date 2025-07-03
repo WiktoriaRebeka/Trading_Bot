@@ -1,12 +1,13 @@
-#trading_bot/bot_service/state_manager.py
+# Lokalizacja: bot_service/state_manager.py
 
 import logging
 from typing import Iterable, Dict, Any
 from datetime import datetime, timezone
 
-from google.cloud import firestore
-from google.cloud.firestore_v1 import FieldPath 
-
+# --- POPRAWNE IMPORTY ---
+# Importujemy główny moduł firestore
+from google.cloud import firestore 
+# Nie importujemy już FieldPath, bo nie jest potrzebny
 from google.cloud.firestore_v1.document import DocumentSnapshot
 
 from shared_lib.firebase_client import get_db
@@ -115,13 +116,12 @@ def get_latest_klines_from_cache(symbols: Iterable[str]) -> Dict[str, Dict[str, 
     for i in range(0, len(unique_symbols), 30):
         chunk = unique_symbols[i:i + 30]
         try:
-    
-            docs = db.collection(constants.LATEST_KLINES_COLLECTION).where(FieldPath.document_id(), "in", chunk).stream()
+            # --- OSTATECZNA POPRAWKA: UŻYWAMY firestore.DOCUMENT_ID ---
+            docs = db.collection(constants.LATEST_KLINES_COLLECTION).where(firestore.DOCUMENT_ID, "in", chunk).stream()
             for doc in docs:
                 klines_cache[doc.id] = doc.to_dict()
         except Exception as e:
             logger.error(f"Błąd podczas pobierania danych kline z cache'u dla chunk'a: {chunk}. Błąd: {e}", exc_info=True)
-            # Rzucamy wyjątek dalej, aby funkcja nadrzędna wiedziała o problemie
             raise
     if klines_cache:
         logger.info(f"Pobrano {len(klines_cache)} rekordów kline z cache'u w Firestore.")
