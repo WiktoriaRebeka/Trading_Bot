@@ -18,21 +18,30 @@ from shared_lib.models import SetupData, OpenTradeData, AnalyzedTradeData, Alert
 
 logger = logging.getLogger(__name__)
 
-# --- PRZYWRÓCONA FUNKCJA ---
-# Ta funkcja była nieumyślnie pominięta w poprzedniej wersji.
+
+import logging
+import uuid
+from typing import Dict, Any, List, Optional
+from datetime import datetime, timezone, timedelta
+from pydantic import ValidationError
+import asyncio
+import aiohttp
+
+from shared_lib.firebase_client import get_db
+from bot_service import state_manager
+from bot_service.bigquery_logger import log_trade_to_bigquery, update_analyzed_trade_in_bigquery
+from shared_lib import constants
+from shared_lib.models import SetupData, OpenTradeData, AnalyzedTradeData, AlertData
+
+logger = logging.getLogger(__name__)
+
 def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]]):
-    """
-    Przetwarza listę nowych alertów z Firestore, waliduje je i tworzy
-    lub aktualizuje aktywne setupy w kolekcji 'active_setups'.
-    """
     if not newly_fetched_alerts:
         return
-
     logger.info(f"Przetwarzam {len(newly_fetched_alerts)} nowych alertów.")
     db = get_db()
     for alert_dict in newly_fetched_alerts:
         try:
-            # Walidacja i wzbogacenie danych alertu
             alert_data = AlertData.parse_obj(alert_dict)
             if alert_data.direction_code == 1:
                 alert_data.direction = "LONG"
@@ -41,21 +50,15 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]]):
             else:
                 logger.warning(f"Pominięto alert z nieznanym direction_code: {alert_data.direction_code}")
                 continue
-            
-            # Stworzenie nowego obiektu setupu
             new_setup = SetupData(alert_data=alert_data, updated_at=datetime.now(timezone.utc))
-            
-            # Zapis do Firestore (nadpisuje istniejący setup dla danego symbolu)
             doc_ref = db.collection(constants.SETUP_COLLECTION).document(alert_data.symbol)
             doc_ref.set(new_setup.dict(by_alias=True))
             logger.info(f"[{alert_data.symbol}] Zarejestrowano/zaktualizowano aktywny setup.")
-            
         except ValidationError as e:
             logger.error(f"Błąd walidacji alertu. ID: {alert_dict.get('id')}. Błędy: {e}")
         except Exception as e:
             logger.error(f"Nieoczekiwany błąd podczas przetwarzania alertu ID: {alert_dict.get('id')}: {e}", exc_info=True)
-
-
+  
 def _get_rr_flag_name(tp_key: str) -> Optional[str]:
     """
     Bezpiecznie konwertuje klucz poziomu TP z alertu (np. 'tp_1_5' lub 'tp5')
