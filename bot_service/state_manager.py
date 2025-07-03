@@ -109,6 +109,8 @@ def remove_analyzed_trade(trade_id: str):
     logger.info(f"[{trade_id}] Zakończono i usunięto pozycję z analizy post-mortem.")
 
 
+# Lokalizacja: bot_service/state_manager.py
+
 def get_latest_klines_from_cache(symbols: Iterable[str]) -> Dict[str, Dict[str, Any]]:
     """
     FINAL DEBUGGING VERSION: Ta wersja celowo modyfikuje błąd, aby pokazać nam
