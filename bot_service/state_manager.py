@@ -109,10 +109,12 @@ def remove_analyzed_trade(trade_id: str):
     logger.info(f"[{trade_id}] Zakończono i usunięto pozycję z analizy post-mortem.")
 # Lokalizacja: bot_service/state_manager.py
 
+# Lokalizacja: bot_service/state_manager.py
+
 def get_latest_klines_from_cache(symbols: Iterable[str]) -> Dict[str, Dict[str, Any]]:
     """
-    Pobiera najnowsze dane kline z cache'u w Firestore dla podanej listy symboli.
-    Funkcja jest zabezpieczona przed nieprawidłowymi danymi wejściowymi.
+    DEBUGGING VERSION: Pobiera dane kline, ale przede wszystkim loguje zawartość
+    listy symboli, aby zidentyfikować nieprawidłowe ID dokumentów.
     """
     if not symbols: 
         return {}
@@ -120,37 +122,39 @@ def get_latest_klines_from_cache(symbols: Iterable[str]) -> Dict[str, Dict[str, 
     db = _get_db()
     klines_cache = {}
     
-    # Upewniamy się, że pracujemy na unikalnych, niepustych stringach.
-    # To jest pierwszy poziom zabezpieczenia.
     unique_symbols = list(set(s for s in symbols if isinstance(s, str) and s))
+    
+    # --- AGRESYWNE LOGOWANIE CAŁEJ LISTY SYMBOLI ---
+    logger.info(f"[DEBUG] Pełna, unikalna lista symboli przed chunkowaniem: {unique_symbols}")
     
     if not unique_symbols:
         logger.warning("Lista symboli po wstępnym przefiltrowaniu jest pusta.")
         return {}
 
-    # Dzielimy na chunki po 29 (limit Firestore to 30)
     for i in range(0, len(unique_symbols), 29):
         chunk = unique_symbols[i:i + 29]
-        
-        # --- OSTATECZNE, KULOODPORNE ZABEZPIECZENIE ---
-        # Filtrujemy chunk tuż przed zapytaniem, aby mieć 100% pewności,
-        # że zawiera tylko poprawne dane.
         safe_chunk = [symbol for symbol in chunk if isinstance(symbol, str) and symbol]
 
-        # Jeśli po przefiltrowaniu chunk jest pusty, przechodzimy do następnego.
         if not safe_chunk:
-            logger.warning(f"Ominięto pusty lub nieprawidłowy chunk danych: {chunk}")
+            logger.warning(f"[DEBUG] Ominięto pusty lub nieprawidłowy chunk danych: {chunk}")
             continue
 
+        # --- AGRESYWNE LOGOWANIE PRZED KWERENDĄ ---
+        # To jest najważniejszy log. Pokaże nam zawartość chunka tuż przed awarią.
+        logger.info(f"[DEBUG] Próba wykonania kwerendy dla chunka: {safe_chunk}")
+
         try:
-            # Używamy już w pełni bezpiecznego `safe_chunk`
             docs = db.collection(constants.LATEST_KLINES_COLLECTION).where(firestore.DOCUMENT_ID, "in", safe_chunk).stream()
+            # Jeśli kwerenda się uda, logujemy sukces dla tego chunka
+            logger.info(f"[DEBUG] Kwerenda dla chunka {safe_chunk} wykonana pomyślnie.")
             for doc in docs:
                 klines_cache[doc.id] = doc.to_dict()
         except Exception as e:
-            # Logujemy, który dokładnie chunk spowodował problem.
-            logger.error(f"Błąd podczas pobierania danych kline z cache'u dla chunk'a: {safe_chunk}. Błąd: {e}", exc_info=True)
-            # Nie rzucamy wyjątku dalej, aby błąd w jednym chunk'u nie zatrzymał całego procesu.
+            # W razie błędu, logujemy go z pełnym kontekstem.
+            logger.error(f"[DEBUG] KRYTYCZNY BŁĄD przy kwerendzie dla chunka: {safe_chunk}. Błąd: {e}", exc_info=True)
+            # Celowo rzucamy wyjątek dalej, aby zatrzymać wykonanie i zobaczyć błąd w logach.
+            # W wersji produkcyjnej można by tego nie robić, ale teraz chcemy znaleźć przyczynę.
+            raise e
     
     if klines_cache:
         logger.info(f"Pobrano {len(klines_cache)} rekordów kline z cache'u w Firestore.")
