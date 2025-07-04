@@ -1,13 +1,11 @@
 # Lokalizacja: bot_service/state_manager.py
+# UWAGA: To jest wersja diagnostyczna, której celem jest zalogowanie problematycznych danych.
 
 import logging
 from typing import Iterable, Dict, Any
 from datetime import datetime, timezone
 
-# --- POPRAWNE IMPORTY ---
-# Importujemy główny moduł firestore
-from google.cloud import firestore 
-# Nie importujemy już FieldPath, bo nie jest potrzebny
+from google.cloud import firestore
 from google.cloud.firestore_v1.document import DocumentSnapshot
 
 from shared_lib.firebase_client import get_db
@@ -19,7 +17,6 @@ logger = logging.getLogger(__name__)
 def _get_db() -> firestore.Client:
     return get_db()
 
-# --- ZARZĄDZANIE SETUPAMI (bez zmian) ---
 def get_all_active_setups() -> Iterable[DocumentSnapshot]:
     return _get_db().collection(constants.SETUP_COLLECTION).stream()
 
@@ -43,7 +40,6 @@ def update_setup_after_price_reset(symbol: str):
     doc_ref.update({"is_reset_needed_after_loss": False})
     logger.info(f"[{symbol}] Warunek resetu ceny spełniony. Setup gotowy do nowego wejścia.")
 
-# --- ZARZĄDZANIE OTWARTYMI POZYCJAMI (bez zmian) ---
 def get_all_open_trades() -> Iterable[DocumentSnapshot]:
     return _get_db().collection(constants.TRADE_COLLECTION).stream()
 
@@ -67,7 +63,6 @@ def remove_open_trade(trade_id: str):
     _get_db().collection(constants.TRADE_COLLECTION).document(trade_id).delete()
     logger.info(f"[{trade_id}] Usunięto pozycję z aktywnego monitorowania.")
 
-# --- ZARZĄDZANIE ANALIZOWANYMI POZYCJAMI (bez zmian) ---
 def get_all_analyzed_trades() -> Iterable[DocumentSnapshot]:
     return _get_db().collection(constants.ANALYZED_COLLECTION).stream()
 
@@ -108,13 +103,9 @@ def remove_analyzed_trade(trade_id: str):
     _get_db().collection(constants.ANALYZED_COLLECTION).document(trade_id).delete()
     logger.info(f"[{trade_id}] Zakończono i usunięto pozycję z analizy post-mortem.")
 
-
-# Lokalizacja: bot_service/state_manager.py
-
 def get_latest_klines_from_cache(symbols: Iterable[str]) -> Dict[str, Dict[str, Any]]:
     """
-    FINAL DEBUGGING VERSION: Ta wersja celowo modyfikuje błąd, aby pokazać nam
-    dokładną zawartość chunka, który powoduje awarię.
+    DIAGNOSTIC VERSION: Loguje zawartość chunka przed wykonaniem zapytania.
     """
     if not symbols: 
         return {}
@@ -123,6 +114,8 @@ def get_latest_klines_from_cache(symbols: Iterable[str]) -> Dict[str, Dict[str, 
     klines_cache = {}
     
     unique_symbols = list(set(s for s in symbols if isinstance(s, str) and s))
+    
+    logger.info(f"[DIAGNOSTYKA] Pełna, unikalna lista symboli do sprawdzenia: {unique_symbols}")
     
     if not unique_symbols:
         logger.warning("Lista symboli po wstępnym przefiltrowaniu jest pusta.")
@@ -134,28 +127,18 @@ def get_latest_klines_from_cache(symbols: Iterable[str]) -> Dict[str, Dict[str, 
 
         if not safe_chunk:
             continue
+        
+        # --- KLUCZOWY LOG DIAGNOSTYCZNY ---
+        logger.info(f"[DIAGNOSTYKA] Przygotowuję się do wykonania kwerendy na chunku: {repr(safe_chunk)}")
 
         try:
-            # Ta linia wciąż jest podejrzana
             docs = db.collection(constants.LATEST_KLINES_COLLECTION).where(firestore.DOCUMENT_ID, "in", safe_chunk).stream()
             for doc in docs:
                 klines_cache[doc.id] = doc.to_dict()
         except Exception as e:
-            # --- OTO KLUCZOWA ZMIANA ---
-            # Tworzymy nowy, bardzo szczegółowy komunikat błędu.
-            # Używamy repr(), aby zobaczyć dokładny format stringów (np. z ukrytymi znakami).
-            error_message = (
-                f"KRYTYCZNY BŁĄD KWERENDY FIRESTORE. "
-                f"Prawdopodobnie nieprawidłowy ID dokumentu w liście. "
-                f"ZAWARTOŚĆ PROBLEMATYCZNEGO CHUNKA: {repr(safe_chunk)}. "
-                f"Oryginalny błąd: {e}"
-            )
-            # Logujemy go z najwyższym priorytetem
-            logger.critical(error_message, exc_info=False) 
-            
-            # Rzucamy nowy wyjątek z naszym szczegółowym komunikatem.
-            # To sprawi, że nasza wiadomość pojawi się na samej górze w logach błędów.
-            raise ValueError(error_message) from e
+            logger.critical(f"Krytyczny błąd w kwerendzie Firestore. Oryginalny błąd: {e}", exc_info=True)
+            # Rzucamy wyjątek dalej, aby zatrzymać cykl i zobaczyć błąd.
+            raise
     
     if klines_cache:
         logger.info(f"Pobrano {len(klines_cache)} rekordów kline z cache'u w Firestore.")
