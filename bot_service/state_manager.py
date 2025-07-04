@@ -1,5 +1,5 @@
 # Lokalizacja: bot_service/state_manager.py
-# UWAGA: To jest wersja diagnostyczna, której celem jest zalogowanie problematycznych danych.
+# WERSJA PRODUKCYJNA
 
 import logging
 from typing import Iterable, Dict, Any
@@ -16,6 +16,9 @@ logger = logging.getLogger(__name__)
 
 def _get_db() -> firestore.Client:
     return get_db()
+
+# --- Funkcje zarządzania setupami, pozycjami otwartymi i analizowanymi ---
+# --- (pozostają bez zmian, wklejone dla kompletności pliku) ---
 
 def get_all_active_setups() -> Iterable[DocumentSnapshot]:
     return _get_db().collection(constants.SETUP_COLLECTION).stream()
@@ -105,7 +108,8 @@ def remove_analyzed_trade(trade_id: str):
 
 def get_latest_klines_from_cache(symbols: Iterable[str]) -> Dict[str, Dict[str, Any]]:
     """
-    DIAGNOSTIC VERSION: Loguje zawartość chunka przed wykonaniem zapytania.
+    Pobiera najnowsze dane kline z cache'u w Firestore dla podanej listy symboli.
+    Funkcja jest zabezpieczona przed nieprawidłowymi danymi wejściowymi.
     """
     if not symbols: 
         return {}
@@ -115,34 +119,28 @@ def get_latest_klines_from_cache(symbols: Iterable[str]) -> Dict[str, Dict[str, 
     
     unique_symbols = list(set(s for s in symbols if isinstance(s, str) and s))
     
-    logger.info(f"[DIAGNOSTYKA] Pełna, unikalna lista symboli do sprawdzenia: {unique_symbols}")
-    
     if not unique_symbols:
         logger.warning("Lista symboli po wstępnym przefiltrowaniu jest pusta.")
         return {}
 
     for i in range(0, len(unique_symbols), 29):
         chunk = unique_symbols[i:i + 29]
-        safe_chunk = [symbol for symbol in chunk if isinstance(symbol, str) and symbol]
-
-        if not safe_chunk:
+        if not chunk:
             continue
-        
-        # --- KLUCZOWY LOG DIAGNOSTYCZNY ---
-        logger.info(f"[DIAGNOSTYKA] Przygotowuję się do wykonania kwerendy na chunku: {repr(safe_chunk)}")
 
         try:
-            docs = db.collection(constants.LATEST_KLINES_COLLECTION).where(firestore.DOCUMENT_ID, "in", safe_chunk).stream()
+           
+            docs = db.collection(constants.LATEST_KLINES_COLLECTION).where("__name__", "in", chunk).stream()
             for doc in docs:
                 klines_cache[doc.id] = doc.to_dict()
         except Exception as e:
-            logger.critical(f"Krytyczny błąd w kwerendzie Firestore. Oryginalny błąd: {e}", exc_info=True)
-            # Rzucamy wyjątek dalej, aby zatrzymać cykl i zobaczyć błąd.
-            raise
+            logger.error(f"Błąd podczas pobierania danych kline z cache'u dla chunk'a: {chunk}. Błąd: {e}", exc_info=True)
     
     if klines_cache:
         logger.info(f"Pobrano {len(klines_cache)} rekordów kline z cache'u w Firestore.")
     else:
-        logger.warning("Nie udało się pobrać żadnych rekordów kline z cache'u.")
+        logger.warning("Nie udało się pobrać żadnych rekordów kline z cache'u. Sprawdź, czy kolekcja '%s' zawiera dokumenty o podanych ID.", constants.LATEST_KLINES_COLLECTION)
         
     return klines_cache
+
+#
