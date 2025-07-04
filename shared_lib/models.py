@@ -1,5 +1,5 @@
 # Lokalizacja: shared_lib/models.py
-# WERSJA PRODUKCYJNA
+# WERSJA PRODUKCYJNA - FINALNA
 
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any
@@ -10,31 +10,30 @@ class AlertData(BaseModel):
     Model reprezentujący surowe dane alertu przychodzącego z TradingView,
     zgodny z formatem zapisywanym w Firestore.
     """
-    # Pola, które są dodawane po stronie serwera
-    id: Optional[str] = None  # ID jest dodawane po odczycie, więc jest opcjonalne
-    received_at: Optional[datetime] = None # To samo dotyczy `received_at`
+    # Pola opcjonalne, dodawane po stronie serwera
+    id: Optional[str] = None
+    received_at: Optional[datetime] = None
     
     # Pola przychodzące z webhooka
     symbol: str
     direction_code: int = Field(alias='directionCode')
-    direction: Optional[str] = None # To pole jest dodawane później
+    direction: Optional[str] = None
     entry: float
     sl: float
     tp: float
-    timestamp: str # Czas z TradingView
+    timestamp: str
     
-    # --- KLUCZOWA POPRAWKA ALIASÓW ---
+    # --- POPRAWKA #1: Zmieniamy aliasy z `tp1` na `tp_1_0` itd. ---
     # Aliasy muszą DOKŁADNIE odpowiadać kluczom w JSONie z webhooka.
-    tp_1_0: float = Field(alias='tp_1_0')
-    tp_1_5: float = Field(alias='tp_1_5')
-    tp_2_0: float = Field(alias='tp_2_0')
-    tp_3_0: float = Field(alias='tp_3_0')
-    tp_4_0: float = Field(alias='tp_4_0')
-    tp_5_0: float = Field(alias='tp_5_0')
+    tp_1_0: float = Field(alias='tp1')
+    tp_1_5: float = Field(alias='tp2')
+    tp_2_0: float = Field(alias='tp3')
+    tp_3_0: float = Field(alias='tp4')
+    tp_5_0: float = Field(alias='tp5')
     
     class Config:
         allow_population_by_field_name = True
-        extra = 'ignore' # Ignoruje dodatkowe pola (np. 'source', 'type', 'levelHigh' itd.)
+        extra = 'ignore'
 
 class SetupData(BaseModel):
     """Model reprezentujący aktywny setup tradingowy w Firestore."""
@@ -66,6 +65,9 @@ class AnalyzedTradeData(BaseModel):
     original_sl: float
     opened_at_ms: int
     alert_data_snapshot: Dict[str, Any]
+    
+    # --- POPRAWKA #2: Zapewniamy zgodność z danymi w Firestore ---
+    # Te pola są tworzone w funkcji `create_analyzed_trade` i muszą być tutaj zdefiniowane.
     last_analysis_timestamp_ms: int
     last_known_extreme_price: float
     last_bq_update_iso: Optional[datetime] = None
