@@ -1,5 +1,5 @@
 # Lokalizacja: shared_lib/models.py
-# WERSJA PRODUKCYJNA - OSTATECZNA I ZGODNA Z WEBHOOKIEM
+# WERSJA PRODUKCYJNA - FINALNA
 
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any
@@ -8,13 +8,11 @@ from datetime import datetime
 class AlertData(BaseModel):
     """
     Model reprezentujący surowe dane alertu przychodzącego z TradingView.
-    Definicja pól jest w 100% zgodna z kluczami JSON z webhooka.
+    Definicja pól jest zgodna z kluczami JSON z webhooka.
     """
-    # Pola opcjonalne, dodawane po stronie serwera
     id: Optional[str] = None
     received_at: Optional[datetime] = None
     
-    # Pola przychodzące z webhooka
     symbol: str
     direction_code: int = Field(alias='directionCode')
     direction: Optional[str] = None
@@ -23,9 +21,6 @@ class AlertData(BaseModel):
     tp: float
     timestamp: str
     
-    # --- OSTATECZNA POPRAWKA PÓL ---
-    # Nazwy pól w modelu muszą DOKŁADNIE odpowiadać kluczom w JSON-ie z webhooka.
-    # Nie używamy już aliasów, ponieważ nazwy pól są zgodne z konwencją.
     tp_1_0: float
     tp_1_5: float
     tp_2_0: float
@@ -34,9 +29,7 @@ class AlertData(BaseModel):
     tp_5_0: float
     
     class Config:
-        # allow_population_by_field_name jest domyślnie True, ale zostawmy dla jasności.
         allow_population_by_field_name = True
-        # Ignoruje dodatkowe, nieistotne pola z webhooka (np. 'source', 'type')
         extra = 'ignore'
 
 class SetupData(BaseModel):
@@ -61,14 +54,24 @@ class OpenTradeData(BaseModel):
     alert_data_snapshot: Dict[str, Any]
 
 class AnalyzedTradeData(BaseModel):
-    """Model reprezentujący "ducha" pozycji do analizy post-mortem."""
+    """
+    Model reprezentujący "ducha" pozycji do niezależnej analizy post-mortem.
+    Zawiera wszystkie niezbędne, zamrożone dane.
+    """
     trade_id: str
     symbol: str
     direction: str
     entry_price: float
+    
+    # --- KLUCZOWA ZMIANA ---
+    # Przechowujemy wszystkie kluczowe poziomy, aby "duch" był w pełni samowystarczalny.
     original_sl: float
+    original_tp_5_0: Optional[float] = None # Najwyższy cel, może go nie być
+    
     opened_at_ms: int
     alert_data_snapshot: Dict[str, Any]
+    
+    # Stan analizy
     last_analysis_timestamp_ms: int
     last_known_extreme_price: float
     last_bq_update_iso: Optional[datetime] = None
