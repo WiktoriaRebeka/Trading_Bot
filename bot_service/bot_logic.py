@@ -306,3 +306,5 @@ def run_trading_logic():
     except Exception as e:
         logger.error(f"Błąd podczas uruchamiania pętli asyncio: {e}", exc_info=True)
     logger.info("Zakończono główną pętlę logiki tradingowej.")
+
+    #test
