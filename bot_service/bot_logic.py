@@ -59,8 +59,23 @@ def _get_rr_flag_name(tp_key: str) -> Optional[str]:
         
     return f"rr_{normalized_value}_achieved"
 
-def _calculate_trade_analytics(direction: str, entry_price: float, sl_price: float, extreme_price: float, alert_snapshot: Dict[str, Any]) -> Dict[str, Any]:
+# Lokalizacja: bot_service/bot_logic.py
+# Podmień TYLKO tę jedną funkcję
+
+def _calculate_trade_analytics(
+    direction: str,
+    entry_price: float,
+    sl_price: float,
+    extreme_price: float,
+    alert_snapshot: Dict[str, Any]  # Ten argument nie jest już potrzebny, ale zostawiamy dla kompatybilności
+) -> Dict[str, Any]:
+    """
+    Centralna funkcja obliczająca R:R i flagi osiągniętych TP.
+    Wersja z poprawioną logiką ustawiania flag.
+    """
     risk_diff = abs(entry_price - sl_price)
+    
+    # 1. Oblicz maksymalne osiągnięte R:R
     if risk_diff > 0:
         profit_diff = abs(extreme_price - entry_price)
         rr_achieved = round(profit_diff / risk_diff, 4)
@@ -70,30 +85,23 @@ def _calculate_trade_analytics(direction: str, entry_price: float, sl_price: flo
         
     analytics_results = {"rr_achieved": rr_achieved}
     
-    # Normalizujemy klucze TP (np. 'tp1' i 'tp_1_0')
-    normalized_targets = {}
-    for k, v in alert_snapshot.items():
-        if str(k).startswith('tp'):
-            if 'tp_1_0' in k or 'tp1' in k: normalized_targets['tp_1_0'] = v
-            elif 'tp_1_5' in k or 'tp2' in k: normalized_targets['tp_1_5'] = v
-            elif 'tp_2_0' in k or 'tp3' in k: normalized_targets['tp_2_0'] = v
-            elif 'tp_3_0' in k or 'tp4' in k: normalized_targets['tp_3_0'] = v
-            elif 'tp_5_0' in k or 'tp5' in k: normalized_targets['tp_5_0'] = v
-            
-    for rr_key, tp_value in normalized_targets.items():
-        if not tp_value:
-            continue
-        flag_name = _get_rr_flag_name(rr_key)
-        if not flag_name:
-            continue
-        try:
-            tp_price_float = float(tp_value)
-            is_achieved = (direction.lower() == 'long' and extreme_price >= tp_price_float) or \
-                          (direction.lower() == 'short' and extreme_price <= tp_price_float)
-            if is_achieved:
-                analytics_results[flag_name] = True
-        except (ValueError, TypeError):
-            logger.warning(f"Nie można przekonwertować wartości TP '{tp_value}' dla klucza '{rr_key}' na float.")
+    # 2. Zdefiniuj progi R:R do sprawdzenia
+    rr_thresholds = {
+        "rr_1_0_achieved": 1.0,
+        "rr_1_5_achieved": 1.5,
+        "rr_2_0_achieved": 2.0,
+        "rr_3_0_achieved": 3.0,
+        "rr_4_0_achieved": 4.0,
+        "rr_5_0_achieved": 5.0,
+    }
+
+    # 3. --- KLUCZOWA POPRAWKA LOGIKI ---
+    # Iteruj po progach i sprawdzaj, czy zostały osiągnięte
+    for flag_name, threshold in rr_thresholds.items():
+        if rr_achieved >= threshold:
+            analytics_results[flag_name] = True
+        else:
+            analytics_results[flag_name] = False
             
     return analytics_results
 
