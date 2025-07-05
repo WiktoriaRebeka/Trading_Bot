@@ -1,5 +1,5 @@
 # Lokalizacja: shared_lib/models.py
-# WERSJA PRODUKCYJNA - FINALNA
+# WERSJA PRODUKCYJNA - OSTATECZNA I ZGODNA Z WEBHOOKIEM
 
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any
@@ -7,8 +7,8 @@ from datetime import datetime
 
 class AlertData(BaseModel):
     """
-    Model reprezentujący surowe dane alertu przychodzącego z TradingView,
-    zgodny z formatem zapisywanym w Firestore.
+    Model reprezentujący surowe dane alertu przychodzącego z TradingView.
+    Definicja pól jest w 100% zgodna z kluczami JSON z webhooka.
     """
     # Pola opcjonalne, dodawane po stronie serwera
     id: Optional[str] = None
@@ -23,16 +23,20 @@ class AlertData(BaseModel):
     tp: float
     timestamp: str
     
-    # --- POPRAWKA #1: Zmieniamy aliasy z `tp1` na `tp_1_0` itd. ---
-    # Aliasy muszą DOKŁADNIE odpowiadać kluczom w JSONie z webhooka.
-    tp_1_0: float = Field(alias='tp1')
-    tp_1_5: float = Field(alias='tp2')
-    tp_2_0: float = Field(alias='tp3')
-    tp_3_0: float = Field(alias='tp4')
-    tp_5_0: float = Field(alias='tp5')
+    # --- OSTATECZNA POPRAWKA PÓL ---
+    # Nazwy pól w modelu muszą DOKŁADNIE odpowiadać kluczom w JSON-ie z webhooka.
+    # Nie używamy już aliasów, ponieważ nazwy pól są zgodne z konwencją.
+    tp_1_0: float
+    tp_1_5: float
+    tp_2_0: float
+    tp_3_0: float
+    tp_4_0: float
+    tp_5_0: float
     
     class Config:
+        # allow_population_by_field_name jest domyślnie True, ale zostawmy dla jasności.
         allow_population_by_field_name = True
+        # Ignoruje dodatkowe, nieistotne pola z webhooka (np. 'source', 'type')
         extra = 'ignore'
 
 class SetupData(BaseModel):
@@ -65,9 +69,6 @@ class AnalyzedTradeData(BaseModel):
     original_sl: float
     opened_at_ms: int
     alert_data_snapshot: Dict[str, Any]
-    
-    # --- POPRAWKA #2: Zapewniamy zgodność z danymi w Firestore ---
-    # Te pola są tworzone w funkcji `create_analyzed_trade` i muszą być tutaj zdefiniowane.
     last_analysis_timestamp_ms: int
     last_known_extreme_price: float
     last_bq_update_iso: Optional[datetime] = None
