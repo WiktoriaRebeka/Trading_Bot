@@ -70,19 +70,53 @@ async def get_historical_klines(session: aiohttp.ClientSession, symbol: str, sta
 
 async def log_and_finalize_trade(session: aiohttp.ClientSession, trade: OpenTradeData, closed_result: str, close_price: float):
     logger.info(f"--- [FINALIZACJA I PEŁNA ANALIZA] --- [{trade.symbol}] | ID: {trade.trade_id} | Wynik: {closed_result}")
+    
     close_timestamp_utc = datetime.now(timezone.utc)
     klines = await get_historical_klines(session, trade.symbol, trade.opened_at_ms, int(close_timestamp_utc.timestamp() * 1000))
-    extreme_profit_price = close_price
+    
+    # --- KLUCZOWA POPRAWKA LOGIKI ---
+    extreme_price = close_price  # Domyślnie cena zamknięcia
+    
     if klines:
-        if trade.direction.lower() == 'long':
-            extreme_profit_price = max([float(k[2]) for k in klines] + [close_price])
-        else:
-            extreme_profit_price = min([float(k[3]) for k in klines] + [close_price])
-    analytics_data = _calculate_trade_analytics(trade.direction, trade.entry_price, trade.sl_price, extreme_profit_price, trade.alert_data_snapshot)
-    bq_data = {"trade_id": trade.trade_id, "timestamp_entry": trade.opened_at_iso, "timestamp_close": close_timestamp_utc.isoformat(), "symbol": trade.symbol, "direction": trade.direction.upper(), "main_result": closed_result, "ob_type": trade.ob_type}
+        if closed_result == "WIN":
+            # Dla pozycji WYGRANEJ, szukamy maksymalnego zysku
+            if trade.direction.lower() == 'long':
+                extreme_price = max([float(k[2]) for k in klines] + [close_price])
+            else: # short
+                extreme_price = min([float(k[3]) for k in klines] + [close_price])
+        elif closed_result == "LOSE":
+            # Dla pozycji PRZEGRANEJ, chcemy wiedzieć, jak blisko TP byliśmy, ZANIM cena zawróciła.
+            # Dlatego wciąż szukamy ceny ekstremalnej w kierunku zysku.
+            if trade.direction.lower() == 'long':
+                # Szukamy najwyższego punktu, jaki osiągnęła cena przed spadkiem
+                extreme_price = max([float(k[2]) for k in klines])
+            else: # short
+                # Szukamy najniższego punktu, jaki osiągnęła cena przed wzrostem
+                extreme_price = min([float(k[3]) for k in klines])
+
+    # Teraz przekazujemy poprawnie obliczoną `extreme_price`
+    analytics_data = _calculate_trade_analytics(
+        trade.direction, 
+        trade.entry_price, 
+        trade.sl_price, 
+        extreme_price, 
+        trade.alert_data_snapshot
+    )
+    
+    bq_data = {
+        "trade_id": trade.trade_id,
+        "timestamp_entry": trade.opened_at_iso,
+        "timestamp_close": close_timestamp_utc.isoformat(),
+        "symbol": trade.symbol,
+        "direction": trade.direction.upper(),
+        "main_result": closed_result,
+        "ob_type": trade.ob_type,
+    }
     bq_data.update(analytics_data)
     log_trade_to_bigquery(bq_data)
-    state_manager.create_analyzed_trade(trade, extreme_profit_price)
+    
+    # Przekazujemy cenę ekstremalną do tworzenia "ducha", aby analiza post-mortem mogła kontynuować od tego punktu
+    state_manager.create_analyzed_trade(trade, extreme_price)
 
 def _handle_setups(klines_data: Dict[str, List[Any]], active_setups: List[DocumentSnapshot]) -> List[Dict[str, Any]]:
     if not active_setups: return []
