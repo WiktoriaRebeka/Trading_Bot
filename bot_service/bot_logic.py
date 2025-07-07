@@ -1,5 +1,5 @@
 # Lokalizacja: bot_service/bot_logic.py
-# WERSJA PRODUKCYJNA - FINALNA I KOMPLETNA v3
+# WERSJA PRODUKCYJNA - FINALNA z poprawną logiką resetu i wejścia Used OB
 
 import logging
 import uuid
@@ -9,6 +9,7 @@ from google.cloud.firestore_v1.document import DocumentSnapshot
 from pydantic import ValidationError
 import asyncio
 import aiohttp
+import math
 
 from shared_lib.firebase_client import get_db
 from bot_service import state_manager
@@ -32,12 +33,35 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]]):
             else:
                 logger.warning(f"Pominięto alert z nieznanym direction_code: {alert_data.direction_code}")
                 continue
-            new_setup = SetupData(alert_data=alert_data, updated_at=datetime.now(timezone.utc))
+            required_leverage = calculate_required_leverage(alert_data.entry, alert_data.sl, alert_data.direction)
+            if required_leverage is None:
+                logger.error(f"[{alert_data.symbol}] Nie można obliczyć lewara dla alertu. Pomijam setup.")
+                continue
+            new_setup = SetupData(alert_data=alert_data, required_leverage=required_leverage, entry_attempts=0, is_position_open_on_this_setup=False, is_reset_needed_after_loss=False, updated_at=datetime.now(timezone.utc))
             doc_ref = db.collection(constants.SETUP_COLLECTION).document(alert_data.symbol)
             doc_ref.set(new_setup.model_dump(by_alias=True))
-            logger.info(f"[{alert_data.symbol}] Zarejestrowano/zaktualizowano aktywny setup.")
+            logger.info(f"[{alert_data.symbol}] Zarejestrowano/zaktualizowano aktywny setup z lewarem {required_leverage}x.")
         except ValidationError as e: logger.error(f"Błąd walidacji alertu. ID: {alert_dict.get('id')}. Błędy: {e}")
         except Exception as e: logger.error(f"Nieoczekiwany błąd podczas przetwarzania alertu ID: {alert_dict.get('id')}: {e}", exc_info=True)
+
+def calculate_required_leverage(entry_price: float, sl_price: float, direction: str) -> Optional[int]:
+    if entry_price <= 0 or sl_price <= 0: return None
+    raw_sl_percentage = 0.0
+    if direction.upper() == 'LONG':
+        if sl_price >= entry_price: return None
+        raw_sl_percentage = (1 - sl_price / entry_price) * 100
+    elif direction.upper() == 'SHORT':
+        if sl_price <= entry_price: return None
+        raw_sl_percentage = (sl_price / entry_price - 1) * 100
+    if raw_sl_percentage <= 0: return None
+    total_loss_percentage = raw_sl_percentage + (2 * constants.EXCHANGE_FEE_PERCENT)
+    denominator = constants.POSITION_SIZE_USD * (total_loss_percentage / 100)
+    if denominator <= 0: return None
+    leverage = constants.TARGET_LOSS_USD / denominator
+    safe_leverage = math.floor(leverage)
+    if safe_leverage < 1: return 1
+    logger.info(f"[LEVERAGE_CALC] Dla SL={raw_sl_percentage:.2f}%, obliczony lewar: {leverage:.2f}x, bezpieczny: {safe_leverage}x")
+    return safe_leverage
 
 def _calculate_trade_analytics(direction: str, entry_price: float, sl_price: float, extreme_price: float, alert_snapshot: Dict[str, Any]) -> Dict[str, Any]:
     risk_diff = abs(entry_price - sl_price)
@@ -46,7 +70,6 @@ def _calculate_trade_analytics(direction: str, entry_price: float, sl_price: flo
         rr_achieved = round(profit_diff / risk_diff, 4)
     else:
         rr_achieved = 0.0
-        logger.warning(f"Różnica ryzyka wynosi zero (entry={entry_price}, sl={sl_price}). Ustawiono rr_achieved na 0.0.")
     analytics_results = {"rr_achieved": rr_achieved}
     rr_thresholds = {"rr_1_0_achieved": 1.0, "rr_1_5_achieved": 1.5, "rr_2_0_achieved": 2.0, "rr_3_0_achieved": 3.0, "rr_4_0_achieved": 4.0, "rr_5_0_achieved": 5.0}
     for flag_name, threshold in rr_thresholds.items():
@@ -55,71 +78,33 @@ def _calculate_trade_analytics(direction: str, entry_price: float, sl_price: flo
 
 async def get_historical_klines(session: aiohttp.ClientSession, symbol: str, start_time_ms: int, end_time_ms: int) -> List[List[Any]]:
     params = {"category": "linear", "symbol": symbol.replace('.P', ''), "interval": "1", "start": start_time_ms, "end": end_time_ms, "limit": 1000}
-    logger.debug(f"[{symbol}] Pobieram historię kline od {start_time_ms} do {end_time_ms}")
     try:
         async with session.get(constants.BYBIT_API_URL_V5_KLINE, params=params, timeout=10) as response:
             response.raise_for_status()
             data = await response.json()
             if data.get("retCode") == 0 and data.get("result") and data["result"].get("list"):
                 return list(reversed(data["result"]["list"]))
-    except Exception as e:
-        logger.error(f"[{symbol}] Błąd przy pobieraniu historii kline: {e}", exc_info=True)
+    except Exception as e: logger.error(f"[{symbol}] Błąd przy pobieraniu historii kline: {e}", exc_info=True)
     return []
 
-# --- Główne funkcje logiki z POPRAWKAMI ---
-
 async def log_and_finalize_trade(session: aiohttp.ClientSession, trade: OpenTradeData, closed_result: str, close_price: float):
-    logger.info(f"--- [FINALIZACJA I PEŁNA ANALIZA] --- [{trade.symbol}] | ID: {trade.trade_id} | Wynik: {closed_result}")
-    
+    logger.info(f"--- [FINALIZACJA] --- [{trade.symbol}] | ID: {trade.trade_id} | Wynik: {closed_result}")
     close_timestamp_utc = datetime.now(timezone.utc)
     klines = await get_historical_klines(session, trade.symbol, trade.opened_at_ms, int(close_timestamp_utc.timestamp() * 1000))
-    
-    # --- KLUCZOWA POPRAWKA LOGIKI ---
-    extreme_price = close_price  # Domyślnie cena zamknięcia
-    
+    extreme_price = close_price
     if klines:
         if closed_result == "WIN":
-            # Dla pozycji WYGRANEJ, szukamy maksymalnego zysku
-            if trade.direction.lower() == 'long':
-                extreme_price = max([float(k[2]) for k in klines] + [close_price])
-            else: # short
-                extreme_price = min([float(k[3]) for k in klines] + [close_price])
+            if trade.direction.lower() == 'long': extreme_price = max([float(k[2]) for k in klines] + [close_price])
+            else: extreme_price = min([float(k[3]) for k in klines] + [close_price])
         elif closed_result == "LOSE":
-            # Dla pozycji PRZEGRANEJ, chcemy wiedzieć, jak blisko TP byliśmy, ZANIM cena zawróciła.
-            # Dlatego wciąż szukamy ceny ekstremalnej w kierunku zysku.
-            if trade.direction.lower() == 'long':
-                # Szukamy najwyższego punktu, jaki osiągnęła cena przed spadkiem
-                extreme_price = max([float(k[2]) for k in klines])
-            else: # short
-                # Szukamy najniższego punktu, jaki osiągnęła cena przed wzrostem
-                extreme_price = min([float(k[3]) for k in klines])
-
-    # Teraz przekazujemy poprawnie obliczoną `extreme_price`
-    analytics_data = _calculate_trade_analytics(
-        trade.direction, 
-        trade.entry_price, 
-        trade.sl_price, 
-        extreme_price, 
-        trade.alert_data_snapshot
-    )
-    
-    bq_data = {
-        "trade_id": trade.trade_id,
-        "timestamp_entry": trade.opened_at_iso,
-        "timestamp_close": close_timestamp_utc.isoformat(),
-        "symbol": trade.symbol,
-        "direction": trade.direction.upper(),
-        "main_result": closed_result,
-        "ob_type": trade.ob_type,
-    }
+            if trade.direction.lower() == 'long': extreme_price = max([float(k[2]) for k in klines])
+            else: extreme_price = min([float(k[3]) for k in klines])
+    analytics_data = _calculate_trade_analytics(trade.direction, trade.entry_price, trade.sl_price, extreme_price, trade.alert_data_snapshot)
+    bq_data = {"trade_id": trade.trade_id, "timestamp_entry": trade.opened_at_iso, "timestamp_close": close_timestamp_utc.isoformat(), "symbol": trade.symbol, "direction": trade.direction.upper(), "main_result": closed_result, "ob_type": trade.ob_type}
     bq_data.update(analytics_data)
     log_trade_to_bigquery(bq_data)
-    
-    # Przekazujemy cenę ekstremalną do tworzenia "ducha", aby analiza post-mortem mogła kontynuować od tego punktu
-    state_manager.create_analyzed_trade(trade, extreme_price)
-
-# Lokalizacja: bot_service/bot_logic.py
-# Podmień TYLKO tę jedną funkcję
+    if closed_result == "WIN":
+        state_manager.create_analyzed_trade(trade)
 
 def _handle_setups(klines_data: Dict[str, List[Any]], active_setups: List[DocumentSnapshot]) -> List[Dict[str, Any]]:
     if not active_setups: return []
@@ -131,34 +116,23 @@ def _handle_setups(klines_data: Dict[str, List[Any]], active_setups: List[Docume
             setup = SetupData.model_validate(setup_doc.to_dict())
             if setup.is_position_open_on_this_setup:
                 continue
-
             latest_kline = klines_data.get(symbol)
             if not latest_kline:
                 continue
-            
             kline_high, kline_low = float(latest_kline[2]), float(latest_kline[3])
             direction = setup.alert_data.direction.lower()
-            entry_level = setup.alert_data.entry
-            sl_price = setup.alert_data.sl
-            tp_price = setup.alert_data.tp
-
-            # --- NOWA, POPRAWNA LOGIKA RESETU I WEJŚCIA ---
-
-            # 1. Sprawdzamy, czy potrzebny jest reset
+            entry_level, sl_price, tp_price = setup.alert_data.entry, setup.alert_data.sl, setup.alert_data.tp
+            
+            # --- OSTATECZNA POPRAWKA LOGIKI RESETU ---
             if setup.is_reset_needed_after_loss:
-                # Jeśli tak, sprawdzamy warunek resetu
-                if (direction == 'long' and kline_high > entry_level) or \
-                   (direction == 'short' and kline_low < entry_level):
+                # Sprawdzamy, czy cena wyszła poza strefę wejścia, resetując warunek
+                if (direction == 'long' and kline_high > entry_level) or (direction == 'short' and kline_low < entry_level):
                     logger.info(f"[{symbol}] Warunek resetu ceny po stracie spełniony. Setup gotowy do nowego wejścia.")
                     state_manager.update_setup_after_price_reset(symbol)
-                # Niezależnie od tego, czy warunek został spełniony, w tym cyklu nie robimy nic więcej.
-                # Bot musi poczekać na kolejną minutę, aby cena ponownie "weszła" w strefę.
+                # Niezależnie od wyniku, w tym cyklu nie wchodzimy w pozycję. Wymagany jest powrót do strefy.
                 continue
 
-            # 2. Jeśli reset nie jest potrzebny, sprawdzamy warunek wejścia
-            entry_triggered = (direction == 'long' and kline_low <= entry_level) or \
-                              (direction == 'short' and kline_high >= entry_level)
-            
+            entry_triggered = (direction == 'long' and kline_low <= entry_level) or (direction == 'short' and kline_high >= entry_level)
             if entry_triggered:
                 # Logika otwierania/zamykania pozycji w 1 min (pozostaje bez zmian)
                 closed_result, close_price = None, entry_level
@@ -168,10 +142,8 @@ def _handle_setups(klines_data: Dict[str, List[Any]], active_setups: List[Docume
                 elif direction == 'short':
                     if kline_high >= sl_price: closed_result, close_price = "LOSE", sl_price
                     elif kline_low <= tp_price: closed_result, close_price = "WIN", tp_price
-                
                 ob_type = "Fresh OB" if setup.entry_attempts == 0 else "Used OB"
                 trade_id = str(uuid.uuid4())
-
                 if closed_result:
                     logger.info(f"--- [WEJŚCIE I ZAMKNIĘCIE W 1 MIN] --- [{symbol}] | Wynik: {closed_result} | ID: {trade_id}")
                     now_utc = datetime.now(timezone.utc)
@@ -182,14 +154,9 @@ def _handle_setups(klines_data: Dict[str, List[Any]], active_setups: List[Docume
                 else:
                     logger.info(f"--- [DECYZJA: WEJŚCIE {ob_type}] --- [{symbol}] | Cena: {entry_level} | ID: {trade_id}")
                     state_manager.create_open_trade(trade_id=trade_id, symbol=symbol, direction=direction, ob_type=ob_type, entry_price=entry_level, sl_price=sl_price, tp_price=tp_price, alert_data=setup.alert_data)
-        
-        except ValidationError as e:
-            logger.error(f"[{symbol}] Błąd walidacji danych setupu: {e}")
-        except Exception as e:
-            logger.error(f"[{symbol}] Błąd podczas sprawdzania wejścia: {e}", exc_info=True)
-    
+        except ValidationError as e: logger.error(f"[{symbol}] Błąd walidacji danych setupu: {e}")
+        except Exception as e: logger.error(f"[{symbol}] Błąd podczas sprawdzania wejścia: {e}", exc_info=True)
     return trades_to_finalize_immediately
-
 
 async def _handle_manage_open_trades(session: aiohttp.ClientSession, klines_data: Dict[str, List[Any]], open_trades: List[DocumentSnapshot]):
     if not open_trades: return
@@ -251,7 +218,7 @@ async def _analyze_single_ghost(session: aiohttp.ClientSession, analysis_trade: 
         state_manager.update_analyzed_trade_bq_timestamp(trade_id)
     
     state_manager.update_analyzed_trade_analysis_state(trade_id, now_ts_ms, new_extreme)
-    
+
     is_tp5_hit = analysis_trade.original_tp_5_0 and \
                 ((analysis_trade.direction.lower() == 'long' and new_extreme >= analysis_trade.original_tp_5_0) or \
                  (analysis_trade.direction.lower() == 'short' and new_extreme <= analysis_trade.original_tp_5_0))
