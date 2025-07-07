@@ -1,5 +1,5 @@
 # Lokalizacja: bot_service/state_manager.py
-# WERSJA PRODUKCYJNA
+# WERSJA PRODUKCYJNA - FINALNA
 
 import logging
 from typing import Iterable, Dict, Any
@@ -17,9 +17,7 @@ logger = logging.getLogger(__name__)
 def _get_db() -> firestore.Client:
     return get_db()
 
-# --- Funkcje zarządzania setupami, pozycjami otwartymi i analizowanymi ---
-# --- (pozostają bez zmian, wklejone dla kompletności pliku) ---
-
+# --- ZARZĄDZANIE SETUPAMI (bez zmian) ---
 def get_all_active_setups() -> Iterable[DocumentSnapshot]:
     return _get_db().collection(constants.SETUP_COLLECTION).stream()
 
@@ -43,6 +41,7 @@ def update_setup_after_price_reset(symbol: str):
     doc_ref.update({"is_reset_needed_after_loss": False})
     logger.info(f"[{symbol}] Warunek resetu ceny spełniony. Setup gotowy do nowego wejścia.")
 
+# --- ZARZĄDZANIE OTWARTYMI POZYCJAMI (bez zmian) ---
 def get_all_open_trades() -> Iterable[DocumentSnapshot]:
     return _get_db().collection(constants.TRADE_COLLECTION).stream()
 
@@ -55,9 +54,9 @@ def create_open_trade(trade_id: str, symbol: str, direction: str, ob_type: str, 
         entry_price=entry_price, sl_price=sl_price, tp_price=tp_price,
         opened_at_ms=int(timestamp_utc.timestamp() * 1000),
         opened_at_iso=timestamp_utc.isoformat(),
-        alert_data_snapshot=alert_data.dict(by_alias=True)
+        alert_data_snapshot=alert_data.model_dump(by_alias=True)
     )
-    trade_doc_ref.set(new_trade.dict())
+    trade_doc_ref.set(new_trade.model_dump())
     logger.info(f"[{symbol}][{trade_id}] Utworzono dokument dla otwartej pozycji w '{constants.TRADE_COLLECTION}'.")
     update_setup_after_trade_open(symbol)
     update_setup_entry_attempt(symbol)
@@ -66,33 +65,40 @@ def remove_open_trade(trade_id: str):
     _get_db().collection(constants.TRADE_COLLECTION).document(trade_id).delete()
     logger.info(f"[{trade_id}] Usunięto pozycję z aktywnego monitorowania.")
 
+# --- ZARZĄDZANIE ANALIZOWANYMI POZYCJAMI (Z POPRAWKĄ) ---
 def get_all_analyzed_trades() -> Iterable[DocumentSnapshot]:
     return _get_db().collection(constants.ANALYZED_COLLECTION).stream()
 
-def create_analyzed_trade(trade_data: OpenTradeData):
+# --- KLUCZOWA POPRAWKA: Dodano drugi argument `initial_extreme_price` ---
+def create_analyzed_trade(trade_data: OpenTradeData, initial_extreme_price: float):
     db = _get_db()
     trade_id = trade_data.trade_id
     if not trade_id: return
     doc_ref = db.collection(constants.ANALYZED_COLLECTION).document(trade_id)
     timestamp_utc = datetime.now(timezone.utc)
+    
+    # Próbujemy pobrać tp_5_0 z snapshotu, obsługując oba możliwe klucze
+    tp5_value = trade_data.alert_data_snapshot.get('tp_5_0') or trade_data.alert_data_snapshot.get('tp5')
+    
     analysis_data = AnalyzedTradeData(
         trade_id=trade_id, symbol=trade_data.symbol, direction=trade_data.direction,
         entry_price=trade_data.entry_price, original_sl=trade_data.sl_price,
+        original_tp_5_0=float(tp5_value) if tp5_value else None,
         opened_at_ms=trade_data.opened_at_ms,
         alert_data_snapshot=trade_data.alert_data_snapshot,
         last_analysis_timestamp_ms=int(timestamp_utc.timestamp() * 1000),
-        last_known_extreme_price=trade_data.entry_price,
+        last_known_extreme_price=initial_extreme_price, # Używamy przekazanej wartości
         last_bq_update_iso=None
     )
-    doc_ref.set(analysis_data.dict())
+    doc_ref.set(analysis_data.model_dump())
     logger.info(f"[{trade_id}] Utworzono pozycję do analizy post-mortem w '{constants.ANALYZED_COLLECTION}'.")
 
-def update_analyzed_trade_timestamp(trade_id: str):
+def update_analyzed_trade_bq_timestamp(trade_id: str):
     doc_ref = _get_db().collection(constants.ANALYZED_COLLECTION).document(trade_id)
     doc_ref.update({"last_bq_update_iso": datetime.now(timezone.utc)})
     logger.debug(f"[{trade_id}] Zaktualizowano znacznik czasu 'last_bq_update_iso' w Firestore.")
 
-def update_analyzed_trade_analysis_timestamp(trade_id: str, timestamp_ms: int):
+def update_analyzed_trade_timestamp_only(trade_id: str, timestamp_ms: int):
     doc_ref = _get_db().collection(constants.ANALYZED_COLLECTION).document(trade_id)
     doc_ref.update({"last_analysis_timestamp_ms": timestamp_ms})
 
@@ -107,40 +113,24 @@ def remove_analyzed_trade(trade_id: str):
     logger.info(f"[{trade_id}] Zakończono i usunięto pozycję z analizy post-mortem.")
 
 def get_latest_klines_from_cache(symbols: Iterable[str]) -> Dict[str, Dict[str, Any]]:
-    """
-    Pobiera najnowsze dane kline z cache'u w Firestore dla podanej listy symboli.
-    Funkcja jest zabezpieczona przed nieprawidłowymi danymi wejściowymi.
-    """
-    if not symbols: 
-        return {}
-        
+    if not symbols: return {}
     db = _get_db()
     klines_cache = {}
-    
     unique_symbols = list(set(s for s in symbols if isinstance(s, str) and s))
-    
     if not unique_symbols:
         logger.warning("Lista symboli po wstępnym przefiltrowaniu jest pusta.")
         return {}
-
     for i in range(0, len(unique_symbols), 29):
         chunk = unique_symbols[i:i + 29]
-        if not chunk:
-            continue
-
+        if not chunk: continue
         try:
-           
             docs = db.collection(constants.LATEST_KLINES_COLLECTION).where("__name__", "in", chunk).stream()
             for doc in docs:
                 klines_cache[doc.id] = doc.to_dict()
         except Exception as e:
             logger.error(f"Błąd podczas pobierania danych kline z cache'u dla chunk'a: {chunk}. Błąd: {e}", exc_info=True)
-    
     if klines_cache:
         logger.info(f"Pobrano {len(klines_cache)} rekordów kline z cache'u w Firestore.")
     else:
         logger.warning("Nie udało się pobrać żadnych rekordów kline z cache'u. Sprawdź, czy kolekcja '%s' zawiera dokumenty o podanych ID.", constants.LATEST_KLINES_COLLECTION)
-        
     return klines_cache
-
-#
