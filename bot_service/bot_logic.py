@@ -118,6 +118,9 @@ async def log_and_finalize_trade(session: aiohttp.ClientSession, trade: OpenTrad
     # Przekazujemy cenę ekstremalną do tworzenia "ducha", aby analiza post-mortem mogła kontynuować od tego punktu
     state_manager.create_analyzed_trade(trade, extreme_price)
 
+# Lokalizacja: bot_service/bot_logic.py
+# Podmień TYLKO tę jedną funkcję
+
 def _handle_setups(klines_data: Dict[str, List[Any]], active_setups: List[DocumentSnapshot]) -> List[Dict[str, Any]]:
     if not active_setups: return []
     logger.info(f"Sprawdzam {len(active_setups)} aktywnych setupów.")
@@ -126,18 +129,38 @@ def _handle_setups(klines_data: Dict[str, List[Any]], active_setups: List[Docume
         symbol = setup_doc.id
         try:
             setup = SetupData.model_validate(setup_doc.to_dict())
-            if setup.is_position_open_on_this_setup: continue
+            if setup.is_position_open_on_this_setup:
+                continue
+
             latest_kline = klines_data.get(symbol)
-            if not latest_kline: continue
+            if not latest_kline:
+                continue
+            
             kline_high, kline_low = float(latest_kline[2]), float(latest_kline[3])
             direction = setup.alert_data.direction.lower()
-            entry_level, sl_price, tp_price = setup.alert_data.entry, setup.alert_data.sl, setup.alert_data.tp
+            entry_level = setup.alert_data.entry
+            sl_price = setup.alert_data.sl
+            tp_price = setup.alert_data.tp
+
+            # --- NOWA, POPRAWNA LOGIKA RESETU I WEJŚCIA ---
+
+            # 1. Sprawdzamy, czy potrzebny jest reset
             if setup.is_reset_needed_after_loss:
-                if (direction == 'long' and kline_high > entry_level) or (direction == 'short' and kline_low < entry_level):
+                # Jeśli tak, sprawdzamy warunek resetu
+                if (direction == 'long' and kline_high > entry_level) or \
+                   (direction == 'short' and kline_low < entry_level):
+                    logger.info(f"[{symbol}] Warunek resetu ceny po stracie spełniony. Setup gotowy do nowego wejścia.")
                     state_manager.update_setup_after_price_reset(symbol)
+                # Niezależnie od tego, czy warunek został spełniony, w tym cyklu nie robimy nic więcej.
+                # Bot musi poczekać na kolejną minutę, aby cena ponownie "weszła" w strefę.
                 continue
-            entry_triggered = (direction == 'long' and kline_low <= entry_level) or (direction == 'short' and kline_high >= entry_level)
+
+            # 2. Jeśli reset nie jest potrzebny, sprawdzamy warunek wejścia
+            entry_triggered = (direction == 'long' and kline_low <= entry_level) or \
+                              (direction == 'short' and kline_high >= entry_level)
+            
             if entry_triggered:
+                # Logika otwierania/zamykania pozycji w 1 min (pozostaje bez zmian)
                 closed_result, close_price = None, entry_level
                 if direction == 'long':
                     if kline_low <= sl_price: closed_result, close_price = "LOSE", sl_price
@@ -145,8 +168,10 @@ def _handle_setups(klines_data: Dict[str, List[Any]], active_setups: List[Docume
                 elif direction == 'short':
                     if kline_high >= sl_price: closed_result, close_price = "LOSE", sl_price
                     elif kline_low <= tp_price: closed_result, close_price = "WIN", tp_price
+                
                 ob_type = "Fresh OB" if setup.entry_attempts == 0 else "Used OB"
                 trade_id = str(uuid.uuid4())
+
                 if closed_result:
                     logger.info(f"--- [WEJŚCIE I ZAMKNIĘCIE W 1 MIN] --- [{symbol}] | Wynik: {closed_result} | ID: {trade_id}")
                     now_utc = datetime.now(timezone.utc)
@@ -157,9 +182,14 @@ def _handle_setups(klines_data: Dict[str, List[Any]], active_setups: List[Docume
                 else:
                     logger.info(f"--- [DECYZJA: WEJŚCIE {ob_type}] --- [{symbol}] | Cena: {entry_level} | ID: {trade_id}")
                     state_manager.create_open_trade(trade_id=trade_id, symbol=symbol, direction=direction, ob_type=ob_type, entry_price=entry_level, sl_price=sl_price, tp_price=tp_price, alert_data=setup.alert_data)
-        except ValidationError as e: logger.error(f"[{symbol}] Błąd walidacji danych setupu: {e}")
-        except Exception as e: logger.error(f"[{symbol}] Błąd podczas sprawdzania wejścia: {e}", exc_info=True)
+        
+        except ValidationError as e:
+            logger.error(f"[{symbol}] Błąd walidacji danych setupu: {e}")
+        except Exception as e:
+            logger.error(f"[{symbol}] Błąd podczas sprawdzania wejścia: {e}", exc_info=True)
+    
     return trades_to_finalize_immediately
+
 
 async def _handle_manage_open_trades(session: aiohttp.ClientSession, klines_data: Dict[str, List[Any]], open_trades: List[DocumentSnapshot]):
     if not open_trades: return
