@@ -172,22 +172,22 @@ async def _analyze_single_ghost(session: aiohttp.ClientSession, analysis_trade: 
     
     new_extreme = analysis_trade.last_known_extreme_price
     should_update_bq = False
-    if (analysis_trade.direction.lower() == 'long' and extreme_price_in_new_klines > new_extreme):
+    if (analysis_trade.direction.lower() == 'long' and extreme_price_in_new_klines > new_extreme) or \
+       (analysis_trade.direction.lower() == 'short' and extreme_price_in_new_klines < new_extreme):
         new_extreme = extreme_price_in_new_klines
         should_update_bq = True
-    elif (analysis_trade.direction.lower() == 'short' and extreme_price_in_new_klines < new_extreme):
-        new_extreme = extreme_price_in_new_klines
-        should_update_bq = True
+    else:
+        state_manager.update_analyzed_trade_timestamp_only(trade_id, now_ts_ms)
+        return
         
-    if should_update_bq:
-        logger.info(f"[{trade_id}] Nowe ekstremum dla 'ducha': {new_extreme}. Aktualizuję analitykę.")
-        updates_for_bq = _calculate_trade_analytics(analysis_trade.direction, analysis_trade.entry_price, analysis_trade.original_sl, new_extreme, analysis_trade.alert_data_snapshot)
-        updates_to_send = {k: v for k, v in updates_for_bq.items() if v is True or k == 'rr_achieved'}
-        if updates_to_send and update_analyzed_trade_in_bigquery(trade_id, updates_to_send):
-            state_manager.update_analyzed_trade_bq_timestamp(trade_id)
+    logger.info(f"[{trade_id}] Nowe ekstremum dla 'ducha': {new_extreme}. Aktualizuję analitykę.")
+    updates_for_bq = _calculate_trade_analytics(analysis_trade.direction, analysis_trade.entry_price, analysis_trade.original_sl, new_extreme, analysis_trade.alert_data_snapshot)
+    updates_to_send = {k: v for k, v in updates_for_bq.items() if v is True or k == 'rr_achieved'}
+    if updates_to_send and update_analyzed_trade_in_bigquery(trade_id, updates_to_send):
+        state_manager.update_analyzed_trade_bq_timestamp(trade_id)
     
     state_manager.update_analyzed_trade_analysis_state(trade_id, now_ts_ms, new_extreme)
-
+    
     is_tp5_hit = analysis_trade.original_tp_5_0 and \
                 ((analysis_trade.direction.lower() == 'long' and new_extreme >= analysis_trade.original_tp_5_0) or \
                  (analysis_trade.direction.lower() == 'short' and new_extreme <= analysis_trade.original_tp_5_0))
