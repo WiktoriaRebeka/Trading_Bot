@@ -1,8 +1,8 @@
 # Lokalizacja: bot_service/state_manager.py
-# WERSJA PRODUKCYJNA - FINALNA
+# WERSJA PRODUKCYJNA - FINALNA z poprawioną sygnaturą funkcji
 
 import logging
-from typing import Iterable, Dict, Any
+from typing import Iterable, Dict, Any, Optional
 from datetime import datetime, timezone
 
 from google.cloud import firestore
@@ -17,7 +17,8 @@ logger = logging.getLogger(__name__)
 def _get_db() -> firestore.Client:
     return get_db()
 
-# --- ZARZĄDZANIE SETUPAMI (bez zmian) ---
+# --- Funkcje zarządzania setupami i pozycjami (bez zmian) ---
+
 def get_all_active_setups() -> Iterable[DocumentSnapshot]:
     return _get_db().collection(constants.SETUP_COLLECTION).stream()
 
@@ -41,7 +42,6 @@ def update_setup_after_price_reset(symbol: str):
     doc_ref.update({"is_reset_needed_after_loss": False})
     logger.info(f"[{symbol}] Warunek resetu ceny spełniony. Setup gotowy do nowego wejścia.")
 
-# --- ZARZĄDZANIE OTWARTYMI POZYCJAMI (bez zmian) ---
 def get_all_open_trades() -> Iterable[DocumentSnapshot]:
     return _get_db().collection(constants.TRADE_COLLECTION).stream()
 
@@ -77,17 +77,19 @@ def create_analyzed_trade(trade_data: OpenTradeData, initial_extreme_price: floa
     doc_ref = db.collection(constants.ANALYZED_COLLECTION).document(trade_id)
     timestamp_utc = datetime.now(timezone.utc)
     
-    # Próbujemy pobrać tp_5_0 z snapshotu, obsługując oba możliwe klucze
-    tp5_value = trade_data.alert_data_snapshot.get('tp_5_0') or trade_data.alert_data_snapshot.get('tp5')
-    
+    tp5_value = trade_data.alert_data_snapshot.get('tp_5_0')
+
     analysis_data = AnalyzedTradeData(
-        trade_id=trade_id, symbol=trade_data.symbol, direction=trade_data.direction,
-        entry_price=trade_data.entry_price, original_sl=trade_data.sl_price,
+        trade_id=trade_id,
+        symbol=trade_data.symbol,
+        direction=trade_data.direction,
+        entry_price=trade_data.entry_price,
+        original_sl=trade_data.sl_price,
         original_tp_5_0=float(tp5_value) if tp5_value else None,
         opened_at_ms=trade_data.opened_at_ms,
         alert_data_snapshot=trade_data.alert_data_snapshot,
         last_analysis_timestamp_ms=int(timestamp_utc.timestamp() * 1000),
-        last_known_extreme_price=initial_extreme_price, # Używamy przekazanej wartości
+        last_known_extreme_price=initial_extreme_price,
         last_bq_update_iso=None
     )
     doc_ref.set(analysis_data.model_dump())
