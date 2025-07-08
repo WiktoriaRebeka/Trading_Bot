@@ -1,18 +1,13 @@
 # Lokalizacja: shared_lib/models.py
-# WERSJA PRODUKCYJNA - OSTATECZNA I ZGODNA Z DANYMI W BAZIE
+# WERSJA FINALNA - ZGODNA Z OSTATECZNĄ, UPROSZCZONĄ LOGIKĄ
 
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any
 from datetime import datetime
 
 class AlertData(BaseModel):
-    """
-    Model reprezentujący surowe dane alertu przychodzącego z TradingView.
-    Definicja pól jest w 100% zgodna z kluczami w dokumentach Firestore.
-    """
     id: Optional[str] = None
     received_at: Optional[datetime] = None
-    
     symbol: str
     direction_code: int = Field(alias='directionCode')
     direction: Optional[str] = None
@@ -20,9 +15,6 @@ class AlertData(BaseModel):
     sl: float
     tp: float
     timestamp: str
-    
-    # --- OSTATECZNA I POPRAWNA DEFINICJA PÓL TP ---
-    # Nazwy pól w modelu DOKŁADNIE odpowiadają kluczom w Firestore.
     tp_1_0: float
     tp_1_5: float
     tp_2_0: float
@@ -32,7 +24,7 @@ class AlertData(BaseModel):
     
     class Config:
         allow_population_by_field_name = True
-        extra = 'ignore' # Ignoruje dodatkowe pola z webhooka (np. 'source', 'type')
+        extra = 'ignore'
 
 class SetupData(BaseModel):
     alert_data: AlertData
@@ -54,6 +46,9 @@ class OpenTradeData(BaseModel):
     alert_data_snapshot: Dict[str, Any]
 
 class AnalyzedTradeData(BaseModel):
+    """
+    Super-uproszczony model "ducha". Przechowuje tylko to, co niezbędne do pasywnego czekania.
+    """
     trade_id: str
     symbol: str
     direction: str
@@ -62,6 +57,3 @@ class AnalyzedTradeData(BaseModel):
     original_tp_5_0: Optional[float] = None
     opened_at_ms: int
     alert_data_snapshot: Dict[str, Any]
-    last_analysis_timestamp_ms: int
-    last_known_extreme_price: float
-    last_bq_update_iso: Optional[datetime] = None

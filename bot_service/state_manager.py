@@ -69,16 +69,18 @@ def remove_open_trade(trade_id: str):
 def get_all_analyzed_trades() -> Iterable[DocumentSnapshot]:
     return _get_db().collection(constants.ANALYZED_COLLECTION).stream()
 
-# --- KLUCZOWA POPRAWKA: Dodano drugi argument `initial_extreme_price` ---
-def create_analyzed_trade(trade_data: OpenTradeData, initial_extreme_price: float):
+
+
+def create_analyzed_trade(trade_data: OpenTradeData):
     db = _get_db()
     trade_id = trade_data.trade_id
     if not trade_id: return
-    doc_ref = db.collection(constants.ANALYZED_COLLECTION).document(trade_id)
-    timestamp_utc = datetime.now(timezone.utc)
     
-    tp5_value = trade_data.alert_data_snapshot.get('tp_5_0')
-
+    doc_ref = db.collection(constants.ANALYZED_COLLECTION).document(trade_id)
+    
+    # Próbujemy pobrać tp_5_0 z snapshotu, obsługując oba możliwe klucze
+    tp5_value = trade_data.alert_data_snapshot.get('tp_5_0') or trade_data.alert_data_snapshot.get('tp5')
+    
     analysis_data = AnalyzedTradeData(
         trade_id=trade_id,
         symbol=trade_data.symbol,
@@ -87,13 +89,10 @@ def create_analyzed_trade(trade_data: OpenTradeData, initial_extreme_price: floa
         original_sl=trade_data.sl_price,
         original_tp_5_0=float(tp5_value) if tp5_value else None,
         opened_at_ms=trade_data.opened_at_ms,
-        alert_data_snapshot=trade_data.alert_data_snapshot,
-        last_analysis_timestamp_ms=int(timestamp_utc.timestamp() * 1000),
-        last_known_extreme_price=initial_extreme_price,
-        last_bq_update_iso=None
+        alert_data_snapshot=trade_data.alert_data_snapshot
     )
     doc_ref.set(analysis_data.model_dump())
-    logger.info(f"[{trade_id}] Utworzono pozycję do analizy post-mortem w '{constants.ANALYZED_COLLECTION}'.")
+    logger.info(f"[{trade_id}] Utworzono 'ducha' dla transakcji WIN do analizy post-mortem.")
 
 def update_analyzed_trade_bq_timestamp(trade_id: str):
     doc_ref = _get_db().collection(constants.ANALYZED_COLLECTION).document(trade_id)
