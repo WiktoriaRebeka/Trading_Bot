@@ -18,7 +18,6 @@ from shared_lib.models import SetupData, OpenTradeData, AnalyzedTradeData, Alert
 
 logger = logging.getLogger(__name__)
 
-# --- Funkcje pomocnicze (bez zmian) ---
 def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]]):
     if not newly_fetched_alerts: return
     logger.info(f"Przetwarzam {len(newly_fetched_alerts)} nowych alertów.")
@@ -38,7 +37,7 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]]):
         except ValidationError as e: logger.error(f"Błąd walidacji alertu. ID: {alert_dict.get('id')}. Błędy: {e}")
         except Exception as e: logger.error(f"Nieoczekiwany błąd podczas przetwarzania alertu ID: {alert_dict.get('id')}: {e}", exc_info=True)
 
-def _calculate_trade_analytics(direction: str, entry_price: float, sl_price: float, extreme_price: float) -> Dict[str, Any]:
+def _calculate_trade_analytics(direction: str, entry_price: float, sl_price: float, extreme_price: float, alert_snapshot: Dict[str, Any]) -> Dict[str, Any]:
     risk_diff = abs(entry_price - sl_price)
     if risk_diff > 0:
         profit_diff = abs(extreme_price - entry_price)
@@ -65,9 +64,7 @@ async def get_historical_klines(session: aiohttp.ClientSession, symbol: str, sta
         logger.error(f"[{symbol}] Błąd przy pobieraniu historii kline: {e}", exc_info=True)
     return []
 
-# --- Główne funkcje logiki z NOWYMI ZMIANAMI ---
 
-# Wklej tę funkcję w miejsce starej log_initial_trade_result
 
 async def log_initial_trade_result(session: aiohttp.ClientSession, trade: OpenTradeData, closed_result: str):
     """
@@ -77,13 +74,8 @@ async def log_initial_trade_result(session: aiohttp.ClientSession, trade: OpenTr
     logger.info(f"--- [FINALIZACJA] --- [{trade.symbol}] | ID: {trade.trade_id} | Wynik: {closed_result}")
     close_timestamp_utc = datetime.now(timezone.utc)
     
-    # --- KLUCZOWA POPRAWKA LOGIKI ---
-    # Upraszczamy cenę ekstremalną. Dla WIN to cena TP, dla LOSE to cena SL.
-    # To gwarantuje, że rr_achieved będzie logiczne.
     extreme_price = trade.tp_price if closed_result == "WIN" else trade.sl_price
     
-    # Obliczamy analitykę na podstawie tej prostej zasady.
-    # W argumencie alert_snapshot przekazujemy pusty słownik, bo funkcja go już nie używa.
     analytics_data = _calculate_trade_analytics(trade.direction, trade.entry_price, trade.sl_price, extreme_price)
     
     bq_data = {
@@ -98,7 +90,6 @@ async def log_initial_trade_result(session: aiohttp.ClientSession, trade: OpenTr
     bq_data.update(analytics_data)
     log_trade_to_bigquery(bq_data)
 
-    # "Duch" jest tworzony TYLKO dla pozycji WIN.
     if closed_result == "WIN":
         state_manager.create_analyzed_trade(trade)
 
