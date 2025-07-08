@@ -70,7 +70,6 @@ def get_all_analyzed_trades() -> Iterable[DocumentSnapshot]:
     return _get_db().collection(constants.ANALYZED_COLLECTION).stream()
 
 
-
 def create_analyzed_trade(trade_data: OpenTradeData):
     db = _get_db()
     trade_id = trade_data.trade_id
@@ -78,7 +77,6 @@ def create_analyzed_trade(trade_data: OpenTradeData):
     
     doc_ref = db.collection(constants.ANALYZED_COLLECTION).document(trade_id)
     
-    # Próbujemy pobrać tp_5_0 z snapshotu, obsługując oba możliwe klucze
     tp5_value = trade_data.alert_data_snapshot.get('tp_5_0') or trade_data.alert_data_snapshot.get('tp5')
     
     analysis_data = AnalyzedTradeData(

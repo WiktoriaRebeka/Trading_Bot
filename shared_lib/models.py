@@ -1,5 +1,4 @@
 # Lokalizacja: shared_lib/models.py
-# WERSJA FINALNA - ZGODNA Z OSTATECZNĄ, UPROSZCZONĄ LOGIKĄ
 
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any
