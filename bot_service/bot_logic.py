@@ -1,10 +1,10 @@
 # Lokalizacja: bot_service/bot_logic.py
-# WERSJA PRODUKCYJNA - FINALNA I OSTATECZNA (v5 - Uproszczona)
+# WERSJA PRODUKCYJNA - FINALNA I KOMPLETNA v3
 
 import logging
 import uuid
 from typing import Dict, Any, List, Optional
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from google.cloud.firestore_v1.document import DocumentSnapshot
 from pydantic import ValidationError
 import asyncio
@@ -19,12 +19,14 @@ from shared_lib.models import SetupData, OpenTradeData, AnalyzedTradeData, Alert
 logger = logging.getLogger(__name__)
 
 # --- Funkcje pomocnicze (bez zmian) ---
+
 def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]]):
     if not newly_fetched_alerts: return
     logger.info(f"Przetwarzam {len(newly_fetched_alerts)} nowych alertów.")
     db = get_db()
     for alert_dict in newly_fetched_alerts:
         try:
+            # Używamy nowszej, zalecanej metody Pydantic
             alert_data = AlertData.model_validate(alert_dict)
             if alert_data.direction_code == 1: alert_data.direction = "LONG"
             elif alert_data.direction_code == -1: alert_data.direction = "SHORT"
@@ -33,12 +35,13 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]]):
                 continue
             new_setup = SetupData(alert_data=alert_data, updated_at=datetime.now(timezone.utc))
             doc_ref = db.collection(constants.SETUP_COLLECTION).document(alert_data.symbol)
+            # Używamy nowszej, zalecanej metody Pydantic
             doc_ref.set(new_setup.model_dump(by_alias=True))
             logger.info(f"[{alert_data.symbol}] Zarejestrowano/zaktualizowano aktywny setup.")
         except ValidationError as e: logger.error(f"Błąd walidacji alertu. ID: {alert_dict.get('id')}. Błędy: {e}")
         except Exception as e: logger.error(f"Nieoczekiwany błąd podczas przetwarzania alertu ID: {alert_dict.get('id')}: {e}", exc_info=True)
 
-def _calculate_trade_analytics(direction: str, entry_price: float, sl_price: float, extreme_price: float) -> Dict[str, Any]:
+def _calculate_trade_analytics(direction: str, entry_price: float, sl_price: float, extreme_price: float, alert_snapshot: Dict[str, Any]) -> Dict[str, Any]:
     risk_diff = abs(entry_price - sl_price)
     if risk_diff > 0:
         profit_diff = abs(extreme_price - entry_price)
@@ -65,24 +68,26 @@ async def get_historical_klines(session: aiohttp.ClientSession, symbol: str, sta
         logger.error(f"[{symbol}] Błąd przy pobieraniu historii kline: {e}", exc_info=True)
     return []
 
-# --- Główne funkcje logiki z NOWYMI ZMIANAMI ---
+# --- Główne funkcje logiki z POPRAWKAMI ---
 
-async def log_initial_trade_result(session: aiohttp.ClientSession, trade: OpenTradeData, closed_result: str):
-    logger.info(f"--- [FINALIZACJA] --- [{trade.symbol}] | ID: {trade.trade_id} | Wynik: {closed_result}")
+async def log_and_finalize_trade(session: aiohttp.ClientSession, trade: OpenTradeData, closed_result: str, close_price: float):
+    logger.info(f"--- [FINALIZACJA I PEŁNA ANALIZA] --- [{trade.symbol}] | ID: {trade.trade_id} | Wynik: {closed_result}")
     close_timestamp_utc = datetime.now(timezone.utc)
-    
-    initial_extreme_price = trade.tp_price if closed_result == "WIN" else trade.sl_price
-    
-    analytics_data = _calculate_trade_analytics(trade.direction, trade.entry_price, trade.sl_price, initial_extreme_price)
+    klines = await get_historical_klines(session, trade.symbol, trade.opened_at_ms, int(close_timestamp_utc.timestamp() * 1000))
+    extreme_profit_price = close_price
+    if klines:
+        if trade.direction.lower() == 'long':
+            extreme_profit_price = max([float(k[2]) for k in klines] + [close_price])
+        else:
+            extreme_profit_price = min([float(k[3]) for k in klines] + [close_price])
+    analytics_data = _calculate_trade_analytics(trade.direction, trade.entry_price, trade.sl_price, extreme_profit_price, trade.alert_data_snapshot)
     bq_data = {"trade_id": trade.trade_id, "timestamp_entry": trade.opened_at_iso, "timestamp_close": close_timestamp_utc.isoformat(), "symbol": trade.symbol, "direction": trade.direction.upper(), "main_result": closed_result, "ob_type": trade.ob_type}
     bq_data.update(analytics_data)
     log_trade_to_bigquery(bq_data)
-
-    if closed_result == "WIN":
-        state_manager.create_analyzed_trade(trade)
+    # POPRAWKA: Przekazujemy `extreme_profit_price` przy tworzeniu "ducha"
+    state_manager.create_analyzed_trade(trade, extreme_profit_price)
 
 def _handle_setups(klines_data: Dict[str, List[Any]], active_setups: List[DocumentSnapshot]) -> List[Dict[str, Any]]:
-    # ... (bez zmian, ta funkcja jest poprawna)
     if not active_setups: return []
     logger.info(f"Sprawdzam {len(active_setups)} aktywnych setupów.")
     trades_to_finalize_immediately = []
@@ -102,20 +107,20 @@ def _handle_setups(klines_data: Dict[str, List[Any]], active_setups: List[Docume
                 continue
             entry_triggered = (direction == 'long' and kline_low <= entry_level) or (direction == 'short' and kline_high >= entry_level)
             if entry_triggered:
-                closed_result = None
+                closed_result, close_price = None, entry_level
                 if direction == 'long':
-                    if kline_low <= sl_price: closed_result = "LOSE"
-                    elif kline_high >= tp_price: closed_result = "WIN"
+                    if kline_low <= sl_price: closed_result, close_price = "LOSE", sl_price
+                    elif kline_high >= tp_price: closed_result, close_price = "WIN", tp_price
                 elif direction == 'short':
-                    if kline_high >= sl_price: closed_result = "LOSE"
-                    elif kline_low <= tp_price: closed_result = "WIN"
+                    if kline_high >= sl_price: closed_result, close_price = "LOSE", sl_price
+                    elif kline_low <= tp_price: closed_result, close_price = "WIN", tp_price
                 ob_type = "Fresh OB" if setup.entry_attempts == 0 else "Used OB"
                 trade_id = str(uuid.uuid4())
                 if closed_result:
                     logger.info(f"--- [WEJŚCIE I ZAMKNIĘCIE W 1 MIN] --- [{symbol}] | Wynik: {closed_result} | ID: {trade_id}")
                     now_utc = datetime.now(timezone.utc)
                     fake_trade = OpenTradeData(trade_id=trade_id, symbol=symbol, direction=direction.upper(), ob_type=ob_type, entry_price=entry_level, sl_price=sl_price, tp_price=tp_price, opened_at_ms=int(now_utc.timestamp() * 1000) - 60000, opened_at_iso=(now_utc - timedelta(minutes=1)).isoformat(), alert_data_snapshot=setup.alert_data.model_dump(by_alias=True))
-                    trades_to_finalize_immediately.append({"trade": fake_trade, "result": closed_result})
+                    trades_to_finalize_immediately.append({"trade": fake_trade, "result": closed_result, "price": close_price})
                     state_manager.update_setup_after_trade_close(symbol, is_loss=(closed_result == "LOSE"))
                     state_manager.update_setup_entry_attempt(symbol)
                 else:
@@ -137,72 +142,98 @@ async def _handle_manage_open_trades(session: aiohttp.ClientSession, klines_data
             latest_kline = klines_data.get(symbol)
             if not latest_kline: continue
             kline_high, kline_low = float(latest_kline[2]), float(latest_kline[3])
-            closed_result = None
+            closed_result, close_price = None, float(latest_kline[4])
             if trade.direction.lower() == 'long':
-                if kline_low <= trade.sl_price: closed_result = "LOSE"
-                elif kline_high >= trade.tp_price: closed_result = "WIN"
+                if kline_low <= trade.sl_price: closed_result, close_price = "LOSE", trade.sl_price
+                elif kline_high >= trade.tp_price: closed_result, close_price = "WIN", trade.tp_price
             elif trade.direction.lower() == 'short':
-                if kline_high >= trade.sl_price: closed_result = "LOSE"
-                elif kline_low <= trade.tp_price: closed_result = "WIN"
+                if kline_high >= trade.sl_price: closed_result, close_price = "LOSE", trade.sl_price
+                elif kline_low <= trade.tp_price: closed_result, close_price = "WIN", trade.tp_price
             
             if closed_result:
-                tasks_to_run.append(log_initial_trade_result(session, trade, closed_result))
+                # Wywołujemy funkcję z poprawną liczbą argumentów
+                tasks_to_run.append(log_and_finalize_trade(session, trade, closed_result, close_price))
                 state_manager.remove_open_trade(trade_id)
                 state_manager.update_setup_after_trade_close(symbol, is_loss=(closed_result == "LOSE"))
         except ValidationError as e: logger.error(f"[{trade_id}] Błąd walidacji danych otwartej pozycji: {e}")
         except Exception as e: logger.error(f"[{trade_id}] Błąd podczas monitorowania otwartej pozycji: {e}", exc_info=True)
     if tasks_to_run: await asyncio.gather(*tasks_to_run)
 
-async def _finalize_ghost_analysis(session: aiohttp.ClientSession, analysis_trade: AnalyzedTradeData):
+async def _analyze_single_ghost(session: aiohttp.ClientSession, analysis_trade: AnalyzedTradeData):
     trade_id = analysis_trade.trade_id
-    logger.info(f"[{trade_id}] Finalizuję analizę 'ducha'. Pobieram pełną historię...")
-    end_time_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-    klines = await get_historical_klines(session, analysis_trade.symbol, analysis_trade.opened_at_ms, end_time_ms)
+    now_ts_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
     
-    if not klines:
-        logger.warning(f"[{trade_id}] Nie udało się pobrać historii dla finalnej analizy. Pomijam UPDATE.")
+    # Pobieramy historię od ostatniej analizy
+    new_klines = await get_historical_klines(session, analysis_trade.symbol, analysis_trade.last_analysis_timestamp_ms, now_ts_ms)
+    
+    if not new_klines:
+        state_manager.update_analyzed_trade_timestamp_only(trade_id, now_ts_ms)
+        return
+        
+    extreme_price_in_new_klines = 0.0
+    is_sl_hit = False
+    if analysis_trade.direction.lower() == 'long':
+        extreme_price_in_new_klines = max(float(k[2]) for k in new_klines)
+        if min(float(k[3]) for k in new_klines) <= analysis_trade.original_sl: is_sl_hit = True
+    else: # short
+        extreme_price_in_new_klines = min(float(k[3]) for k in new_klines)
+        if max(float(k[2]) for k in new_klines) >= analysis_trade.original_sl: is_sl_hit = True
+    
+    # Sprawdzamy, czy duch powinien umrzeć
+    is_tp5_hit = analysis_trade.original_tp_5_0 and \
+                ((analysis_trade.direction.lower() == 'long' and extreme_price_in_new_klines >= analysis_trade.original_tp_5_0) or \
+                 (analysis_trade.direction.lower() == 'short' and extreme_price_in_new_klines <= analysis_trade.original_tp_5_0))
+
+    if is_sl_hit or is_tp5_hit:
+        reason = "osiągnięto SL" if is_sl_hit else "osiągnięto TP5"
+        logger.info(f"[{trade_id}] Analiza 'ducha' zakończona ({reason}). Uruchamiam finalną analitykę.")
+        
+        # Pobieramy PEŁNĄ historię, aby zrobić ostateczny UPDATE
+        full_history_klines = await get_historical_klines(session, analysis_trade.symbol, analysis_trade.opened_at_ms, now_ts_ms)
+        if full_history_klines:
+            final_extreme_price = 0.0
+            if analysis_trade.direction.lower() == 'long':
+                final_extreme_price = max(float(k[2]) for k in full_history_klines)
+            else:
+                final_extreme_price = min(float(k[3]) for k in full_history_klines)
+            
+            updates_for_bq = _calculate_trade_analytics(analysis_trade.direction, analysis_trade.entry_price, analysis_trade.original_sl, final_extreme_price, analysis_trade.alert_data_snapshot)
+            update_analyzed_trade_in_bigquery(trade_id, updates_for_bq)
+            
+        state_manager.remove_analyzed_trade(trade_id)
         return
 
-    extreme_price = analysis_trade.entry_price
-    if analysis_trade.direction.lower() == 'long':
-        extreme_price = max(float(k[2]) for k in klines)
-    else:
-        extreme_price = min(float(k[3]) for k in klines)
+    # Jeśli duch nie umarł, sprawdzamy, czy jest nowe ekstremum do aktualizacji
+    new_extreme = analysis_trade.last_known_extreme_price
+    should_update_bq = False
+    if (analysis_trade.direction.lower() == 'long' and extreme_price_in_new_klines > new_extreme):
+        new_extreme = extreme_price_in_new_klines
+        should_update_bq = True
+    elif (analysis_trade.direction.lower() == 'short' and extreme_price_in_new_klines < new_extreme):
+        new_extreme = extreme_price_in_new_klines
+        should_update_bq = True
         
-    updates_for_bq = _calculate_trade_analytics(analysis_trade.direction, analysis_trade.entry_price, analysis_trade.original_sl, extreme_price)
-    update_analyzed_trade_in_bigquery(trade_id, updates_for_bq)
+    if should_update_bq:
+        logger.info(f"[{trade_id}] Nowe ekstremum dla 'ducha': {new_extreme}. Aktualizuję analitykę.")
+        updates_for_bq = _calculate_trade_analytics(analysis_trade.direction, analysis_trade.entry_price, analysis_trade.original_sl, new_extreme, analysis_trade.alert_data_snapshot)
+        updates_to_send = {k: v for k, v in updates_for_bq.items() if v is True or k == 'rr_achieved'}
+        if updates_to_send and update_analyzed_trade_in_bigquery(trade_id, updates_to_send):
+            state_manager.update_analyzed_trade_bq_timestamp(trade_id)
+    
+    state_manager.update_analyzed_trade_analysis_state(trade_id, now_ts_ms, new_extreme)
 
-async def _handle_post_mortem_analysis(session: aiohttp.ClientSession, klines_data: Dict[str, List[Any]], analyzed_trades: List[DocumentSnapshot]):
+
+async def _handle_post_mortem_analysis(session: aiohttp.ClientSession, analyzed_trades: List[DocumentSnapshot]):
     if not analyzed_trades: return
     logger.info(f"Analizuję {len(analyzed_trades)} zamkniętych pozycji (post-mortem).")
-    tasks_to_run = []
+    tasks = []
     for trade_doc in analyzed_trades:
-        trade_id = trade_doc.id
         try:
             analysis_trade = AnalyzedTradeData.model_validate(trade_doc.to_dict())
-            symbol = analysis_trade.symbol
-            latest_kline = klines_data.get(symbol)
-            if not latest_kline: continue
-            
-            kline_high, kline_low = float(latest_kline[2]), float(latest_kline[3])
-            is_analysis_finished = False
-            reason = ""
-
-            if analysis_trade.direction.lower() == 'long':
-                if kline_low <= analysis_trade.original_sl: is_analysis_finished, reason = True, "osiągnięto SL"
-                elif analysis_trade.original_tp_5_0 and kline_high >= analysis_trade.original_tp_5_0: is_analysis_finished, reason = True, "osiągnięto TP5"
-            else: # short
-                if kline_high >= analysis_trade.original_sl: is_analysis_finished, reason = True, "osiągnięto SL"
-                elif analysis_trade.original_tp_5_0 and kline_low <= analysis_trade.original_tp_5_0: is_analysis_finished, reason = True, "osiągnięto TP5"
-
-            if is_analysis_finished:
-                logger.info(f"[{trade_id}] Analiza 'ducha' zakończona ({reason}). Uruchamiam finalną analitykę.")
-                tasks_to_run.append(_finalize_ghost_analysis(session, analysis_trade))
-                state_manager.remove_analyzed_trade(trade_id)
-
-        except ValidationError as e: logger.error(f"[{trade_id}] Błąd walidacji danych 'ducha', pomijam: {e}")
-        except Exception as e: logger.error(f"[{trade_id}] Błąd podczas analizy post-mortem: {e}", exc_info=True)
-    if tasks_to_run: await asyncio.gather(*tasks_to_run)
+            tasks.append(_analyze_single_ghost(session, analysis_trade))
+        except ValidationError as e:
+            logger.error(f"[{trade_doc.id}] Błąd walidacji danych 'ducha', pomijam: {e}")
+    if tasks: await asyncio.gather(*tasks, return_exceptions=True)
 
 def run_trading_logic():
     logger.info("Rozpoczynam główną pętlę logiki tradingowej.")
@@ -231,9 +262,9 @@ def run_trading_logic():
         async with aiohttp.ClientSession() as session:
             tasks = []
             immediate_finalization_jobs = _handle_setups(klines_data_for_handlers, all_setups)
-            tasks.extend([log_initial_trade_result(session, job["trade"], job["result"]) for job in immediate_finalization_jobs])
+            tasks.extend([log_and_finalize_trade(session, job["trade"], job["result"], job["price"]) for job in immediate_finalization_jobs])
             tasks.append(_handle_manage_open_trades(session, klines_data_for_handlers, all_open_trades))
-            tasks.append(_handle_post_mortem_analysis(session, klines_data_for_handlers, all_analyzed_trades))
+            tasks.append(_handle_post_mortem_analysis(session, all_analyzed_trades))
             if tasks:
                 results = await asyncio.gather(*tasks, return_exceptions=True)
                 for i, result in enumerate(results):
