@@ -67,23 +67,38 @@ async def get_historical_klines(session: aiohttp.ClientSession, symbol: str, sta
 
 # --- Główne funkcje logiki z NOWYMI ZMIANAMI ---
 
+# Wklej tę funkcję w miejsce starej log_initial_trade_result
+
 async def log_initial_trade_result(session: aiohttp.ClientSession, trade: OpenTradeData, closed_result: str):
+    """
+    UPROSZCZONA WERSJA: Zapisuje początkowy wynik transakcji do BigQuery.
+    Dla pozycji LOSE nie szuka już historii, aby uniknąć błędów logicznych.
+    """
     logger.info(f"--- [FINALIZACJA] --- [{trade.symbol}] | ID: {trade.trade_id} | Wynik: {closed_result}")
     close_timestamp_utc = datetime.now(timezone.utc)
     
-    initial_extreme_price = trade.tp_price if closed_result == "WIN" else trade.sl_price
+    # --- KLUCZOWA POPRAWKA LOGIKI ---
+    # Upraszczamy cenę ekstremalną. Dla WIN to cena TP, dla LOSE to cena SL.
+    # To gwarantuje, że rr_achieved będzie logiczne.
+    extreme_price = trade.tp_price if closed_result == "WIN" else trade.sl_price
     
-    if closed_result == "LOSE":
-        klines = await get_historical_klines(session, trade.symbol, trade.opened_at_ms, int(close_timestamp_utc.timestamp() * 1000))
-        if klines:
-            if trade.direction.lower() == 'long': initial_extreme_price = max(float(k[2]) for k in klines)
-            else: initial_extreme_price = min(float(k[3]) for k in klines)
-
-    analytics_data = _calculate_trade_analytics(trade.direction, trade.entry_price, trade.sl_price, initial_extreme_price)
-    bq_data = {"trade_id": trade.trade_id, "timestamp_entry": trade.opened_at_iso, "timestamp_close": close_timestamp_utc.isoformat(), "symbol": trade.symbol, "direction": trade.direction.upper(), "main_result": closed_result, "ob_type": trade.ob_type}
+    # Obliczamy analitykę na podstawie tej prostej zasady.
+    # W argumencie alert_snapshot przekazujemy pusty słownik, bo funkcja go już nie używa.
+    analytics_data = _calculate_trade_analytics(trade.direction, trade.entry_price, trade.sl_price, extreme_price)
+    
+    bq_data = {
+        "trade_id": trade.trade_id, 
+        "timestamp_entry": trade.opened_at_iso, 
+        "timestamp_close": close_timestamp_utc.isoformat(), 
+        "symbol": trade.symbol, 
+        "direction": trade.direction.upper(), 
+        "main_result": closed_result, 
+        "ob_type": trade.ob_type
+    }
     bq_data.update(analytics_data)
     log_trade_to_bigquery(bq_data)
 
+    # "Duch" jest tworzony TYLKO dla pozycji WIN.
     if closed_result == "WIN":
         state_manager.create_analyzed_trade(trade)
 
