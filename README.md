@@ -1,6 +1,4 @@
-Oczywiście. Z przyjemnością przygotuję zaktualizowaną i profesjonalną dokumentację README.md w języku angielskim, która odzwierciedla wszystkie wprowadzone zmiany, obecną architekturę i logikę działania systemu. Poniżej znajduje się gotowy plik.
-
-Automated Trading Bot v8.0 (Google Cloud Platform)
+Automated Trading Bot v8.0 
 1. Project Description and Main Goal
 
 The Automated Trading Bot v8.0 is a fully automated, serverless trading system operating 24/7 on the Google Cloud Platform (GCP). Its primary objective is to autonomously execute and perform advanced analysis of a trading strategy based on the "Smart Money" concept, specifically focusing on Order Block (OB) formations.
