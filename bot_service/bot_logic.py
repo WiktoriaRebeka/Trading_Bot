@@ -1,5 +1,5 @@
 # Lokalizacja: bot_service/bot_logic.py
-# WERSJA PRODUKCYJNA - FINALNA I OSTATECZNA (v5 - Uproszczona)
+# WERSJA PRODUKCYJNA - FINALNA I OSTATECZNA (v7)
 
 import logging
 import uuid
@@ -64,13 +64,9 @@ async def get_historical_klines(session: aiohttp.ClientSession, symbol: str, sta
         logger.error(f"[{symbol}] Błąd przy pobieraniu historii kline: {e}", exc_info=True)
     return []
 
-
+# --- Główne funkcje logiki z POPRAWKAMI ---
 
 async def log_initial_trade_result(session: aiohttp.ClientSession, trade: OpenTradeData, closed_result: str):
-    """
-    UPROSZCZONA WERSJA: Zapisuje początkowy wynik transakcji do BigQuery.
-    Dla pozycji LOSE nie szuka już historii, aby uniknąć błędów logicznych.
-    """
     logger.info(f"--- [FINALIZACJA] --- [{trade.symbol}] | ID: {trade.trade_id} | Wynik: {closed_result}")
     close_timestamp_utc = datetime.now(timezone.utc)
     
@@ -78,15 +74,7 @@ async def log_initial_trade_result(session: aiohttp.ClientSession, trade: OpenTr
     
     analytics_data = _calculate_trade_analytics(trade.direction, trade.entry_price, trade.sl_price, extreme_price)
     
-    bq_data = {
-        "trade_id": trade.trade_id, 
-        "timestamp_entry": trade.opened_at_iso, 
-        "timestamp_close": close_timestamp_utc.isoformat(), 
-        "symbol": trade.symbol, 
-        "direction": trade.direction.upper(), 
-        "main_result": closed_result, 
-        "ob_type": trade.ob_type
-    }
+    bq_data = {"trade_id": trade.trade_id, "timestamp_entry": trade.opened_at_iso, "timestamp_close": close_timestamp_utc.isoformat(), "symbol": trade.symbol, "direction": trade.direction.upper(), "main_result": closed_result, "ob_type": trade.ob_type}
     bq_data.update(analytics_data)
     log_trade_to_bigquery(bq_data)
 
@@ -105,8 +93,7 @@ def _handle_setups(klines_data: Dict[str, List[Any]], active_setups: List[Docume
             latest_kline = klines_data.get(symbol)
             if not latest_kline: continue
             kline_high, kline_low = float(latest_kline[2]), float(latest_kline[3])
-            direction = setup.alert_data.direction.lower()
-            entry_level, sl_price, tp_price = setup.alert_data.entry, setup.alert_data.sl, setup.alert_data.tp
+            direction, entry_level, sl_price, tp_price = setup.alert_data.direction.lower(), setup.alert_data.entry, setup.alert_data.sl, setup.alert_data.tp
             if setup.is_reset_needed_after_loss:
                 if (direction == 'long' and kline_high > entry_level) or (direction == 'short' and kline_low < entry_level):
                     state_manager.update_setup_after_price_reset(symbol)
@@ -165,7 +152,6 @@ async def _handle_manage_open_trades(session: aiohttp.ClientSession, klines_data
     if tasks_to_run: await asyncio.gather(*tasks_to_run)
 
 async def _finalize_ghost_analysis(session: aiohttp.ClientSession, analysis_trade: AnalyzedTradeData):
-    """Pobiera pełną historię i wysyła ostateczny UPDATE do BigQuery."""
     trade_id = analysis_trade.trade_id
     logger.info(f"[{trade_id}] Finalizuję analizę 'ducha'. Pobieram pełną historię...")
     end_time_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
