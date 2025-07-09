@@ -130,3 +130,20 @@ def get_latest_klines_from_cache(symbols: Iterable[str]) -> Dict[str, Dict[str, 
     else:
         logger.warning("Nie udało się pobrać żadnych rekordów kline z cache'u. Sprawdź, czy kolekcja '%s' zawiera dokumenty o podanych ID.", constants.LATEST_KLINES_COLLECTION)
     return klines_cache
+
+
+def get_symbols_to_watch_from_config() -> list[str]:
+    """Pobiera listę symboli do obserwacji z dokumentu konfiguracyjnego."""
+    try:
+        doc_ref = _get_db().collection(constants.BOT_CONFIG_COLLECTION).document(constants.SYMBOLS_CONFIG_DOC_ID)
+        doc = doc_ref.get()
+        if doc.exists:
+            symbols = doc.to_dict().get("symbols_to_watch", [])
+            if isinstance(symbols, list) and symbols:
+                logger.info(f"Pobrano {len(symbols)} symboli z konfiguracji.")
+                return symbols
+        logger.warning(f"Dokument konfiguracyjny '{constants.SYMBOLS_CONFIG_DOC_ID}' jest pusty lub nie istnieje.")
+        return []
+    except Exception as e:
+        logger.error(f"Błąd podczas odczytu konfiguracji symboli: {e}", exc_info=True)
+        return []
