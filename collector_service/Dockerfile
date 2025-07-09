@@ -5,8 +5,10 @@ ENV PYTHONUNBUFFERED 1
 WORKDIR /app
 ENV PYTHONPATH /app
 
-COPY requirements.txt .
+
+COPY collector_service/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
 
 COPY shared_lib/ /app/shared_lib/
 COPY collector_service/ /app/collector_service/

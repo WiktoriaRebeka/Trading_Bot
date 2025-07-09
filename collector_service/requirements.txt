@@ -1,0 +1,7 @@
+Flask>=2.0
+gunicorn>=20.0
+google-cloud-firestore
+pydantic
+google-cloud-secret-manager
+python-dotenv>=0.15.0
+aiohttp
