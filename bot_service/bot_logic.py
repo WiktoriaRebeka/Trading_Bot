@@ -37,7 +37,7 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]]):
         except ValidationError as e: logger.error(f"Błąd walidacji alertu. ID: {alert_dict.get('id')}. Błędy: {e}")
         except Exception as e: logger.error(f"Nieoczekiwany błąd podczas przetwarzania alertu ID: {alert_dict.get('id')}: {e}", exc_info=True)
 
-def _calculate_trade_analytics(direction: str, entry_price: float, sl_price: float, extreme_price: float, alert_snapshot: Dict[str, Any]) -> Dict[str, Any]:
+def _calculate_trade_analytics(direction: str, entry_price: float, sl_price: float, extreme_price: float) -> Dict[str, Any]:
     risk_diff = abs(entry_price - sl_price)
     if risk_diff > 0:
         profit_diff = abs(extreme_price - entry_price)
