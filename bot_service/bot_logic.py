@@ -1,5 +1,4 @@
 # Lokalizacja: bot_service/bot_logic.py
-# WERSJA PRODUKCYJNA - FINALNA I OSTATECZNA (v7)
 
 import logging
 import uuid

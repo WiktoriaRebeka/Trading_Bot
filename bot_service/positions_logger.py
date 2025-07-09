@@ -3,7 +3,6 @@
 from datetime import datetime, timezone
 from typing import Optional, Literal
 import logging
-# --- POPRAWIONY IMPORT ---
 from shared_lib.firebase_client import get_db
 from google.cloud import firestore
 

@@ -1,5 +1,4 @@
 # Lokalizacja: bot_service/bigquery_logger.py
-# WERSJA PRODUKCYJNA - FINALNA (z obsługą błędu bufora strumieniowego)
 
 import logging
 from typing import Dict, Any, Optional
@@ -111,7 +110,7 @@ def update_analyzed_trade_in_bigquery(trade_id: str, updates: Dict[str, Any]) ->
     logger.info(f"[BQ_UPDATER] Wykonuję sparametryzowane zapytanie dla {trade_id}")
     try:
         query_job = client.query(query, job_config=job_config)
-        query_job.result() # Czekaj na zakończenie zadania
+        query_job.result() 
         if query_job.num_dml_affected_rows > 0:
             logger.info(f"[BQ_UPDATER] SUKCES. Pomyślnie zaktualizowano wiersz dla {trade_id}.")
             return True
@@ -119,14 +118,10 @@ def update_analyzed_trade_in_bigquery(trade_id: str, updates: Dict[str, Any]) ->
             logger.warning(f"[BQ_UPDATER] Nie znaleziono wiersza do aktualizacji dla {trade_id} (możliwe, że jest w buforze strumieniowym lub został już usunięty).")
             return False
             
-    # --- KLUCZOWA POPRAWKA ---
     except GoogleAPICallError as e:
-        # Sprawdzamy, czy błąd jest znanym problemem bufora strumieniowego
         if "streaming buffer" in str(e):
-            # To jest oczekiwany błąd, logujemy go jako WARNING, a nie ERROR
             logger.warning(f"[BQ_UPDATER] Oczekiwany błąd bufora strumieniowego dla {trade_id}. Spróbujemy ponownie w kolejnym cyklu. Błąd: {e}")
         else:
-            # Inne błędy API wciąż logujemy jako krytyczne
             logger.error(f"[BQ_UPDATER] Błąd API podczas aktualizacji wiersza dla {trade_id}: {e}", exc_info=True)
         return False
     except Exception as e:

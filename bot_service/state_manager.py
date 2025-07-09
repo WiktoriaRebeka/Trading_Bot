@@ -1,5 +1,4 @@
 # Lokalizacja: bot_service/state_manager.py
-# WERSJA PRODUKCYJNA - FINALNA z poprawioną sygnaturą funkcji
 
 import logging
 from typing import Iterable, Dict, Any, Optional
@@ -64,8 +63,6 @@ def create_open_trade(trade_id: str, symbol: str, direction: str, ob_type: str, 
 def remove_open_trade(trade_id: str):
     _get_db().collection(constants.TRADE_COLLECTION).document(trade_id).delete()
     logger.info(f"[{trade_id}] Usunięto pozycję z aktywnego monitorowania.")
-
-# --- ZARZĄDZANIE ANALIZOWANYMI POZYCJAMI (Z POPRAWKĄ) ---
 def get_all_analyzed_trades() -> Iterable[DocumentSnapshot]:
     return _get_db().collection(constants.ANALYZED_COLLECTION).stream()
 

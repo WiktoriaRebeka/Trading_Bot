@@ -1,4 +1,4 @@
-#trading_bot/.github/workflows/deploy.yml
+# Lokalizacja:.github/workflows/deploy.yml
 
 name: Deploy Trading Bot to Cloud Run
 

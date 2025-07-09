@@ -8,7 +8,6 @@ from typing import List, Dict, Any, Optional
 from shared_lib import firebase_client
 from shared_lib import constants
 
-# Uzyskujemy logger na poziomie modułu
 logger = logging.getLogger(__name__)
 
 async def _fetch_kline_for_symbol(session: aiohttp.ClientSession, symbol: str) -> Optional[Dict[str, Any]]:
@@ -58,7 +57,6 @@ def get_symbols_to_watch_from_config() -> List[str]:
         return []
     except Exception as e:
         logger.error(f"Krytyczny błąd podczas odczytu konfiguracji symboli: {e}", exc_info=True)
-        # Rzucamy wyjątek dalej, aby endpoint mógł go złapać i zalogować
         raise
 
 def save_klines_to_firestore(klines_data: Dict[str, Dict[str, Any]]):
@@ -79,7 +77,6 @@ def save_klines_to_firestore(klines_data: Dict[str, Dict[str, Any]]):
         raise
 
 async def run_data_collection_cycle():
-    # Ta funkcja nie musi logować, bo funkcje, które woła, robią to szczegółowo.
     symbols_to_watch = get_symbols_to_watch_from_config()
     if not symbols_to_watch:
         return "Brak symboli do przetworzenia w konfiguracji.", 200

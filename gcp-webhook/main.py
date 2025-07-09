@@ -1,19 +1,14 @@
-#trading_bot/gcp-webhook/main.py
+#Lokalizacja: gcp-webhook/main.py
 
 from google.cloud import firestore
 import os
 
-# Pobieramy ID projektu ze zmiennej środowiskowej, którą GCP ustawia automatycznie.
-# Zapewnia to, że funkcja zawsze wie, w kontekście którego projektu działa.
 PROJECT_ID = os.environ.get('GCP_PROJECT', 'trading-bot-463318')
 DATABASE_NAME = "trading-bot-data"
 
 try:
-    # NAJWAŻNIEJSZA ZMIANA: Inicjalizujemy klienta, JAWNIE podając ID projektu i nazwę bazy.
-    # To eliminuje wszelkie niejednoznaczności związane z regionem lub automatycznym wykrywaniem.
     db = firestore.Client(project=PROJECT_ID, database=DATABASE_NAME)
-    
-    # Testowe zapytanie, aby potwierdzić połączenie przy starcie funkcji
+
     db.collection('_test_connection_').limit(1).get()
     print(f"INFO: Pomyślnie zainicjowano klienta dla projektu '{PROJECT_ID}' i bazy '{DATABASE_NAME}'.")
 
@@ -27,7 +22,6 @@ def firestore_webhook_receiver(request):
         print("ERROR: Klient Firestore niedostępny z powodu błędu inicjalizacji.")
         return ("Błąd serwera: Klient Firestore niedostępny", 500)
 
-    # Dalej kod pozostaje bez zmian, bo jest poprawny
     if request.method != 'POST':
         return ('Dozwolone są tylko żądania POST', 405)
 
