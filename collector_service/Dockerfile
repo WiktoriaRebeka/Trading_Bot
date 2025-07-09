@@ -14,3 +14,4 @@ COPY shared_lib/ /app/shared_lib/
 COPY collector_service/ /app/collector_service/
 
 CMD exec gunicorn --bind :$PORT --workers 1 --threads 8 --timeout 300 "collector_service.collector_main:create_app()"
+#test 
