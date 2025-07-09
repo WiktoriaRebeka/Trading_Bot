@@ -1,7 +1,6 @@
 # Lokalizacja: shared_lib/models.py
-
-from pydantic import BaseModel, Field
-from typing import Optional, Dict, Any
+from pydantic import BaseModel, Field, validator
+from typing import Optional, Dict, Any, List
 from datetime import datetime
 
 class AlertData(BaseModel):
@@ -25,6 +24,16 @@ class AlertData(BaseModel):
         allow_population_by_field_name = True
         extra = 'ignore'
 
+    @validator('direction', pre=True, always=True)
+    def set_direction_from_code(cls, v, values):
+        if 'direction_code' in values:
+            code = values['direction_code']
+            if code == 1:
+                return "LONG"
+            if code == -1:
+                return "SHORT"
+        return "UNKNOWN"
+
 class SetupData(BaseModel):
     alert_data: AlertData
     entry_attempts: int = 0
@@ -44,9 +53,15 @@ class OpenTradeData(BaseModel):
     opened_at_iso: str
     alert_data_snapshot: Dict[str, Any]
 
+class Kline(BaseModel):
+    timestamp: int
+    high: float
+    low: float
+    close: float
+
 class AnalyzedTradeData(BaseModel):
     """
-    Super-uproszczony model "ducha". Przechowuje tylko to, co niezbędne do pasywnego czekania.
+    Ulepszony model "ducha" ze stanem do inkrementalnej analizy.
     """
     trade_id: str
     symbol: str
@@ -56,3 +71,7 @@ class AnalyzedTradeData(BaseModel):
     original_tp_5_0: Optional[float] = None
     opened_at_ms: int
     alert_data_snapshot: Dict[str, Any]
+    
+    last_known_extreme_price: float
+    last_analysis_timestamp_ms: int
+    achieved_tps: List[str] = [] 
