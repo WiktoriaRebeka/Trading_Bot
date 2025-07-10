@@ -5,3 +5,5 @@ pydantic
 google-cloud-secret-manager
 python-dotenv>=0.15.0
 aiohttp
+pytest
+pytest-mock

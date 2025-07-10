@@ -9,6 +9,7 @@ on:
       - 'cloudbuild-bot.yaml'
       - 'bot_service/**'
       - 'shared_lib/**'
+      - 'tests/**' # Dodajemy, aby zmiany w testach też uruchamiały workflow
       - 'requirements.txt'
 
 jobs:
@@ -22,11 +23,28 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v3
 
+      # --- NOWY KROK: INSTALACJA ZALEŻNOŚCI ---
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r bot_service/requirements.txt
+          pip install -r collector_service/requirements.txt
+
+      # --- NOWY KROK: URUCHOMIENIE TESTÓW ---
+      - name: Run tests with pytest
+        run: |
+          pytest
+
+      # --- ISTNIEJĄCE KROKI (BEZ ZMIAN) ---
       - name: Authenticate to Google Cloud
         uses: 'google-github-actions/auth@v1'
         with:
           credentials_json: '${{ secrets.GCP_SA_KEY }}'
-
 
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v1
@@ -43,5 +61,5 @@ jobs:
             --platform managed \
             --allow-unauthenticated \
             --vpc-connector app-connector-warsaw \
-            --vpc-egress all \
+            --vpc-egress all
             --service-account trading-bot-463318@appspot.gserviceaccount.com
