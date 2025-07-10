@@ -60,3 +60,5 @@ jobs:
             --platform managed \
             --allow-unauthenticated \
             --service-account trading-bot-463318@appspot.gserviceaccount.com
+
+#test
