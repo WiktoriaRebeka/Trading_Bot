@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 
 # --- ULEPSZONE FUNKCJE ---
 
+# Lokalizacja: bot_service/bot_logic.py
+
 def _calculate_rr_analytics(entry_price: float, sl_price: float, extreme_price: float) -> Dict[str, Any]:
     """Kalkuluje osiągnięte R:R i flagi dla poszczególnych poziomów TP."""
     risk_diff = abs(entry_price - sl_price)
@@ -25,7 +27,19 @@ def _calculate_rr_analytics(entry_price: float, sl_price: float, extreme_price: 
         logger.warning(f"Różnica ryzyka wynosi zero (entry={entry_price}, sl={sl_price}). R:R ustawione na 0.")
         return {"rr_achieved": 0.0}
 
-    profit_diff = abs(extreme_price - entry_price)
+    # --- KLUCZOWA POPRAWKA LOGICZNA ---
+    # Sprawdzamy, czy kierunek ruchu ceny jest zgodny z kierunkiem transakcji.
+    # Jeśli nie, zysk wynosi 0.
+    is_long = sl_price < entry_price
+    
+    if is_long and extreme_price < entry_price:
+        profit_diff = 0.0 # Cena poszła w dół dla longa
+    elif not is_long and extreme_price > entry_price:
+        profit_diff = 0.0 # Cena poszła w górę dla shorta
+    else:
+        profit_diff = abs(extreme_price - entry_price)
+    # ------------------------------------
+
     rr_achieved = round(profit_diff / risk_diff, 4)
     
     analytics = {"rr_achieved": rr_achieved}
