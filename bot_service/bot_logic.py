@@ -36,7 +36,33 @@ def _calculate_rr_analytics(entry_price: float, sl_price: float, extreme_price: 
     for flag, threshold in rr_thresholds.items():
         analytics[flag] = rr_achieved >= threshold
     return analytics
-
+def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]]):
+    """Przetwarza nowe alerty i zapisuje je jako aktywne setupy w Firestore."""
+    if not newly_fetched_alerts:
+        return
+    logger.info(f"Przetwarzam {len(newly_fetched_alerts)} nowych alertów.")
+    db = get_db()
+    for alert_dict in newly_fetched_alerts:
+        try:
+            # Używamy modelu AlertData do walidacji i ustawienia kierunku
+            alert_data = AlertData.model_validate(alert_dict)
+            
+            # Tworzymy nowy obiekt SetupData
+            new_setup = SetupData(
+                alert_data=alert_data,
+                updated_at=datetime.now(timezone.utc)
+            )
+            
+            # Zapisujemy/nadpisujemy dokument w kolekcji active_setups
+            doc_ref = db.collection(constants.SETUP_COLLECTION).document(alert_data.symbol)
+            doc_ref.set(new_setup.model_dump(by_alias=True))
+            
+            logger.info(f"[{alert_data.symbol}] Zarejestrowano/zaktualizowano aktywny setup.")
+            
+        except ValidationError as e:
+            logger.error(f"Błąd walidacji alertu. ID: {alert_dict.get('id')}. Błędy: {e}")
+        except Exception as e:
+            logger.error(f"Nieoczekiwany błąd podczas przetwarzania alertu ID: {alert_dict.get('id')}: {e}", exc_info=True)
 async def get_historical_klines(session: aiohttp.ClientSession, symbol: str, start_time_ms: int, limit: int = 200) -> List[Kline]:
     """Pobiera historię świec od zadanego czasu, zwracając listę obiektów Kline."""
     params = {
