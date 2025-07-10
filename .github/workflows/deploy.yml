@@ -60,5 +60,5 @@ jobs:
             --platform managed \
             --allow-unauthenticated \
             --vpc-connector app-connector-warsaw \
-            --vpc-egress all
+            --vpc-egress all \
             --service-account trading-bot-463318@appspot.gserviceaccount.com
