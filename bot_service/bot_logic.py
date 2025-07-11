@@ -151,19 +151,25 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
 
             if entry_triggered:
                 closed_result, close_price = None, None
+                # --- POPRAWKA ---
+                # Poprawne przypisanie wartości do close_price razem z closed_result
                 if direction == 'LONG':
-                    if latest_kline.low <= sl_price: closed_result, close_price = "LOSE", sl_price
-                    elif latest_kline.high >= tp_price: closed_result, close_price = "WIN", tp_price
+                    if latest_kline.low <= sl_price:
+                        closed_result, close_price = "LOSE", sl_price
+                    elif latest_kline.high >= tp_price:
+                        closed_result, close_price = "WIN", tp_price
                 elif direction == 'SHORT':
-                    if latest_kline.high >= sl_price: closed_result, close_price = "LOSE", sl_price
-                    elif latest_kline.low <= tp_price: closed_result, close_price = "WIN", tp_price
+                    if latest_kline.high >= sl_price:
+                        closed_result, close_price = "LOSE", sl_price
+                    elif latest_kline.low <= tp_price:
+                        closed_result, close_price = "WIN", tp_price
+                # ----------------
 
                 ob_type = "Fresh OB" if setup.entry_attempts == 0 else "Used OB"
                 trade_id = str(uuid.uuid4())
 
                 if closed_result:
                     logger.info(f"--- [WEJŚCIE I ZAMKNIĘCIE W 1 MIN] --- [{symbol}] | Wynik: {closed_result} | ID: {trade_id}")
-                    # Używamy timestampu świecy, która wywołała zdarzenie
                     entry_timestamp = datetime.fromtimestamp(latest_kline.timestamp / 1000, tz=timezone.utc)
                     fake_trade = OpenTradeData(
                         trade_id=trade_id, symbol=symbol, direction=direction, ob_type=ob_type,
@@ -171,7 +177,14 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
                         opened_at_ms=latest_kline.timestamp, opened_at_iso=entry_timestamp.isoformat(),
                         alert_data_snapshot=setup.alert_data.model_dump(by_alias=True)
                     )
-                    trades_to_finalize_immediately.append({"trade": fake_trade, "result": closed_result, "close_price": close_price})
+                    # --- POPRAWKA ---
+                    # Dodanie close_price do słownika
+                    trades_to_finalize_immediately.append({
+                        "trade": fake_trade, 
+                        "result": closed_result, 
+                        "close_price": close_price
+                    })
+                    # ----------------
                     state_manager.update_setup_after_trade_close(symbol, is_loss=(closed_result == "LOSE"))
                     state_manager.update_setup_entry_attempt(symbol)
                 else:
@@ -185,6 +198,7 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
         except Exception as e: logger.error(f"[{symbol}] Błąd podczas sprawdzania wejścia: {e}", exc_info=True)
     
     return trades_to_finalize_immediately
+
 
 async def _handle_manage_open_trades(klines_data: Dict[str, Kline], open_trades: List[DocumentSnapshot]):
     """Monitoruje otwarte pozycje i zamyka je w razie potrzeby."""
@@ -290,10 +304,8 @@ async def _handle_post_mortem_analysis_optimized(session: aiohttp.ClientSession,
 def run_trading_logic():
     logger.info("Rozpoczynam główną pętlę logiki tradingowej.")
     
-    # ZMIANA: Pobieramy listę symboli z konfiguracji, a nie przez skanowanie kolekcji
     symbols_to_watch = set(state_manager.get_symbols_to_watch_from_config())
     
-    # Dodajemy symbole z otwartych pozycji i duchów, które mogły zniknąć z głównej listy
     for doc in state_manager.get_all_open_trades():
         if data := doc.to_dict(): symbols_to_watch.add(data.get('symbol'))
     for doc in state_manager.get_all_analyzed_trades():
@@ -309,7 +321,6 @@ def run_trading_logic():
         logger.warning("Nie udało się pobrać danych z cache'u klines. Nie można kontynuować.")
         return
     
-    # ZMIANA: Używamy modelu Pydantic zamiast "magicznej" listy
     klines_data_for_handlers: Dict[str, Kline] = {}
     for symbol, data in latest_klines_cache.items():
         try:
@@ -325,13 +336,15 @@ def run_trading_logic():
 
     async def async_main():
         async with aiohttp.ClientSession() as session:
-            # Przetwarzanie setupów jest synchroniczne, ale zwraca zadania do asynchronicznej finalizacji
             immediate_finalization_jobs = _handle_setups(klines_data_for_handlers, all_setups)
             
             tasks = [
+                # --- POPRAWKA ---
+                # Poprawne przekazywanie close_price z joba
                 log_initial_trade_result(job["trade"], job["result"], job["close_price"])
                 for job in immediate_finalization_jobs
             ]
+            # ----------------
             tasks.append(_handle_manage_open_trades(klines_data_for_handlers, all_open_trades))
             tasks.append(_handle_post_mortem_analysis_optimized(session, klines_data_for_handlers, all_analyzed_trades))
             
