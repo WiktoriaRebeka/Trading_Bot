@@ -130,29 +130,42 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
         symbol = setup_doc.id
         try:
             setup = SetupData.model_validate(setup_doc.to_dict())
-            if setup.is_position_open_on_this_setup: continue
+            if setup.is_position_open_on_this_setup:
+                continue
             
             latest_kline = klines_data.get(symbol)
-            if not latest_kline: continue
+            if not latest_kline:
+                continue
 
             direction = setup.alert_data.direction
             entry_level = setup.alert_data.entry
             sl_price = setup.alert_data.sl
             tp_price = setup.alert_data.tp
 
+            # --- NOWA, POPRAWIONA LOGIKA RESETU ---
             if setup.is_reset_needed_after_loss:
-                if (direction == 'LONG' and latest_kline.high > entry_level) or \
-                   (direction == 'SHORT' and latest_kline.low < entry_level):
+                reset_condition_met = False
+                if direction == 'LONG' and latest_kline.high > entry_level:
+                    reset_condition_met = True
+                elif direction == 'SHORT' and latest_kline.low < entry_level:
+                    reset_condition_met = True
+                
+                if reset_condition_met:
+                    logger.info(f"[{symbol}] Warunek resetu ceny spełniony. Setup gotowy do nowego wejścia od następnego cyklu.")
                     state_manager.update_setup_after_price_reset(symbol)
+                
+                # Niezależnie od tego, czy warunek został spełniony,
+                # jeśli flaga 'is_reset_needed_after_loss' była True,
+                # kończymy przetwarzanie tego setupu w tym cyklu.
+                # To zapobiega wejściu na tej samej świecy, która resetuje.
                 continue
+            # -----------------------------------------
 
             entry_triggered = (direction == 'LONG' and latest_kline.low <= entry_level) or \
                               (direction == 'SHORT' and latest_kline.high >= entry_level)
 
             if entry_triggered:
                 closed_result, close_price = None, None
-                # --- POPRAWKA ---
-                # Poprawne przypisanie wartości do close_price razem z closed_result
                 if direction == 'LONG':
                     if latest_kline.low <= sl_price:
                         closed_result, close_price = "LOSE", sl_price
@@ -163,7 +176,6 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
                         closed_result, close_price = "LOSE", sl_price
                     elif latest_kline.low <= tp_price:
                         closed_result, close_price = "WIN", tp_price
-                # ----------------
 
                 ob_type = "Fresh OB" if setup.entry_attempts == 0 else "Used OB"
                 trade_id = str(uuid.uuid4())
@@ -177,14 +189,11 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
                         opened_at_ms=latest_kline.timestamp, opened_at_iso=entry_timestamp.isoformat(),
                         alert_data_snapshot=setup.alert_data.model_dump(by_alias=True)
                     )
-                    # --- POPRAWKA ---
-                    # Dodanie close_price do słownika
                     trades_to_finalize_immediately.append({
                         "trade": fake_trade, 
                         "result": closed_result, 
                         "close_price": close_price
                     })
-                    # ----------------
                     state_manager.update_setup_after_trade_close(symbol, is_loss=(closed_result == "LOSE"))
                     state_manager.update_setup_entry_attempt(symbol)
                 else:
@@ -194,8 +203,10 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
                         entry_price=entry_level, sl_price=sl_price, tp_price=tp_price,
                         alert_data=setup.alert_data
                     )
-        except ValidationError as e: logger.error(f"[{symbol}] Błąd walidacji danych setupu: {e}")
-        except Exception as e: logger.error(f"[{symbol}] Błąd podczas sprawdzania wejścia: {e}", exc_info=True)
+        except ValidationError as e:
+            logger.error(f"[{symbol}] Błąd walidacji danych setupu: {e}")
+        except Exception as e:
+            logger.error(f"[{symbol}] Błąd podczas sprawdzania wejścia: {e}", exc_info=True)
     
     return trades_to_finalize_immediately
 
