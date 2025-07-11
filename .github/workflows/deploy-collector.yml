@@ -34,7 +34,6 @@ jobs:
           pip install -r bot_service/requirements.txt
           pip install -r collector_service/requirements.txt
 
-      # --- POPRAWIONY KROK URUCHAMIANIA TESTÓW ---
       - name: Run tests with pytest
         run: |
           export PYTHONPATH=.
@@ -48,9 +47,11 @@ jobs:
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v1
 
+      # --- POPRAWIONY KROK ---
       - name: Build and push image via Cloud Build
         run: |-
-          gcloud builds submit . --config=cloudbuild-collector.yaml
+          gcloud builds submit . --config=cloudbuild-collector.yaml \
+            --service-account=service-785819958951@gcp-sa-cloudbuild.iam.gserviceaccount.com
 
       - name: Deploy to Cloud Run
         run: |-
@@ -60,4 +61,3 @@ jobs:
             --platform managed \
             --allow-unauthenticated \
             --service-account trading-bot-463318@appspot.gserviceaccount.com
-
