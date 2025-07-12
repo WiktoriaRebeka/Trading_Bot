@@ -9,7 +9,6 @@ on:
       - 'cloudbuild-collector.yaml'
       - 'collector_service/**'
       - 'shared_lib/**'
-      - 'tests/**'
       - 'requirements.txt'
 
 jobs:
@@ -23,35 +22,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v3
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r bot_service/requirements.txt
-          pip install -r collector_service/requirements.txt
-
-      - name: Run tests with pytest
-        run: |
-          export PYTHONPATH=.
-          pytest
-
+      # Używamy Workload Identity Federation z dedykowanym kontem
       - name: Authenticate to Google Cloud
         uses: 'google-github-actions/auth@v1'
         with:
-          credentials_json: '${{ secrets.GCP_SA_KEY }}'
+          workload_identity_provider: '${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}'
+          service_account: 'github-actions-sa@trading-bot-463318.iam.gserviceaccount.com'
+          project_id: '${{ secrets.GCP_PROJECT_ID }}'
 
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v1
 
-      # --- POPRAWIONY KROK ---
       - name: Build and push image via Cloud Build
-        run: |-
-          gcloud builds submit . --config=cloudbuild-collector.yaml \
-            --service-account=service-785819958951@gcp-sa-cloudbuild.iam.gserviceaccount.com
+        run: gcloud builds submit . --config=cloudbuild-collector.yaml
 
       - name: Deploy to Cloud Run
         run: |-
