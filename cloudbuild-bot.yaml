@@ -8,3 +8,8 @@ steps:
   ]
 images:
 - 'europe-central2-docker.pkg.dev/${PROJECT_ID}/trading-bot-image/trading-bot-service:latest'
+
+# --- NOWA, KLUCZOWA SEKCJA ---
+serviceAccount: 'projects/trading-bot-463318/serviceAccounts/service-785819958951@gcp-sa-cloudbuild.iam.gserviceaccount.com'
+options:
+  logging: CLOUD_LOGGING_ONLY
