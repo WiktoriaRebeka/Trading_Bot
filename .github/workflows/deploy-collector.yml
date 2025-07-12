@@ -29,13 +29,9 @@ jobs:
 
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v1
-        with:
-          project_id: '${{ secrets.GCP_PROJECT_ID }}'
 
       - name: Build and push image via Cloud Build
-        run: |-
-          gcloud builds submit . --config=cloudbuild-collector.yaml \
-            --impersonate-service-account=service-785819958951@gcp-sa-cloudbuild.iam.gserviceaccount.com
+        run: gcloud builds submit . --config=cloudbuild-collector.yaml
 
       - name: Deploy to Cloud Run
         run: |-
