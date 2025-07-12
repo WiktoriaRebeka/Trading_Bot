@@ -43,21 +43,56 @@ def update_setup_after_price_reset(symbol: str):
 def get_all_open_trades() -> Iterable[DocumentSnapshot]:
     return _get_db().collection(constants.TRADE_COLLECTION).stream()
 
+# Lokalizacja: bot_service/state_manager.py
+
 def create_open_trade(trade_id: str, symbol: str, direction: str, ob_type: str, entry_price: float, sl_price: float, tp_price: float, alert_data: AlertData):
     db = _get_db()
-    trade_doc_ref = db.collection(constants.TRADE_COLLECTION).document(trade_id)
-    timestamp_utc = datetime.now(timezone.utc)
-    new_trade = OpenTradeData(
-        trade_id=trade_id, symbol=symbol, direction=direction.upper(), ob_type=ob_type,
-        entry_price=entry_price, sl_price=sl_price, tp_price=tp_price,
-        opened_at_ms=int(timestamp_utc.timestamp() * 1000),
-        opened_at_iso=timestamp_utc.isoformat(),
-        alert_data_snapshot=alert_data.model_dump(by_alias=True)
-    )
-    trade_doc_ref.set(new_trade.model_dump())
-    logger.info(f"[{symbol}][{trade_id}] Utworzono dokument dla otwartej pozycji w '{constants.TRADE_COLLECTION}'.")
-    update_setup_after_trade_open(symbol)
-    update_setup_entry_attempt(symbol)
+    
+    # Używamy transakcji, aby zapewnić atomowość operacji
+    transaction = db.transaction()
+    
+    @firestore.transactional
+    def _create_trade_in_transaction(transaction, trade_id, symbol, direction, ob_type, entry_price, sl_price, tp_price, alert_data):
+        # Referencje do dokumentów
+        trade_doc_ref = db.collection(constants.TRADE_COLLECTION).document(trade_id)
+        setup_doc_ref = db.collection(constants.SETUP_COLLECTION).document(symbol)
+
+        # Sprawdzenie, czy setup wciąż istnieje i nie ma otwartej pozycji
+        # To dodatkowe zabezpieczenie przed race condition
+        setup_snapshot = setup_doc_ref.get(transaction=transaction)
+        if not setup_snapshot.exists:
+            raise RuntimeError(f"Setup dla symbolu {symbol} już nie istnieje. Anulowano tworzenie pozycji.")
+        
+        if setup_snapshot.to_dict().get("is_position_open_on_this_setup", False):
+            raise RuntimeError(f"Pozycja dla setupu {symbol} jest już oznaczona jako otwarta. Anulowano tworzenie zduplikowanej pozycji.")
+
+        # 1. Utwórz nową pozycję
+        timestamp_utc = datetime.now(timezone.utc)
+        new_trade = OpenTradeData(
+            trade_id=trade_id, symbol=symbol, direction=direction.upper(), ob_type=ob_type,
+            entry_price=entry_price, sl_price=sl_price, tp_price=tp_price,
+            opened_at_ms=int(timestamp_utc.timestamp() * 1000),
+            opened_at_iso=timestamp_utc.isoformat(),
+            alert_data_snapshot=alert_data.model_dump(by_alias=True)
+        )
+        transaction.set(trade_doc_ref, new_trade.model_dump())
+
+        # 2. Zaktualizuj setup
+        update_data = {
+            "is_position_open_on_this_setup": True,
+            "entry_attempts": firestore.Increment(1)
+        }
+        transaction.update(setup_doc_ref, update_data)
+        
+        logger.info(f"[{symbol}][{trade_id}] Transakcja przygotowana: utworzenie pozycji i aktualizacja setupu.")
+
+    try:
+        _create_trade_in_transaction(transaction, trade_id, symbol, direction, ob_type, entry_price, sl_price, tp_price, alert_data)
+        logger.info(f"[{symbol}][{trade_id}] SUKCES. Transakcja atomowa zakończona pomyślnie.")
+    except Exception as e:
+        logger.error(f"[{symbol}][{trade_id}] BŁĄD TRANSAKCJI. Nie udało się atomowo utworzyć pozycji: {e}", exc_info=True)
+        # Rzucamy wyjątek dalej, aby logika wywołująca mogła zareagować
+        raise
 
 def remove_open_trade(trade_id: str):
     _get_db().collection(constants.TRADE_COLLECTION).document(trade_id).delete()

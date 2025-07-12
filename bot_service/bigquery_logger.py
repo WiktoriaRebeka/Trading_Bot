@@ -12,8 +12,6 @@ logger = logging.getLogger(__name__)
 bigquery_client: Optional[bigquery.Client] = None
 TABLE_REF: Optional[str] = None
 
-# --- KLUCZOWA POPRAWKA: Przywrócenie definicji schematu ---
-# Ta definicja jest niezbędna dla funkcji _validate_and_sanitize_data
 EXPECTED_SCHEMA = {
     "trade_id": str,
     "timestamp_entry": str,

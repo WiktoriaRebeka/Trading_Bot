@@ -1,15 +1,24 @@
+# Lokalizacja: /cloudbuild-collector.yaml
 steps:
 - name: 'gcr.io/cloud-builders/docker'
-  args: [
-    'build',
-    '-t', 'europe-central2-docker.pkg.dev/${PROJECT_ID}/trading-bot-image/data-collector-service:latest',
-    '--file', 'collector_service/Dockerfile',
-    '.'
-  ]
+  id: 'Build Image'
+  args: ['build', '-t', 'europe-central2-docker.pkg.dev/$PROJECT_ID/trading-bot-image/data-collector-service:$SHORT_SHA', '--file', 'collector_service/Dockerfile', '.']
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  id: 'Deploy to Cloud Run'
+  entrypoint: gcloud
+  args:
+    - 'run'
+    - 'deploy'
+    - 'data-collector-service'
+    - '--image'
+    - 'europe-central2-docker.pkg.dev/$PROJECT_ID/trading-bot-image/data-collector-service:$SHORT_SHA'
+    - '--region'
+    - 'europe-central2'
+    - '--platform'
+    - 'managed'
+    - '--service-account'
+    - 'trading-bot-463318@appspot.gserviceaccount.com'
 images:
-- 'europe-central2-docker.pkg.dev/${PROJECT_ID}/trading-bot-image/data-collector-service:latest'
-
-# --- NOWA, KLUCZOWA SEKCJA ---
-serviceAccount: 'projects/trading-bot-463318/serviceAccounts/service-785819958951@gcp-sa-cloudbuild.iam.gserviceaccount.com'
+- 'europe-central2-docker.pkg.dev/$PROJECT_ID/trading-bot-image/data-collector-service:$SHORT_SHA'
 options:
   logging: CLOUD_LOGGING_ONLY
