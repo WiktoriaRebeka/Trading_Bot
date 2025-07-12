@@ -2,13 +2,14 @@
 import logging
 import uuid
 from typing import Dict, Any, List, Optional
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from google.cloud.firestore_v1.document import DocumentSnapshot
 from pydantic import ValidationError
 import asyncio
 import aiohttp
 
-from shared_lib.firebase_client import get_db
+# --- POPRAWKA: Połączono zduplikowane importy w jedną linię ---
+from shared_lib.firebase_client import get_db, get_symbols_to_watch_from_config
 from bot_service import state_manager
 from bot_service.bigquery_logger import log_trade_to_bigquery, update_analyzed_trade_in_bigquery
 from shared_lib import constants
@@ -16,30 +17,19 @@ from shared_lib.models import SetupData, OpenTradeData, AnalyzedTradeData, Alert
 
 logger = logging.getLogger(__name__)
 
-# --- ULEPSZONE FUNKCJE ---
-
-# Lokalizacja: bot_service/bot_logic.py
-
-def _calculate_rr_analytics(entry_price: float, sl_price: float, extreme_price: float) -> Dict[str, Any]:
+def _calculate_rr_analytics(entry_price: float, sl_price: float, extreme_price: float, direction: str) -> Dict[str, Any]:
     """Kalkuluje osiągnięte R:R i flagi dla poszczególnych poziomów TP."""
     risk_diff = abs(entry_price - sl_price)
     if risk_diff == 0:
         logger.warning(f"Różnica ryzyka wynosi zero (entry={entry_price}, sl={sl_price}). R:R ustawione na 0.")
         return {"rr_achieved": 0.0}
 
-    # --- KLUCZOWA POPRAWKA LOGICZNA ---
-    # Sprawdzamy, czy kierunek ruchu ceny jest zgodny z kierunkiem transakcji.
-    # Jeśli nie, zysk wynosi 0.
-    is_long = sl_price < entry_price
+    profit_diff = 0.0
+    if direction.upper() == 'LONG' and extreme_price > entry_price:
+        profit_diff = extreme_price - entry_price
+    elif direction.upper() == 'SHORT' and extreme_price < entry_price:
+        profit_diff = entry_price - extreme_price
     
-    if is_long and extreme_price < entry_price:
-        profit_diff = 0.0 # Cena poszła w dół dla longa
-    elif not is_long and extreme_price > entry_price:
-        profit_diff = 0.0 # Cena poszła w górę dla shorta
-    else:
-        profit_diff = abs(extreme_price - entry_price)
-    # ------------------------------------
-
     rr_achieved = round(profit_diff / risk_diff, 4)
     
     analytics = {"rr_achieved": rr_achieved}
@@ -50,6 +40,8 @@ def _calculate_rr_analytics(entry_price: float, sl_price: float, extreme_price: 
     for flag, threshold in rr_thresholds.items():
         analytics[flag] = rr_achieved >= threshold
     return analytics
+
+
 def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]]):
     """Przetwarza nowe alerty i zapisuje je jako aktywne setupy w Firestore."""
     if not newly_fetched_alerts:
@@ -103,7 +95,7 @@ async def log_initial_trade_result(trade: OpenTradeData, closed_result: str, clo
     """Loguje początkowy wynik transakcji do BigQuery."""
     logger.info(f"--- [FINALIZACJA] --- [{trade.symbol}] | ID: {trade.trade_id} | Wynik: {closed_result}")
     
-    analytics_data = _calculate_rr_analytics(trade.entry_price, trade.sl_price, close_price)
+    analytics_data = _calculate_rr_analytics(trade.entry_price, trade.sl_price, close_price, trade.direction)
     
     bq_data = {
         "trade_id": trade.trade_id,
@@ -271,7 +263,7 @@ async def _handle_post_mortem_analysis_optimized(session: aiohttp.ClientSession,
                 logger.info(f"[{trade_id}] Analiza 'ducha' zakończona ({reason}). Finalny UPDATE i usunięcie.")
                 # Ostatnia aktualizacja BQ z ceną, która zakończyła analizę
                 final_extreme_price = latest_kline.high if analysis_trade.direction == 'LONG' else latest_kline.low
-                updates_for_bq = _calculate_rr_analytics(analysis_trade.entry_price, analysis_trade.original_sl, final_extreme_price)
+                updates_for_bq = _calculate_rr_analytics(analysis_trade.entry_price, analysis_trade.original_sl, final_extreme_price, analysis_trade.direction)
                 update_analyzed_trade_in_bigquery(trade_id, updates_for_bq)
                 state_manager.remove_analyzed_trade(trade_id)
                 continue
@@ -292,7 +284,7 @@ async def _handle_post_mortem_analysis_optimized(session: aiohttp.ClientSession,
             # 4. Aktualizacja stanu, jeśli jest postęp
             if has_new_extreme:
                 logger.info(f"[{trade_id}] 'Duch' osiągnął nowy potencjał. Cena: {new_extreme}. Aktualizuję BQ.")
-                updates_for_bq = _calculate_rr_analytics(analysis_trade.entry_price, analysis_trade.original_sl, new_extreme)
+                updates_for_bq = _calculate_rr_analytics(analysis_trade.entry_price, analysis_trade.original_sl, new_extreme, analysis_trade.direction)
                 
                 # Filtrujemy flagi, które są nowe
                 newly_achieved_tps = {k for k, v in updates_for_bq.items() if v and k.startswith('rr_')}
@@ -316,7 +308,7 @@ def run_trading_logic():
     logger.info("Rozpoczynam główną pętlę logiki tradingowej.")
     
     # Krok 1: Zbierz wszystkie symbole do monitorowania
-    symbols_to_watch = set(state_manager.get_symbols_to_watch_from_config())
+    symbols_to_watch = set(get_symbols_to_watch_from_config())
     
     all_open_trades_docs = list(state_manager.get_all_open_trades())
     all_analyzed_trades_docs = list(state_manager.get_all_analyzed_trades())

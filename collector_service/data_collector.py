@@ -1,12 +1,12 @@
-# trading_bot/collector_service/data_collector.py
+# Lokalizacja: collector_service/data_collector.py
 
 import logging
 import asyncio
 import aiohttp
 from typing import List, Dict, Any, Optional
 
-from shared_lib import firebase_client
 from shared_lib import constants
+from shared_lib.firebase_client import get_db, get_symbols_to_watch_from_config
 
 logger = logging.getLogger(__name__)
 
@@ -42,29 +42,12 @@ async def get_latest_klines_for_all_symbols(symbols_to_watch: List[str]) -> Dict
     logger.info(f"Pomyślnie pobrano dane kline dla {len(klines_data)}/{len(symbols_to_watch)} symboli.")
     return klines_data
 
-def get_symbols_to_watch_from_config() -> List[str]:
-    logger.info("Pobieranie konfiguracji symboli z Firestore.")
-    try:
-        db = firebase_client.get_db()
-        doc_ref = db.collection(constants.BOT_CONFIG_COLLECTION).document(constants.SYMBOLS_CONFIG_DOC_ID)
-        doc = doc_ref.get()
-        if doc.exists:
-            symbols = doc.to_dict().get("symbols_to_watch", [])
-            if isinstance(symbols, list) and symbols:
-                logger.info(f"Znaleziono {len(symbols)} symboli w konfiguracji.")
-                return symbols
-        logger.error(f"Dokument konfiguracyjny '{constants.SYMBOLS_CONFIG_DOC_ID}' jest pusty, nie istnieje lub nie zawiera listy 'symbols_to_watch'.")
-        return []
-    except Exception as e:
-        logger.error(f"Krytyczny błąd podczas odczytu konfiguracji symboli: {e}", exc_info=True)
-        raise
-
 def save_klines_to_firestore(klines_data: Dict[str, Dict[str, Any]]):
     if not klines_data:
         logger.info("Brak nowych danych kline do zapisania.")
         return
     logger.info(f"Zapisywanie {len(klines_data)} rekordów kline do Firestore.")
-    db = firebase_client.get_db()
+    db = get_db()
     batch = db.batch()
     for symbol, data in klines_data.items():
         doc_ref = db.collection(constants.LATEST_KLINES_COLLECTION).document(symbol)

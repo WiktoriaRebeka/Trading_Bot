@@ -1,2 +1,2 @@
-# Lokalizacja: gcp-webhook/requirements.txt
+
 google-cloud-firestore

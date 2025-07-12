@@ -1,5 +1,4 @@
 # Lokalizacja: bot_service/fetch_from_firestore.py
-
 from google.cloud import firestore
 from datetime import datetime, timezone, timedelta
 import logging
@@ -62,3 +61,4 @@ def fetch_new_alerts_since(last_ts_dt: datetime):
     except Exception as e:
         logger.error(f"[FETCHER_FIRESTORE_ERROR] Błąd podczas pobierania alertów: {e}", exc_info=True)
     return new_alerts_list, new_max_ts
+
