@@ -1,10 +1,18 @@
 # Lokalizacja: /cloudbuild-bot.yaml
 steps:
+# Krok 1: Zbuduj obraz Docker
 - name: 'gcr.io/cloud-builders/docker'
-  id: 'Build Bot Service Image'
+  id: 'Build Image'
   args: ['build', '-t', 'europe-central2-docker.pkg.dev/$PROJECT_ID/trading-bot-image/trading-bot-service:$SHORT_SHA', '--file', 'bot_service/Dockerfile', '.']
+
+# Krok 2: Wypchnij obraz do Artifact Registry (KLUCZOWA, DODANA LINIA)
+- name: 'gcr.io/cloud-builders/docker'
+  id: 'Push Image'
+  args: ['push', 'europe-central2-docker.pkg.dev/$PROJECT_ID/trading-bot-image/trading-bot-service:$SHORT_SHA']
+
+# Krok 3: Wdróż obraz, który już jest w Artifact Registry
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-  id: 'Deploy Bot Service to Cloud Run'
+  id: 'Deploy to Cloud Run'
   entrypoint: gcloud
   args:
     - 'run'
@@ -22,7 +30,6 @@ steps:
     - 'app-connector-warsaw'
     - '--vpc-egress'
     - 'all'
+# Sekcja 'images' nie jest już krytyczna, ale zostawiamy ją jako dobrą praktykę
 images:
 - 'europe-central2-docker.pkg.dev/$PROJECT_ID/trading-bot-image/trading-bot-service:$SHORT_SHA'
-options:
-  logging: CLOUD_LOGGING_ONLY
