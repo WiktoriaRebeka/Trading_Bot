@@ -22,20 +22,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v3
 
-      # --- NOWA, UPROSZCZONA AUTENTYKACJA ---
       - name: Authenticate to Google Cloud
         uses: 'google-github-actions/auth@v1'
         with:
           workload_identity_provider: '${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}'
-          # Nie podajemy 'service_account', bo uprawnienia są nadane bezpośrednio
+          service_account: 'github-actions-sa@trading-bot-463318.iam.gserviceaccount.com'
 
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v1
         with:
-          project_id: '${{ secrets.GCP_PROJECT_ID }}' # Jawne ustawienie projektu
+          project_id: '${{ secrets.GCP_PROJECT_ID }}'
 
       - name: Build and push image via Cloud Build
-        run: gcloud builds submit . --config=cloudbuild-bot.yaml
+        run: |-
+          gcloud builds submit . --config=cloudbuild-bot.yaml \
+            --impersonate-service-account=service-785819958951@gcp-sa-cloudbuild.iam.gserviceaccount.com
 
       - name: Deploy to Cloud Run
         run: |-
