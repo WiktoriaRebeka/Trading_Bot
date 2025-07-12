@@ -33,3 +33,6 @@ steps:
 # Sekcja 'images' nie jest już krytyczna, ale zostawiamy ją jako dobrą praktykę
 images:
 - 'europe-central2-docker.pkg.dev/$PROJECT_ID/trading-bot-image/trading-bot-service:$SHORT_SHA'
+
+options:
+  logging: CLOUD_LOGGING_ONLY

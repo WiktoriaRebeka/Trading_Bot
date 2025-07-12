@@ -28,3 +28,6 @@ steps:
     - 'trading-bot-463318@appspot.gserviceaccount.com'
 images:
 - 'europe-central2-docker.pkg.dev/$PROJECT_ID/trading-bot-image/data-collector-service:$SHORT_SHA'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
