@@ -1,0 +1,22 @@
+# Lokalizacja: /cloudbuild.yaml
+steps:
+- name: 'gcr.io/cloud-builders/docker'
+  id: 'Build Image'
+  args: ['build', '-t', 'europe-central2-docker.pkg.dev/$PROJECT_ID/trading-bot-image/${_SERVICE_NAME}:$SHORT_SHA', '--file', '${_DOCKERFILE_PATH}', '.']
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  id: 'Deploy to Cloud Run'
+  entrypoint: gcloud
+  args:
+    - 'run'
+    - 'deploy'
+    - '${_SERVICE_NAME}'
+    - '--image'
+    - 'europe-central2-docker.pkg.dev/$PROJECT_ID/trading-bot-image/${_SERVICE_NAME}:$SHORT_SHA'
+    - '--region'
+    - 'europe-central2'
+    - '--platform'
+    - 'managed'
+    - '--service-account'
+    - 'trading-bot-463318@appspot.gserviceaccount.com'
+images:
+- 'europe-central2-docker.pkg.dev/$PROJECT_ID/trading-bot-image/${_SERVICE_NAME}:$SHORT_SHA'
