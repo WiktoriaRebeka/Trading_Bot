@@ -22,16 +22,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v3
 
-      # Używamy Workload Identity Federation z dedykowanym kontem
+      # --- NOWA, UPROSZCZONA AUTENTYKACJA ---
       - name: Authenticate to Google Cloud
         uses: 'google-github-actions/auth@v1'
         with:
           workload_identity_provider: '${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}'
-          service_account: 'github-actions-sa@trading-bot-463318.iam.gserviceaccount.com'
-          project_id: '${{ secrets.GCP_PROJECT_ID }}'
+          # Nie podajemy 'service_account', bo uprawnienia są nadane bezpośrednio
 
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v1
+        with:
+          project_id: '${{ secrets.GCP_PROJECT_ID }}' # Jawne ustawienie projektu
 
       - name: Build and push image via Cloud Build
         run: gcloud builds submit . --config=cloudbuild-collector.yaml
