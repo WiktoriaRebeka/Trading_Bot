@@ -211,9 +211,9 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
     return trades_to_finalize_immediately
 
 
-async def _handle_manage_open_trades(klines_data: Dict[str, Kline], open_trades: List[DocumentSnapshot]):
-    """Monitoruje otwarte pozycje i zamyka je w razie potrzeby."""
-    if not open_trades: return
+async def _handle_manage_open_trades(klines_data: Dict[str, Kline], open_trades: List[DocumentSnapshot]) -> List:
+    """Monitoruje otwarte pozycje i zwraca listę zadań do finalizacji."""
+    if not open_trades: return []
     logger.info(f"Monitoruję {len(open_trades)} otwartych pozycji.")
     tasks_to_run = []
 
@@ -240,7 +240,7 @@ async def _handle_manage_open_trades(klines_data: Dict[str, Kline], open_trades:
         except ValidationError as e: logger.error(f"[{trade_id}] Błąd walidacji danych otwartej pozycji: {e}")
         except Exception as e: logger.error(f"[{trade_id}] Błąd podczas monitorowania otwartej pozycji: {e}", exc_info=True)
     
-    if tasks_to_run: await asyncio.gather(*tasks_to_run)
+    return tasks_to_run
 
 async def _handle_post_mortem_analysis_optimized(session: aiohttp.ClientSession, klines_data: Dict[str, Kline], analyzed_trades: List[DocumentSnapshot]):
     """
@@ -315,11 +315,15 @@ async def _handle_post_mortem_analysis_optimized(session: aiohttp.ClientSession,
 def run_trading_logic():
     logger.info("Rozpoczynam główną pętlę logiki tradingowej.")
     
+    # Krok 1: Zbierz wszystkie symbole do monitorowania
     symbols_to_watch = set(state_manager.get_symbols_to_watch_from_config())
     
-    for doc in state_manager.get_all_open_trades():
+    all_open_trades_docs = list(state_manager.get_all_open_trades())
+    all_analyzed_trades_docs = list(state_manager.get_all_analyzed_trades())
+    
+    for doc in all_open_trades_docs:
         if data := doc.to_dict(): symbols_to_watch.add(data.get('symbol'))
-    for doc in state_manager.get_all_analyzed_trades():
+    for doc in all_analyzed_trades_docs:
         if data := doc.to_dict(): symbols_to_watch.add(data.get('symbol'))
 
     valid_symbols_to_watch = {s for s in symbols_to_watch if isinstance(s, str) and s}
@@ -327,6 +331,7 @@ def run_trading_logic():
         logger.info("Brak poprawnych symboli do monitorowania. Kończę cykl.")
         return
 
+    # Krok 2: Pobierz najnowsze dane rynkowe z cache'u
     latest_klines_cache = state_manager.get_latest_klines_from_cache(list(valid_symbols_to_watch))
     if not latest_klines_cache:
         logger.warning("Nie udało się pobrać danych z cache'u klines. Nie można kontynuować.")
@@ -341,26 +346,36 @@ def run_trading_logic():
         except (KeyError, TypeError) as e:
             logger.warning(f"[{symbol}] Brakujące lub nieprawidłowe dane w cache'u klines: {e}")
 
-    all_setups = list(state_manager.get_all_active_setups())
-    all_open_trades = list(state_manager.get_all_open_trades())
-    all_analyzed_trades = list(state_manager.get_all_analyzed_trades())
+    # Krok 3: Pobierz wszystkie aktywne setupy
+    all_setups_docs = list(state_manager.get_all_active_setups())
 
+    # Krok 4: Uruchom główną pętlę asynchroniczną
     async def async_main():
         async with aiohttp.ClientSession() as session:
-            immediate_finalization_jobs = _handle_setups(klines_data_for_handlers, all_setups)
             
-            tasks = [
-                # --- POPRAWKA ---
-                # Poprawne przekazywanie close_price z joba
-                log_initial_trade_result(job["trade"], job["result"], job["close_price"])
-                for job in immediate_finalization_jobs
-            ]
-            # ----------------
-            tasks.append(_handle_manage_open_trades(klines_data_for_handlers, all_open_trades))
-            tasks.append(_handle_post_mortem_analysis_optimized(session, klines_data_for_handlers, all_analyzed_trades))
+            # Zadanie 1: Sprawdź nowe wejścia (w tym te zamykane w 1 min)
+            immediate_finalization_jobs = _handle_setups(klines_data_for_handlers, all_setups_docs)
             
-            if tasks:
-                results = await asyncio.gather(*tasks, return_exceptions=True)
+            # Zadanie 2: Zarządzaj pozycjami, które już są otwarte
+            closing_tasks = await _handle_manage_open_trades(klines_data_for_handlers, all_open_trades_docs)
+            
+            # Zadanie 3: Przeanalizuj "duchy"
+            analysis_tasks = await _handle_post_mortem_analysis_optimized(session, klines_data_for_handlers, all_analyzed_trades_docs)
+
+            # Scalamy wszystkie zadania do wykonania
+            all_tasks = []
+            if immediate_finalization_jobs:
+                for job in immediate_finalization_jobs:
+                    all_tasks.append(log_initial_trade_result(job["trade"], job["result"], job["close_price"]))
+            
+            if closing_tasks:
+                all_tasks.extend(closing_tasks)
+            
+            if analysis_tasks:
+                all_tasks.extend(analysis_tasks)
+
+            if all_tasks:
+                results = await asyncio.gather(*all_tasks, return_exceptions=True)
                 for i, result in enumerate(results):
                     if isinstance(result, Exception):
                         logger.error(f"Wystąpił błąd podczas zadania asynchronicznego nr {i}: {result}", exc_info=True)
