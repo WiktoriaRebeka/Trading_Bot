@@ -212,8 +212,11 @@ async def _handle_manage_open_trades(klines_data: Dict[str, Kline], open_trades:
     return tasks_to_run
 
 async def _handle_post_mortem_analysis_optimized(session: aiohttp.ClientSession, klines_data: Dict[str, Kline], analyzed_trades: List[DocumentSnapshot]):
-    """ZOPTYMALIZOWANA analiza post-mortem z DODATKOWYM LOGOWANIEM."""
+    """
+    ZOPTYMALIZOWANA analiza post-mortem z BARDZO SZCZEGÓŁOWYM LOGOWANIEM.
+    """
     if not analyzed_trades:
+        # Ten log jest ważny, żeby wiedzieć, czy funkcja w ogóle widzi duchy
         logger.info("[ANALIZA DUCHA] Brak 'duchów' do analizy w tym cyklu.")
         return
         
@@ -230,8 +233,15 @@ async def _handle_post_mortem_analysis_optimized(session: aiohttp.ClientSession,
                 logger.warning(f"[ANALIZA DUCHA][{trade_id}] Brak danych kline w cache'u dla symbolu {symbol}. Pomijam cykl.")
                 continue
 
-            logger.info(f"[ANALIZA DUCHA][{trade_id}] Przetwarzam. Ostatnia znana cena ekstremalna: {analysis_trade.last_known_extreme_price}")
+            # --- KROK 1: Logowanie stanu początkowego ---
+            logger.info(
+                f"[ANALIZA DUCHA][{trade_id}] Przetwarzam. "
+                f"Kierunek: {analysis_trade.direction}, "
+                f"Ostatnia znana cena ekstremalna: {analysis_trade.last_known_extreme_price}, "
+                f"SL: {analysis_trade.original_sl}, TP5: {analysis_trade.original_tp_5_0}"
+            )
 
+            # --- KROK 2: Sprawdzenie warunków zakończenia analizy ---
             is_analysis_finished, reason = False, ""
             if analysis_trade.direction == 'LONG':
                 if latest_kline.low <= analysis_trade.original_sl: is_analysis_finished, reason = True, "osiągnięto SL"
@@ -244,17 +254,20 @@ async def _handle_post_mortem_analysis_optimized(session: aiohttp.ClientSession,
                 logger.info(f"[ANALIZA DUCHA][{trade_id}] Warunek końca spełniony ({reason}). Finalny UPDATE i usunięcie.")
                 final_extreme_price = latest_kline.high if analysis_trade.direction == 'LONG' else latest_kline.low
                 updates_for_bq = _calculate_rr_analytics(analysis_trade.entry_price, analysis_trade.original_sl, final_extreme_price, analysis_trade.direction)
+                logger.info(f"[ANALIZA DUCHA][{trade_id}] Ostateczne dane do BQ: {updates_for_bq}")
                 update_analyzed_trade_in_bigquery(trade_id, updates_for_bq)
                 state_manager.remove_analyzed_trade(trade_id)
                 continue
 
+            # --- KROK 3: Inkrementalne pobieranie nowych świec ---
             new_klines = await get_historical_klines(session, symbol, analysis_trade.last_analysis_timestamp_ms + 1)
             if not new_klines:
-                logger.info(f"[ANALIZA DUCHA][{trade_id}] Brak nowych świec od ostatniej analizy.")
+                logger.info(f"[ANALIZA DUCHA][{trade_id}] Brak nowych świec od ostatniej analizy (timestamp: {analysis_trade.last_analysis_timestamp_ms}).")
                 continue
 
-            logger.info(f"[ANALIZA DUCHA][{trade_id}] Pobrane nowe świece: {len(new_klines)}")
+            logger.info(f"[ANALIZA DUCHA][{trade_id}] Pobrane nowe świece: {len(new_klines)}. Najnowszy timestamp: {new_klines[-1].timestamp}")
 
+            # --- KROK 4: Znalezienie nowej ceny ekstremalnej ---
             current_extreme = analysis_trade.last_known_extreme_price
             if analysis_trade.direction == 'LONG':
                 new_extreme = max(k.high for k in new_klines)
@@ -263,29 +276,35 @@ async def _handle_post_mortem_analysis_optimized(session: aiohttp.ClientSession,
                 new_extreme = min(k.low for k in new_klines)
                 has_new_extreme = new_extreme < current_extreme
 
+            # --- KROK 5: Aktualizacja stanu, jeśli jest postęp ---
             if has_new_extreme:
-                logger.info(f"[ANALIZA DUCHA][{trade_id}] Nowy potencjał! Cena: {new_extreme}. Aktualizuję BQ.")
+                logger.info(f"[ANALIZA DUCHA][{trade_id}] Nowy potencjał! Cena: {new_extreme} (poprzednia: {current_extreme}). Aktualizuję BQ.")
                 updates_for_bq = _calculate_rr_analytics(analysis_trade.entry_price, analysis_trade.original_sl, new_extreme, analysis_trade.direction)
+                logger.info(f"[ANALIZA DUCHA][{trade_id}] Nowe dane do BQ: {updates_for_bq}")
                 
                 newly_achieved_tps = {k for k, v in updates_for_bq.items() if v and k.startswith('rr_')}
                 already_achieved = set(analysis_trade.achieved_tps)
                 
                 if newly_achieved_tps - already_achieved:
+                    logger.info(f"[ANALIZA DUCHA][{trade_id}] Osiągnięto nowe progi TP: {newly_achieved_tps - already_achieved}. Wysyłam UPDATE do BQ.")
                     update_analyzed_trade_in_bigquery(trade_id, updates_for_bq)
                     state_manager.update_analyzed_trade_state(
                         trade_id, new_extreme, new_klines[-1].timestamp, list(newly_achieved_tps)
                     )
                 else:
+                    logger.info(f"[ANALIZA DUCHA][{trade_id}] Nowe ekstremum, ale bez nowego progu TP. Aktualizuję tylko stan w Firestore.")
                     state_manager.update_analyzed_trade_state(
                         trade_id, new_extreme, new_klines[-1].timestamp, analysis_trade.achieved_tps
                     )
             else:
-                logger.info(f"[ANALIZA DUCHA][{trade_id}] Brak nowego ekstremum. Aktualizuję tylko timestamp.")
+                logger.info(f"[ANALIZA DUCHA][{trade_id}] Brak nowego ekstremum. Aktualizuję tylko timestamp w Firestore.")
                 state_manager.update_analyzed_trade_state(
                     trade_id, current_extreme, new_klines[-1].timestamp, analysis_trade.achieved_tps
                 )
-        except ValidationError as e: logger.error(f"[ANALIZA DUCHA][{trade_id}] Błąd walidacji danych 'ducha', pomijam: {e}")
-        except Exception as e: logger.error(f"[ANALIZA DUCHA][{trade_id}] Błąd podczas analizy post-mortem: {e}", exc_info=True)
+        except ValidationError as e: 
+            logger.error(f"[ANALIZA DUCHA][{trade_id}] Błąd walidacji danych 'ducha', pomijam: {e}")
+        except Exception as e: 
+            logger.error(f"[ANALIZA DUCHA][{trade_id}] Błąd podczas analizy post-mortem: {e}", exc_info=True)
 
 def run_trading_logic():
     logger.info("Rozpoczynam główną pętlę logiki tradingowej.")
@@ -321,7 +340,7 @@ def run_trading_logic():
 
     all_setups_docs = list(state_manager.get_all_active_setups())
 
- 
+
     async def async_main():
         async with aiohttp.ClientSession() as session:
             
