@@ -9,7 +9,6 @@ from pydantic import ValidationError
 import asyncio
 import aiohttp
 
-# --- POPRAWKA: Połączono importy i usunięto duplikaty ---
 from shared_lib.firebase_client import get_db, get_symbols_to_watch_from_config
 from bot_service import state_manager
 from bot_service.bigquery_logger import log_trade_to_bigquery, update_analyzed_trade_in_bigquery
@@ -198,8 +197,8 @@ async def _handle_manage_open_trades(klines_data: Dict[str, Kline], open_trades:
                 if latest_kline.low <= trade.sl_price: closed_result, close_price = "LOSE", trade.sl_price
                 elif latest_kline.high >= trade.tp_price: closed_result, close_price = "WIN", trade.tp_price
             elif trade.direction == 'SHORT':
-                if latest_kline.high >= trade.sl_price: closed_result, close_price = "LOSE", trade.sl_price
-                elif latest_kline.low <= trade.tp_price: closed_result, close_price = "WIN", trade.tp_price
+                if latest_kline.high >= trade.sl_price: closed_result, close_price = "LOSE", sl_price
+                elif latest_kline.low <= trade.tp_price: closed_result, close_price = "WIN", tp_price
             
             if closed_result:
                 tasks_to_run.append(log_initial_trade_result(trade, closed_result, close_price))
@@ -211,56 +210,9 @@ async def _handle_manage_open_trades(klines_data: Dict[str, Kline], open_trades:
     
     return tasks_to_run
 
-# Lokalizacja: bot_service/state_manager.py
-
-def create_analyzed_trade(trade_data: OpenTradeData):
-    """Tworzy 'ducha' dla transakcji WIN do analizy post-mortem z DODATKOWYM LOGOWANIEM."""
-    db = _get_db()
-    trade_id = trade_data.trade_id
-    
-    # --- KROK 1: Sprawdzenie, czy w ogóle mamy co tworzyć ---
-    if not trade_id:
-        logger.error("[CREATE_GHOST] Otrzymano dane transakcji bez trade_id. Nie można utworzyć 'ducha'.")
-        return
-
-    logger.info(f"[CREATE_GHOST][{trade_id}] Rozpoczynam tworzenie 'ducha' dla transakcji WIN.")
-    
-    try:
-        doc_ref = db.collection(constants.ANALYZED_COLLECTION).document(trade_id)
-        
-        # --- KROK 2: Bezpieczne pobieranie wartości ---
-        tp5_value = trade_data.alert_data_snapshot.get('tp_5_0')
-        logger.info(f"[CREATE_GHOST][{trade_id}] Odczytano tp_5_0: {tp5_value}")
-        
-        analysis_data = AnalyzedTradeData(
-            trade_id=trade_id,
-            symbol=trade_data.symbol,
-            direction=trade_data.direction,
-            entry_price=trade_data.entry_price,
-            original_sl=trade_data.sl_price,
-            original_tp_5_0=float(tp5_value) if tp5_value is not None else None,
-            opened_at_ms=trade_data.opened_at_ms,
-            alert_data_snapshot=trade_data.alert_data_snapshot,
-            last_known_extreme_price=trade_data.tp_price,
-            last_analysis_timestamp_ms=int(datetime.now(timezone.utc).timestamp() * 1000),
-            achieved_tps=["rr_1_0_achieved"]
-        )
-        
-        # --- KROK 3: Zapis do Firestore ---
-        logger.info(f"[CREATE_GHOST][{trade_id}] Przygotowano dane 'ducha'. Próbuję zapisać do Firestore.")
-        doc_ref.set(analysis_data.model_dump())
-        logger.info(f"[CREATE_GHOST][{trade_id}] SUKCES! Utworzono 'ducha' w kolekcji '{constants.ANALYZED_COLLECTION}'.")
-
-    except Exception as e:
-        # --- KROK 4: Logowanie ewentualnych błędów ---
-        logger.error(f"[CREATE_GHOST][{trade_id}] KRYTYCZNY BŁĄD podczas tworzenia 'ducha': {e}", exc_info=True)
-
 async def _handle_post_mortem_analysis_optimized(session: aiohttp.ClientSession, klines_data: Dict[str, Kline], analyzed_trades: List[DocumentSnapshot]):
-    """
-    ZOPTYMALIZOWANA analiza post-mortem z BARDZO SZCZEGÓŁOWYM LOGOWANIEM.
-    """
+    """ZOPTYMALIZOWANA analiza post-mortem z BARDZO SZCZEGÓŁOWYM LOGOWANIEM."""
     if not analyzed_trades:
-        # Ten log jest ważny, żeby wiedzieć, czy funkcja w ogóle widzi duchy
         logger.info("[ANALIZA DUCHA] Brak 'duchów' do analizy w tym cyklu.")
         return
         
@@ -277,7 +229,6 @@ async def _handle_post_mortem_analysis_optimized(session: aiohttp.ClientSession,
                 logger.warning(f"[ANALIZA DUCHA][{trade_id}] Brak danych kline w cache'u dla symbolu {symbol}. Pomijam cykl.")
                 continue
 
-            # --- KROK 1: Logowanie stanu początkowego ---
             logger.info(
                 f"[ANALIZA DUCHA][{trade_id}] Przetwarzam. "
                 f"Kierunek: {analysis_trade.direction}, "
@@ -285,7 +236,6 @@ async def _handle_post_mortem_analysis_optimized(session: aiohttp.ClientSession,
                 f"SL: {analysis_trade.original_sl}, TP5: {analysis_trade.original_tp_5_0}"
             )
 
-            # --- KROK 2: Sprawdzenie warunków zakończenia analizy ---
             is_analysis_finished, reason = False, ""
             if analysis_trade.direction == 'LONG':
                 if latest_kline.low <= analysis_trade.original_sl: is_analysis_finished, reason = True, "osiągnięto SL"
@@ -303,7 +253,6 @@ async def _handle_post_mortem_analysis_optimized(session: aiohttp.ClientSession,
                 state_manager.remove_analyzed_trade(trade_id)
                 continue
 
-            # --- KROK 3: Inkrementalne pobieranie nowych świec ---
             new_klines = await get_historical_klines(session, symbol, analysis_trade.last_analysis_timestamp_ms + 1)
             if not new_klines:
                 logger.info(f"[ANALIZA DUCHA][{trade_id}] Brak nowych świec od ostatniej analizy (timestamp: {analysis_trade.last_analysis_timestamp_ms}).")
@@ -311,7 +260,6 @@ async def _handle_post_mortem_analysis_optimized(session: aiohttp.ClientSession,
 
             logger.info(f"[ANALIZA DUCHA][{trade_id}] Pobrane nowe świece: {len(new_klines)}. Najnowszy timestamp: {new_klines[-1].timestamp}")
 
-            # --- KROK 4: Znalezienie nowej ceny ekstremalnej ---
             current_extreme = analysis_trade.last_known_extreme_price
             if analysis_trade.direction == 'LONG':
                 new_extreme = max(k.high for k in new_klines)
@@ -320,7 +268,6 @@ async def _handle_post_mortem_analysis_optimized(session: aiohttp.ClientSession,
                 new_extreme = min(k.low for k in new_klines)
                 has_new_extreme = new_extreme < current_extreme
 
-            # --- KROK 5: Aktualizacja stanu, jeśli jest postęp ---
             if has_new_extreme:
                 logger.info(f"[ANALIZA DUCHA][{trade_id}] Nowy potencjał! Cena: {new_extreme} (poprzednia: {current_extreme}). Aktualizuję BQ.")
                 updates_for_bq = _calculate_rr_analytics(analysis_trade.entry_price, analysis_trade.original_sl, new_extreme, analysis_trade.direction)
@@ -384,17 +331,14 @@ def run_trading_logic():
 
     all_setups_docs = list(state_manager.get_all_active_setups())
 
-
     async def async_main():
         async with aiohttp.ClientSession() as session:
             
             immediate_finalization_jobs = _handle_setups(klines_data_for_handlers, all_setups_docs)
             closing_tasks = await _handle_manage_open_trades(klines_data_for_handlers, all_open_trades_docs)
             
-            # Uruchom analizę "duchów" jako oddzielne zadanie w tle.
             await _handle_post_mortem_analysis_optimized(session, klines_data_for_handlers, all_analyzed_trades_docs)
 
-            # Scalamy zadania, które muszą być wykonane równolegle
             all_finalization_tasks = []
             if immediate_finalization_jobs:
                 for job in immediate_finalization_jobs:
