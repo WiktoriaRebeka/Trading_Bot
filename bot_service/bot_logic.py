@@ -211,6 +211,50 @@ async def _handle_manage_open_trades(klines_data: Dict[str, Kline], open_trades:
     
     return tasks_to_run
 
+# Lokalizacja: bot_service/state_manager.py
+
+def create_analyzed_trade(trade_data: OpenTradeData):
+    """Tworzy 'ducha' dla transakcji WIN do analizy post-mortem z DODATKOWYM LOGOWANIEM."""
+    db = _get_db()
+    trade_id = trade_data.trade_id
+    
+    # --- KROK 1: Sprawdzenie, czy w ogóle mamy co tworzyć ---
+    if not trade_id:
+        logger.error("[CREATE_GHOST] Otrzymano dane transakcji bez trade_id. Nie można utworzyć 'ducha'.")
+        return
+
+    logger.info(f"[CREATE_GHOST][{trade_id}] Rozpoczynam tworzenie 'ducha' dla transakcji WIN.")
+    
+    try:
+        doc_ref = db.collection(constants.ANALYZED_COLLECTION).document(trade_id)
+        
+        # --- KROK 2: Bezpieczne pobieranie wartości ---
+        tp5_value = trade_data.alert_data_snapshot.get('tp_5_0')
+        logger.info(f"[CREATE_GHOST][{trade_id}] Odczytano tp_5_0: {tp5_value}")
+        
+        analysis_data = AnalyzedTradeData(
+            trade_id=trade_id,
+            symbol=trade_data.symbol,
+            direction=trade_data.direction,
+            entry_price=trade_data.entry_price,
+            original_sl=trade_data.sl_price,
+            original_tp_5_0=float(tp5_value) if tp5_value is not None else None,
+            opened_at_ms=trade_data.opened_at_ms,
+            alert_data_snapshot=trade_data.alert_data_snapshot,
+            last_known_extreme_price=trade_data.tp_price,
+            last_analysis_timestamp_ms=int(datetime.now(timezone.utc).timestamp() * 1000),
+            achieved_tps=["rr_1_0_achieved"]
+        )
+        
+        # --- KROK 3: Zapis do Firestore ---
+        logger.info(f"[CREATE_GHOST][{trade_id}] Przygotowano dane 'ducha'. Próbuję zapisać do Firestore.")
+        doc_ref.set(analysis_data.model_dump())
+        logger.info(f"[CREATE_GHOST][{trade_id}] SUKCES! Utworzono 'ducha' w kolekcji '{constants.ANALYZED_COLLECTION}'.")
+
+    except Exception as e:
+        # --- KROK 4: Logowanie ewentualnych błędów ---
+        logger.error(f"[CREATE_GHOST][{trade_id}] KRYTYCZNY BŁĄD podczas tworzenia 'ducha': {e}", exc_info=True)
+
 async def _handle_post_mortem_analysis_optimized(session: aiohttp.ClientSession, klines_data: Dict[str, Kline], analyzed_trades: List[DocumentSnapshot]):
     """
     ZOPTYMALIZOWANA analiza post-mortem z BARDZO SZCZEGÓŁOWYM LOGOWANIEM.
