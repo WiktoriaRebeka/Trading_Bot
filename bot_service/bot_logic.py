@@ -41,6 +41,7 @@ def _calculate_rr_analytics(entry_price: float, sl_price: float, extreme_price: 
         analytics[flag] = rr_achieved >= threshold
     return analytics
 
+
 def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]]):
     """Przetwarza nowe alerty i zapisuje je jako aktywne setupy w Firestore."""
     if not newly_fetched_alerts:
