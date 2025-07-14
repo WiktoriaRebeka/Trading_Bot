@@ -29,7 +29,7 @@ EXPECTED_SCHEMA = {
     "rr_5_0_achieved": bool,
 }
 
-# Zdefiniowana, bezpieczna lista kolumn, które można aktualizować
+
 UPDATABLE_COLUMNS: Set[str] = {
     "rr_achieved", "rr_1_0_achieved", "rr_1_5_achieved", "rr_2_0_achieved",
     "rr_3_0_achieved", "rr_4_0_achieved", "rr_5_0_achieved", "timestamp_close",

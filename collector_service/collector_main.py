@@ -6,9 +6,10 @@ import os
 import asyncio
 import uuid
 
-# Wstawienie ścieżki na początku
+# Krok 1: Wstawienie ścieżki. OK.
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+# Krok 2: Importy.
 from flask import Flask, jsonify
 import google.cloud.logging
 
@@ -16,7 +17,7 @@ from shared_lib.config_loader import load_config
 from shared_lib.firebase_client import initialize_firebase, db_client
 from collector_service.data_collector import run_data_collection_cycle
 
-# Konfiguracja ustrukturyzowanego logowania
+# Krok 3: Konfiguracja logowania. JEDYNA globalna operacja.
 try:
     log_client = google.cloud.logging.Client()
     log_client.setup_logging()
@@ -27,13 +28,14 @@ except Exception as e:
 
 logger = logging.getLogger(__name__)
 
-
 def create_app():
     """Tworzy i konfiguruje instancję aplikacji Flask (wzorzec Application Factory)."""
     app = Flask(__name__)
     app.config['INITIALIZATION_SUCCESS'] = False
 
+    # Inicjalizacja w kontekście aplikacji
     with app.app_context():
+        logger.info("Rozpoczynam konfigurację aplikacji `collector_service` wewnątrz kontekstu.")
         load_config()
         if initialize_firebase():
             app.config['INITIALIZATION_SUCCESS'] = True
@@ -41,6 +43,7 @@ def create_app():
         else:
             logger.critical("Krytyczny błąd podczas inicjalizacji Firebase w kolektorze.")
     
+    # Rejestracja endpointów
     @app.route('/')
     def health_check():
         return "Data Collector Service is running.", 200
@@ -60,12 +63,11 @@ def create_app():
             extra={"json_fields": {"cycle_id": cycle_id}}
         )
 
-        if not db_client:
+        if not app.config.get('INITIALIZATION_SUCCESS', False):
             logger.critical("Firestore nie jest zainicjalizowane. Zatrzymuję cykl.", extra={"json_fields": {"cycle_id": cycle_id}})
-            return jsonify({"status": "error", "message": "Firestore not initialized"}), 500
+            return jsonify({"status": "error", "message": "Service is unhealthy"}), 503
         
         try:
-            # asyncio.run() uruchamia pętlę zdarzeń
             message, status_code = asyncio.run(run_data_collection_cycle(cycle_id))
             logger.info(
                 "--- ZAKOŃCZENIE CYKLU KOLEKTORA DANYCH ---",
@@ -82,7 +84,7 @@ def create_app():
             
     return app
 
-
+# Kluczowa zmiana: wywołanie fabryki na poziomie globalnym, aby Gunicorn mógł znaleźć obiekt `app`.
 app = create_app()
 
 if __name__ == '__main__':

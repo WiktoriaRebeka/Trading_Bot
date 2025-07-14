@@ -25,7 +25,6 @@ async def _fetch_kline_for_symbol(session: aiohttp.ClientSession, symbol: str, c
                 data = await response.json()
                 if data.get("retCode") == 0 and data.get("result") and data["result"].get("list"):
                     kline_list = data["result"]["list"]
-                    # Używamy świecy o indeksie 1 (przedostatniej), bo jest "zamknięta". Świeca 0 jest bieżąca i może się zmieniać.
                     target_kline = kline_list[1] if len(kline_list) > 1 else kline_list[0]
                     return {
                         "symbol": symbol, 
@@ -38,7 +37,7 @@ async def _fetch_kline_for_symbol(session: aiohttp.ClientSession, symbol: str, c
                     logger.warning(f"API zwróciło błąd: {data.get('retMsg', 'Brak wiadomości')}", extra=log_extra)
         except Exception as e:
             logger.warning(f"Błąd w _fetch_kline_for_symbol (próba {attempt+1}): {e}", extra=log_extra)
-            await asyncio.sleep(0.5) # Krótka przerwa przed ponowieniem
+            await asyncio.sleep(0.5) 
             
     logger.error(f"Nie udało się pobrać danych po {max_retries} próbach.", extra=log_extra)
     return None
@@ -78,7 +77,6 @@ def save_klines_to_firestore(klines_data: Dict[str, Dict[str, Any]], cycle_id: s
     
     for symbol, data in klines_data.items():
         doc_ref = db.collection(constants.LATEST_KLINES_COLLECTION).document(symbol)
-        # Używamy merge=True, aby nie nadpisać całego dokumentu, jeśli miałby inne pola
         batch.set(doc_ref, data, merge=True)
         
     try:
@@ -86,7 +84,6 @@ def save_klines_to_firestore(klines_data: Dict[str, Dict[str, Any]], cycle_id: s
         logger.info("Zapis batchowy do Firestore zakończony sukcesem.", extra=log_extra)
     except Exception as e:
         logger.error(f"Krytyczny błąd podczas zapisu batchowego do Firestore: {e}", exc_info=True, extra=log_extra)
-        # Rzucamy wyjątek dalej, aby endpoint mógł zwrócić błąd 500
         raise
 
 async def run_data_collection_cycle(cycle_id: str) -> (str, int):
