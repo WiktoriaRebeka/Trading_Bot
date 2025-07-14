@@ -1,45 +1,68 @@
-# Lokalizacja: bot_service/main.py (ZASTĄP CAŁY PLIK)
+# Lokalizacja: bot_service/main.py
 
-import logging
 import sys
 import os
+import traceback
 
-# Krok 1: Wstawienie ścieżki - to jest krytyczne, aby było na samej górze.
+# --- BARDZO WAŻNE: Dodajemy ścieżkę jako PIERWSZĄ operację ---
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-# Krok 2: Importy minimalne, absolutnie niezbędne do stworzenia aplikacji.
+# --- LOGOWANIE AWARYJNE ---
+# Używamy print do stderr, ponieważ to zadziała nawet, jeśli biblioteka logging zawiedzie.
+print("DEBUG: bot_service/main.py - Start pliku.", file=sys.stderr)
+
+# Importujemy tylko to, co jest absolutnie konieczne na poziomie globalnym
 from flask import Flask
-import google.cloud.logging
 
-# Krok 3: Konfiguracja logowania - jedyna operacja globalna.
-try:
-    google.cloud.logging.Client().setup_logging()
-    logging.info("Ustrukturyzowane logowanie Google Cloud (bot_service) skonfigurowane.")
-except Exception as e:
-    logging.basicConfig(level=logging.INFO)
-    logging.warning(f"Logowanie GCP nie powiodło się, używam podstawowej konfiguracji: {e}")
-
+print("DEBUG: bot_service/main.py - Flask zaimportowany.", file=sys.stderr)
 
 # Importujemy naszą logikę setupu
 from bot_service.app_setup import initialize_app_services, register_endpoints
 
+print("DEBUG: bot_service/main.py - app_setup zaimportowany.", file=sys.stderr)
+
+
 def create_app():
     """Tworzy i zwraca aplikację Flask, ale cała logika jest w app_setup."""
+    print("DEBUG: bot_service/main.py - Wewnątrz create_app().", file=sys.stderr)
+    
     app = Flask(__name__)
+    print("DEBUG: bot_service/main.py - Instancja Flask utworzona.", file=sys.stderr)
     
-    # Inicjalizujemy usługi (Firebase, BigQuery)
-    initialize_app_services(app)
-    
-    # Rejestrujemy endpointy (/health, /run-bot-cycle, etc.)
-    register_endpoints(app)
-    
+    try:
+        # Inicjalizujemy usługi (Firebase, BigQuery)
+        initialize_app_services(app)
+        print("DEBUG: bot_service/main.py - initialize_app_services() wykonane.", file=sys.stderr)
+        
+        # Rejestrujemy endpointy (/health, /run-bot-cycle, etc.)
+        register_endpoints(app)
+        print("DEBUG: bot_service/main.py - register_endpoints() wykonane.", file=sys.stderr)
+        
+    except Exception as e:
+        # Jeśli jakikolwiek błąd wystąpi wewnątrz create_app, zalogujemy go tutaj.
+        print(f"FATAL: Błąd wewnątrz create_app(): {e}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        # Rzucamy wyjątek dalej, aby Gunicorn wiedział, że coś poszło nie tak.
+        raise
+
+    print("DEBUG: bot_service/main.py - Zwracam obiekt app z create_app().", file=sys.stderr)
     return app
 
 # Gunicorn szuka tej zmiennej.
-app = create_app()
+print("DEBUG: bot_service/main.py - Zamierzam wywołać create_app().", file=sys.stderr)
+try:
+    app = create_app()
+    print("DEBUG: bot_service/main.py - Zmienna 'app' została pomyślnie utworzona.", file=sys.stderr)
+except Exception as e:
+    print(f"FATAL: Wywołanie create_app() na poziomie globalnym nie powiodło się: {e}", file=sys.stderr)
+    traceback.print_exc(file=sys.stderr)
+    # Ustawiamy app na None, aby Gunicorn na pewno się wywalił z czytelnym błędem, jeśli do tego dojdzie.
+    app = None
+    # Celowo zatrzymujemy proces, jeśli nie uda się stworzyć aplikacji.
+    sys.exit(1)
+
 
 if __name__ == '__main__':
     # Uruchomienie lokalne
     port = int(os.environ.get("PORT", 8080))
-    # Użycie `app.run` jest tylko dla deweloperki. Gunicorn uruchamia `app` bezpośrednio.
     app.run(host='0.0.0.0', port=port, debug=False)
