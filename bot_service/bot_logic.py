@@ -182,7 +182,7 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
 
 # Lokalizacja: bot_service/bot_logic.py
 
-async def _handle_manage_open_trades(klines_data: Dict[str, Kline], open_trades: List[DocumentSnapshot]) -> List:
+def _handle_manage_open_trades(klines_data: Dict[str, Kline], open_trades: List[DocumentSnapshot]) -> List:
     """Monitoruje otwarte pozycje i zwraca listę zadań do finalizacji."""
     if not open_trades: return []
     logger.info(f"Monitoruję {len(open_trades)} otwartych pozycji.")
@@ -335,24 +335,29 @@ def run_trading_logic():
 
     all_setups_docs = list(state_manager.get_all_active_setups())
 
+    # --- POPRAWIONA LOGIKA ---
+    # Najpierw wykonujemy wszystkie operacje synchroniczne
+    immediate_finalization_jobs = _handle_setups(klines_data_for_handlers, all_setups_docs)
+    closing_tasks = _handle_manage_open_trades(klines_data_for_handlers, all_open_trades_docs)
+
+    # Teraz zbieramy wszystkie zadania asynchroniczne do wykonania
+    all_async_tasks = []
+    if immediate_finalization_jobs:
+        for job in immediate_finalization_jobs:
+            all_async_tasks.append(log_initial_trade_result(job["trade"], job["result"], job["close_price"]))
+    
+    if closing_tasks:
+        all_async_tasks.extend(closing_tasks)
+
+    # Definiujemy pętlę asynchroniczną tylko dla zadań, które tego wymagają
     async def async_main():
         async with aiohttp.ClientSession() as session:
-            
-            immediate_finalization_jobs = _handle_setups(klines_data_for_handlers, all_setups_docs)
-            closing_tasks = await _handle_manage_open_trades(klines_data_for_handlers, all_open_trades_docs)
-            
+            # Analiza ducha jest jedyną operacją, która potrzebuje sesji http
             await _handle_post_mortem_analysis_optimized(session, klines_data_for_handlers, all_analyzed_trades_docs)
 
-            all_finalization_tasks = []
-            if immediate_finalization_jobs:
-                for job in immediate_finalization_jobs:
-                    all_finalization_tasks.append(log_initial_trade_result(job["trade"], job["result"], job["close_price"]))
-            
-            if closing_tasks:
-                all_finalization_tasks.extend(closing_tasks)
-
-            if all_finalization_tasks:
-                results = await asyncio.gather(*all_finalization_tasks, return_exceptions=True)
+            # Wykonujemy pozostałe zadania asynchroniczne (logowanie do BQ)
+            if all_async_tasks:
+                results = await asyncio.gather(*all_async_tasks, return_exceptions=True)
                 for i, result in enumerate(results):
                     if isinstance(result, Exception):
                         logger.error(f"Wystąpił błąd podczas zadania finalizacji nr {i}: {result}", exc_info=True)
