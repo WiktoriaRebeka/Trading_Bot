@@ -184,3 +184,21 @@ def get_latest_klines_from_cache(symbols: Iterable[str]) -> Dict[str, Dict[str, 
         logger.warning("Nie udało się pobrać żadnych rekordów kline z cache'u. Sprawdź, czy kolekcja '%s' zawiera dokumenty o podanych ID.", constants.LATEST_KLINES_COLLECTION)
     return klines_cache
 
+# Lokalizacja: bot_service/state_manager.py
+
+@firestore.transactional
+def close_trade_transactional(transaction, trade_id: str, symbol: str, is_loss: bool):
+    """Atomowo usuwa otwartą pozycję i aktualizuje powiązany z nią setup."""
+    trade_doc_ref = _get_db().collection(constants.TRADE_COLLECTION).document(trade_id)
+    setup_doc_ref = _get_db().collection(constants.SETUP_COLLECTION).document(symbol)
+
+    # 1. Usuń pozycję z kolekcji open_trades
+    transaction.delete(trade_doc_ref)
+
+    # 2. Zaktualizuj setup
+    update_data = {
+        "is_position_open_on_this_setup": False,
+        "is_reset_needed_after_loss": is_loss
+    }
+    transaction.update(setup_doc_ref, update_data)
+    logger.info(f"[{symbol}][{trade_id}] Transakcja zamknięcia przygotowana (delete trade, update setup).")

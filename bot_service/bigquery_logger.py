@@ -112,3 +112,50 @@ def log_trade_to_bigquery(trade_data: Dict):
     except Exception as e:
         logger.error(f"[BQ_LOGGER] Krytyczny błąd podczas zapisu do BigQuery dla ID: {sanitized_data.get('trade_id')}: {e}", exc_info=True)
 
+
+def _get_bq_type(value: Any) -> str:
+    """Pomocnik do określania typu BigQuery na podstawie typu Python."""
+    if isinstance(value, bool): return "BOOL"
+    if isinstance(value, int): return "INT64"
+    if isinstance(value, float): return "FLOAT64"
+    return "STRING"
+
+def update_analyzed_trade_in_bigquery(trade_id: str, updates: Dict[str, Any]):
+    """
+    Aktualizuje istniejący rekord transakcji w BigQuery używając bezpiecznych, sparametryzowanych zapytań.
+    Ta funkcja zastępuje nieefektywną logikę wielokrotnych aktualizacji 'ducha'.
+    """
+    try:
+        client = get_bigquery_client()
+    except RuntimeError as e:
+        logger.error(f"[BQ_UPDATER] Nie można zaktualizować transakcji: {e}")
+        return
+
+    # Walidacja, aby upewnić się, że aktualizujemy tylko dozwolone kolumny
+    valid_updates = {k: v for k, v in updates.items() if k in UPDATABLE_COLUMNS}
+    if not valid_updates:
+        logger.warning(f"[BQ_UPDATER][{trade_id}] Brak prawidłowych pól do aktualizacji. Pomijam.")
+        return
+
+    set_clauses = [f"{key} = @{key}" for key in valid_updates.keys()]
+    query = f"""
+        UPDATE `{TABLE_REF}`
+        SET {', '.join(set_clauses)}
+        WHERE trade_id = @trade_id
+    """
+    
+    params = [bigquery.ScalarQueryParameter("trade_id", "STRING", trade_id)]
+    params.extend([
+        bigquery.ScalarQueryParameter(key, _get_bq_type(value), value)
+        for key, value in valid_updates.items()
+    ])
+    job_config = bigquery.QueryJobConfig(query_parameters=params)
+
+    try:
+        logger.info(f"[BQ_UPDATER][{trade_id}] Przygotowuję aktualizację w BigQuery z danymi: {valid_updates}")
+        client.query(query, job_config=job_config).result()
+        logger.info(f"[BQ_UPDATER][{trade_id}] SUKCES! Pomyślnie zaktualizowano transakcję w BigQuery.")
+    except GoogleAPICallError as e:
+        logger.error(f"[BQ_UPDATER][{trade_id}] Błąd API BigQuery podczas aktualizacji: {e}", exc_info=True)
+    except Exception as e:
+        logger.error(f"[BQ_UPDATER][{trade_id}] Nieoczekiwany błąd podczas aktualizacji w BigQuery: {e}", exc_info=True)
