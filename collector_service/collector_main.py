@@ -6,18 +6,14 @@ import os
 import asyncio
 import uuid
 
-# Krok 1: Wstawienie ścieżki. OK.
+# Krok 1: Wstawienie ścieżki.
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-# Krok 2: Importy.
+# Krok 2: Importy podstawowe.
 from flask import Flask, jsonify
 import google.cloud.logging
 
-from shared_lib.config_loader import load_config
-from shared_lib.firebase_client import initialize_firebase, db_client
-from collector_service.data_collector import run_data_collection_cycle
-
-# Krok 3: Konfiguracja logowania. JEDYNA globalna operacja.
+# Krok 3: Konfiguracja logowania.
 try:
     log_client = google.cloud.logging.Client()
     log_client.setup_logging()
@@ -29,11 +25,14 @@ except Exception as e:
 logger = logging.getLogger(__name__)
 
 def create_app():
-    """Tworzy i konfiguruje instancję aplikacji Flask (wzorzec Application Factory)."""
+    """Tworzy i konfiguruje instancję aplikacji Flask."""
     app = Flask(__name__)
     app.config['INITIALIZATION_SUCCESS'] = False
 
-    # Inicjalizacja w kontekście aplikacji
+    # Importy inicjalizacyjne
+    from shared_lib.config_loader import load_config
+    from shared_lib.firebase_client import initialize_firebase
+
     with app.app_context():
         logger.info("Rozpoczynam konfigurację aplikacji `collector_service` wewnątrz kontekstu.")
         load_config()
@@ -57,11 +56,11 @@ def create_app():
 
     @app.route('/run-collector-cycle', methods=['POST'])
     def run_collector_endpoint():
+        # Leniwy import logiki
+        from collector_service.data_collector import run_data_collection_cycle
+
         cycle_id = str(uuid.uuid4())
-        logger.info(
-            "--- ROZPOCZĘCIE CYKLU KOLEKTORA DANYCH ---",
-            extra={"json_fields": {"cycle_id": cycle_id}}
-        )
+        logger.info("--- ROZPOCZĘCIE CYKLU KOLEKTORA DANYCH ---", extra={"json_fields": {"cycle_id": cycle_id}})
 
         if not app.config.get('INITIALIZATION_SUCCESS', False):
             logger.critical("Firestore nie jest zainicjalizowane. Zatrzymuję cykl.", extra={"json_fields": {"cycle_id": cycle_id}})
@@ -69,21 +68,13 @@ def create_app():
         
         try:
             message, status_code = asyncio.run(run_data_collection_cycle(cycle_id))
-            logger.info(
-                "--- ZAKOŃCZENIE CYKLU KOLEKTORA DANYCH ---",
-                extra={"json_fields": {"cycle_id": cycle_id, "status": "success"}}
-            )
+            logger.info("--- ZAKOŃCZENIE CYKLU KOLEKTORA DANYCH ---", extra={"json_fields": {"cycle_id": cycle_id, "status": "success"}})
             return jsonify({"status": "success", "details": message, "cycle_id": cycle_id}), status_code
         except Exception as e:
-            logger.error(
-                f"Krytyczny błąd w głównym cyklu kolektora: {e}",
-                exc_info=True,
-                extra={"json_fields": {"cycle_id": cycle_id, "status": "error"}}
-            )
+            logger.error(f"Krytyczny błąd w głównym cyklu kolektora: {e}", exc_info=True, extra={"json_fields": {"cycle_id": cycle_id, "status": "error"}})
             return jsonify({"status": "error", "message": str(e), "cycle_id": cycle_id}), 500
             
     return app
-
 
 app = create_app()
 
