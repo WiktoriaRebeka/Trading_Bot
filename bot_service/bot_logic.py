@@ -215,9 +215,8 @@ def _handle_manage_open_trades(klines_data: Dict[str, Kline], open_trades: List[
     return tasks_to_run
 
 async def _handle_post_mortem_analysis_optimized(session: aiohttp.ClientSession, klines_data: Dict[str, Kline], analyzed_trades: List[DocumentSnapshot]):
-    """ZOPTYMALIZOWANA analiza post-mortem z BARDZO SZCZEGÓŁOWYM LOGOWANIEM."""
+    """ZOPTYMALIZOWANA analiza post-mortem, która zapisuje do BQ tylko na końcu."""
     if not analyzed_trades:
-        logger.info("[ANALIZA DUCHA] Brak 'duchów' do analizy w tym cyklu.")
         return
         
     logger.info(f"[ANALIZA DUCHA] Rozpoczynam analizę dla {len(analyzed_trades)} 'duchów'.")
@@ -230,15 +229,7 @@ async def _handle_post_mortem_analysis_optimized(session: aiohttp.ClientSession,
             latest_kline = klines_data.get(symbol)
             
             if not latest_kline:
-                logger.warning(f"[ANALIZA DUCHA][{trade_id}] Brak danych kline w cache'u dla symbolu {symbol}. Pomijam cykl.")
                 continue
-
-            logger.info(
-                f"[ANALIZA DUCHA][{trade_id}] Przetwarzam. "
-                f"Kierunek: {analysis_trade.direction}, "
-                f"Ostatnia znana cena ekstremalna: {analysis_trade.last_known_extreme_price}, "
-                f"SL: {analysis_trade.original_sl}, TP5: {analysis_trade.original_tp_5_0}"
-            )
 
             is_analysis_finished, reason = False, ""
             if analysis_trade.direction == 'LONG':
@@ -248,21 +239,45 @@ async def _handle_post_mortem_analysis_optimized(session: aiohttp.ClientSession,
                 if latest_kline.high >= analysis_trade.original_sl: is_analysis_finished, reason = True, "osiągnięto SL"
                 elif analysis_trade.original_tp_5_0 and latest_kline.low <= analysis_trade.original_tp_5_0: is_analysis_finished, reason = True, "osiągnięto TP5"
 
+            # --- ZMIENIONA LOGIKA ---
             if is_analysis_finished:
-                logger.info(f"[ANALIZA DUCHA][{trade_id}] Warunek końca spełniony ({reason}). Finalny UPDATE i usunięcie.")
-                final_extreme_price = latest_kline.high if analysis_trade.direction == 'LONG' else latest_kline.low
-                updates_for_bq = _calculate_rr_analytics(analysis_trade.entry_price, analysis_trade.original_sl, final_extreme_price, analysis_trade.direction)
-                logger.info(f"[ANALIZA DUCHA][{trade_id}] Ostateczne dane do BQ: {updates_for_bq}")
-                update_analyzed_trade_in_bigquery(trade_id, updates_for_bq)
+                logger.info(f"[ANALIZA DUCHA][{trade_id}] Warunek końca spełniony ({reason}). Pobieram pełną historię i zapisuję do BQ.")
+                
+                # Pobieramy pełną historię od otwarcia do teraz
+                full_history_klines = await get_historical_klines(session, symbol, analysis_trade.opened_at_ms)
+                
+                # Znajdujemy ostateczną cenę ekstremalną z całej historii
+                if analysis_trade.direction == 'LONG':
+                    final_extreme_price = max(k.high for k in full_history_klines) if full_history_klines else analysis_trade.last_known_extreme_price
+                else:
+                    final_extreme_price = min(k.low for k in full_history_klines) if full_history_klines else analysis_trade.last_known_extreme_price
+
+                # Obliczamy ostateczne R:R
+                final_analytics = _calculate_rr_analytics(analysis_trade.entry_price, analysis_trade.original_sl, final_extreme_price, analysis_trade.direction)
+                
+                # Przygotowujemy kompletny wiersz do wstawienia
+                bq_data = {
+                    "trade_id": analysis_trade.trade_id,
+                    "timestamp_entry": datetime.fromtimestamp(analysis_trade.opened_at_ms / 1000, tz=timezone.utc).isoformat(),
+                    "timestamp_close": datetime.now(timezone.utc).isoformat(),
+                    "symbol": analysis_trade.symbol,
+                    "direction": analysis_trade.direction.upper(),
+                    "main_result": "WIN", # Duchy są tylko z pozycji WIN
+                    "ob_type": analysis_trade.alert_data_snapshot.get('ob_type', 'Used OB') # Pobieramy z snapshotu
+                }
+                bq_data.update(final_analytics)
+                
+                # Wykonujemy JEDEN zapis INSERT na końcu
+                log_trade_to_bigquery(bq_data)
+                
+                # Usuwamy ducha
                 state_manager.remove_analyzed_trade(trade_id)
                 continue
 
+            # --- Logika aktualizacji stanu w Firestore (bez zmian) ---
             new_klines = await get_historical_klines(session, symbol, analysis_trade.last_analysis_timestamp_ms + 1)
             if not new_klines:
-                logger.info(f"[ANALIZA DUCHA][{trade_id}] Brak nowych świec od ostatniej analizy (timestamp: {analysis_trade.last_analysis_timestamp_ms}).")
                 continue
-
-            logger.info(f"[ANALIZA DUCHA][{trade_id}] Pobrane nowe świece: {len(new_klines)}. Najnowszy timestamp: {new_klines[-1].timestamp}")
 
             current_extreme = analysis_trade.last_known_extreme_price
             if analysis_trade.direction == 'LONG':
@@ -273,31 +288,13 @@ async def _handle_post_mortem_analysis_optimized(session: aiohttp.ClientSession,
                 has_new_extreme = new_extreme < current_extreme
 
             if has_new_extreme:
-                logger.info(f"[ANALIZA DUCHA][{trade_id}] Nowy potencjał! Cena: {new_extreme} (poprzednia: {current_extreme}). Aktualizuję BQ.")
-                updates_for_bq = _calculate_rr_analytics(analysis_trade.entry_price, analysis_trade.original_sl, new_extreme, analysis_trade.direction)
-                logger.info(f"[ANALIZA DUCHA][{trade_id}] Nowe dane do BQ: {updates_for_bq}")
-                
-                newly_achieved_tps = {k for k, v in updates_for_bq.items() if v and k.startswith('rr_')}
-                already_achieved = set(analysis_trade.achieved_tps)
-                
-                if newly_achieved_tps - already_achieved:
-                    logger.info(f"[ANALIZA DUCHA][{trade_id}] Osiągnięto nowe progi TP: {newly_achieved_tps - already_achieved}. Wysyłam UPDATE do BQ.")
-                    update_analyzed_trade_in_bigquery(trade_id, updates_for_bq)
-                    state_manager.update_analyzed_trade_state(
-                        trade_id, new_extreme, new_klines[-1].timestamp, list(newly_achieved_tps)
-                    )
-                else:
-                    logger.info(f"[ANALIZA DUCHA][{trade_id}] Nowe ekstremum, ale bez nowego progu TP. Aktualizuję tylko stan w Firestore.")
-                    state_manager.update_analyzed_trade_state(
-                        trade_id, new_extreme, new_klines[-1].timestamp, analysis_trade.achieved_tps
-                    )
+                state_manager.update_analyzed_trade_state(
+                    trade_id, new_extreme, new_klines[-1].timestamp, analysis_trade.achieved_tps # Lista tps nie jest już potrzebna, ale zostawiamy dla spójności
+                )
             else:
-                logger.info(f"[ANALIZA DUCHA][{trade_id}] Brak nowego ekstremum. Aktualizuję tylko timestamp w Firestore.")
                 state_manager.update_analyzed_trade_state(
                     trade_id, current_extreme, new_klines[-1].timestamp, analysis_trade.achieved_tps
                 )
-        except ValidationError as e: 
-            logger.error(f"[ANALIZA DUCHA][{trade_id}] Błąd walidacji danych 'ducha', pomijam: {e}")
         except Exception as e: 
             logger.error(f"[ANALIZA DUCHA][{trade_id}] Błąd podczas analizy post-mortem: {e}", exc_info=True)
 
