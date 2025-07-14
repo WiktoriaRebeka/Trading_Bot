@@ -145,12 +145,13 @@ def create_analyzed_trade(trade_data: OpenTradeData):
         # --- KROK 4: Logowanie ewentualnych błędów ---
         logger.error(f"[CREATE_GHOST][{trade_id}] KRYTYCZNY BŁĄD podczas tworzenia 'ducha': {e}", exc_info=True)
 
-def update_analyzed_trade_state(trade_id: str, new_extreme_price: float, new_timestamp_ms: int, new_achieved_tps: list):
+# Lokalizacja: bot_service/state_manager.py
+
+def update_analyzed_trade_state(trade_id: str, new_extreme_price: float, new_timestamp_ms: int):
     doc_ref = _get_db().collection(constants.ANALYZED_COLLECTION).document(trade_id)
     update_data = {
         "last_known_extreme_price": new_extreme_price,
-        "last_analysis_timestamp_ms": new_timestamp_ms,
-        "achieved_tps": new_achieved_tps
+        "last_analysis_timestamp_ms": new_timestamp_ms
     }
     doc_ref.update(update_data)
     logger.info(f"[{trade_id}] Zaktualizowano stan 'ducha'. Nowa cena ekstremalna: {new_extreme_price}")
