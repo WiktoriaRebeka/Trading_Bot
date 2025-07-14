@@ -84,7 +84,7 @@ def create_app():
             
     return app
 
-# Kluczowa zmiana: wywołanie fabryki na poziomie globalnym, aby Gunicorn mógł znaleźć obiekt `app`.
+
 app = create_app()
 
 if __name__ == '__main__':
