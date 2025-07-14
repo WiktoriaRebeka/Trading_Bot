@@ -213,6 +213,7 @@ def _handle_manage_open_trades(klines_data: Dict[str, Kline], open_trades: List[
         except Exception as e: logger.error(f"[{trade_id}] Błąd podczas monitorowania otwartej pozycji: {e}", exc_info=True)
     
     return tasks_to_run
+    #comment
 
 async def _handle_post_mortem_analysis_optimized(session: aiohttp.ClientSession, klines_data: Dict[str, Kline], analyzed_trades: List[DocumentSnapshot]):
     """ZOPTYMALIZOWANA analiza post-mortem, która zapisuje do BQ tylko na końcu."""
