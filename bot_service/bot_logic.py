@@ -180,6 +180,8 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
     
     return trades_to_finalize_immediately
 
+# Lokalizacja: bot_service/bot_logic.py
+
 async def _handle_manage_open_trades(klines_data: Dict[str, Kline], open_trades: List[DocumentSnapshot]) -> List:
     """Monitoruje otwarte pozycje i zwraca listę zadań do finalizacji."""
     if not open_trades: return []
@@ -198,8 +200,9 @@ async def _handle_manage_open_trades(klines_data: Dict[str, Kline], open_trades:
                 if latest_kline.low <= trade.sl_price: closed_result, close_price = "LOSE", trade.sl_price
                 elif latest_kline.high >= trade.tp_price: closed_result, close_price = "WIN", trade.tp_price
             elif trade.direction == 'SHORT':
-                if latest_kline.high >= trade.sl_price: closed_result, close_price = "LOSE", sl_price
-                elif latest_kline.low <= trade.tp_price: closed_result, close_price = "WIN", tp_price
+        
+                if latest_kline.high >= trade.sl_price: closed_result, close_price = "LOSE", trade.sl_price
+                elif latest_kline.low <= trade.tp_price: closed_result, close_price = "WIN", trade.tp_price
             
             if closed_result:
                 tasks_to_run.append(log_initial_trade_result(trade, closed_result, close_price))
