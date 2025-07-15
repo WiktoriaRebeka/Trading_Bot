@@ -16,9 +16,9 @@ steps:
     - 'europe-central2'
     - '--platform'
     - 'managed'
-    # --- OSTATECZNA ZMIANA: Usługa działa z tą samą tożsamością co Cloud Build ---
+    # --- Używamy nowego, czystego konta serwisowego ---
     - '--service-account'
-    - 'trading-bot-463318@appspot.gserviceaccount.com'
+    - 'trading-bot-runner@$PROJECT_ID.iam.gserviceaccount.com'
     - '--vpc-connector'
     - 'app-connector-warsaw'
     - '--vpc-egress'
