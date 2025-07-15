@@ -1,15 +1,10 @@
 # Lokalizacja: /cloudbuild-bot.yaml
 steps:
 - name: 'gcr.io/cloud-builders/docker'
-  id: 'Build Image'
   args: ['build', '-t', 'europe-central2-docker.pkg.dev/$PROJECT_ID/trading-bot-image/trading-bot-service:$SHORT_SHA', '--file', 'bot_service/Dockerfile', '.']
-
 - name: 'gcr.io/cloud-builders/docker'
-  id: 'Push Image'
   args: ['push', 'europe-central2-docker.pkg.dev/$PROJECT_ID/trading-bot-image/trading-bot-service:$SHORT_SHA']
-
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-  id: 'Deploy to Cloud Run'
   entrypoint: gcloud
   args:
     - 'run'
@@ -21,18 +16,14 @@ steps:
     - 'europe-central2'
     - '--platform'
     - 'managed'
-    # --- KLUCZOWA ZMIANA: Używamy domyślnego konta serwisowego Compute Engine ---
+    # --- OSTATECZNA ZMIANA: Usługa działa z tą samą tożsamością co Cloud Build ---
     - '--service-account'
-    - '1030613337-compute@developer.gserviceaccount.com'
+    - 'trading-bot-463318@appspot.gserviceaccount.com'
     - '--vpc-connector'
     - 'app-connector-warsaw'
     - '--vpc-egress'
     - 'all'
 images:
 - 'europe-central2-docker.pkg.dev/$PROJECT_ID/trading-bot-image/trading-bot-service:$SHORT_SHA'
-
 options:
   logging: CLOUD_LOGGING_ONLY
-
-
-  #trigger new deploy
