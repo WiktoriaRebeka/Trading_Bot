@@ -1,16 +1,13 @@
 # Lokalizacja: /cloudbuild-collector.yaml
 steps:
-# Krok 1: Zbuduj obraz Docker
 - name: 'gcr.io/cloud-builders/docker'
   id: 'Build Image'
   args: ['build', '-t', 'europe-central2-docker.pkg.dev/$PROJECT_ID/trading-bot-image/data-collector-service:$SHORT_SHA', '--file', 'collector_service/Dockerfile', '.']
 
-# Krok 2: Wypchnij obraz do Artifact Registry (KLUCZOWA, DODANA LINIA)
 - name: 'gcr.io/cloud-builders/docker'
   id: 'Push Image'
   args: ['push', 'europe-central2-docker.pkg.dev/$PROJECT_ID/trading-bot-image/data-collector-service:$SHORT_SHA']
 
-# Krok 3: Wdróż obraz, który już jest w Artifact Registry
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
   id: 'Deploy to Cloud Run'
   entrypoint: gcloud
@@ -24,8 +21,9 @@ steps:
     - 'europe-central2'
     - '--platform'
     - 'managed'
+    # --- KLUCZOWA ZMIANA: Używamy domyślnego konta serwisowego Compute Engine ---
     - '--service-account'
-    - 'trading-bot-463318@appspot.gserviceaccount.com'
+    - '1030613337-compute@developer.gserviceaccount.com'
 images:
 - 'europe-central2-docker.pkg.dev/$PROJECT_ID/trading-bot-image/data-collector-service:$SHORT_SHA'
 
