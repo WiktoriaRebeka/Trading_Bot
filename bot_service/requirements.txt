@@ -1,8 +1,10 @@
+# Flask i serwer WSGI
 Flask>=2.0
 gunicorn>=20.0
 google-cloud-firestore
 google-cloud-bigquery
-pydantic
 google-cloud-secret-manager
+google-cloud-logging
+firebase-admin
+pydantic
 python-dotenv>=0.15.0
-aiohttp
