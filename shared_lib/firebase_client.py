@@ -1,9 +1,9 @@
 # Lokalizacja: shared_lib/firebase_client.py
 
 import logging
-from typing import Optional, List, Set
+from typing import Optional, List
 import firebase_admin
-from firebase_admin import credentials, firestore
+from firebase_admin import firestore
 from google.cloud.firestore_v1.client import Client
 
 from shared_lib import constants
@@ -15,36 +15,36 @@ _app_initialized = False
 
 def initialize_firebase() -> bool:
     """
-    Inicjalizuje połączenie z Firebase Admin SDK.
-    Używa wzorca singleton, aby zapewnić, że inicjalizacja nastąpi tylko raz.
-    Zwraca True, jeśli inicjalizacja się powiodła lub już została wykonana.
+    Inicjalizuje połączenie z Firebase Admin SDK, wskazując na konkretną bazę danych.
     """
     global db_client, _app_initialized
     
-    # Jeśli już zainicjalizowano pomyślnie, nie rób nic i zwróć sukces.
     if _app_initialized:
         logger.debug("Firebase jest już zainicjalizowany.")
         return True
 
     try:
-        # Ten blok zostanie wykonany tylko przy pierwszym wywołaniu.
         logger.info("Inicjalizuję Firebase Admin SDK...")
-        # W środowisku GCP (Cloud Run, Cloud Functions) nie trzeba podawać credentials.
-        # `firebase_admin` automatycznie użyje uprawnień konta serwisowego.
-        # To jest najbezpieczniejsza i zalecana metoda.
-        firebase_admin.initialize_app(options={
-            'projectId': constants.GCP_PROJECT_ID,
-        })
-        db_client = firestore.client()
         
-        # Sprawdzenie połączenia poprzez próbę odczytu dokumentu (opcjonalne, ale dobre)
+        if not firebase_admin._apps:
+            firebase_admin.initialize_app(options={
+                'projectId': constants.GCP_PROJECT_ID,
+            })
+        
+        # --- OSTATECZNA, KLUCZOWA ZMIANA: Podajemy prawidłowe ID bazy danych ---
+        database_id = "trading-bot-data" 
+        db_client = firestore.client(database=database_id)
+        
+        # Teraz, gdy wskazujemy na właściwą bazę, możemy przywrócić krok weryfikacji.
+        logger.info(f"Sprawdzam połączenie z bazą danych Firestore: '{database_id}'...")
         db_client.collection(constants.BOT_CONFIG_COLLECTION).limit(1).get()
+        logger.info("Weryfikacja połączenia z Firestore pomyślna.")
         
         _app_initialized = True
-        logger.info("SUKCES! Połączenie z Firebase (Firestore) zostało pomyślnie nawiązane.")
+        logger.info(f"SUKCES! Klient Firestore dla bazy '{database_id}' został pomyślnie utworzony i zweryfikowany.")
         return True
     except Exception as e:
-        logger.critical(f"KRYTYCZNY BŁĄD: Nie udało się zainicjalizować Firebase Admin SDK: {e}", exc_info=True)
+        logger.critical(f"KRYTYCZNY BŁĄD: Nie udało się zainicjalizować klienta Firestore: {e}", exc_info=True)
         db_client = None
         _app_initialized = False
         return False
@@ -52,10 +52,9 @@ def initialize_firebase() -> bool:
 def get_db() -> Client:
     """
     Zwraca zainicjalizowanego klienta Firestore.
-    Rzuca wyjątek, jeśli inicjalizacja nie została pomyślnie przeprowadzona.
     """
     if db_client is None or not _app_initialized:
-        raise RuntimeError("Krytyczny błąd: Klient Firestore nie został pomyślnie zainicjalizowany. Wywołaj initialize_firebase() na starcie aplikacji.")
+        raise RuntimeError("Krytyczny błąd: Klient Firestore nie został pomyślnie zainicjalizowany.")
     return db_client
 
 def get_symbols_to_watch_from_config() -> List[str]:
