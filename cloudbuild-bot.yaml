@@ -18,7 +18,7 @@ steps:
     - 'managed'
     - '--service-account'
     - 'trading-bot-runner@$PROJECT_ID.iam.gserviceaccount.com'
-    # --- TYMCZASOWA ZMIANA DIAGNOSTYCZNA: Usunięto konfigurację VPC ---
+    # --- OSTATECZNY TEST: Tymczasowo usuwamy konfigurację VPC ---
     # - '--vpc-connector'
     # - 'app-connector-warsaw'
     # - '--vpc-egress'

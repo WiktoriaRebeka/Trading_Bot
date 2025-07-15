@@ -16,9 +16,11 @@ steps:
     - 'europe-central2'
     - '--platform'
     - 'managed'
-    # --- Używamy nowego, czystego konta serwisowego ---
     - '--service-account'
     - 'trading-bot-runner@$PROJECT_ID.iam.gserviceaccount.com'
+    # --- OSTATECZNY TEST: Usługi Cloud Run nie mają konfiguracji VPC ---
+    # Ta usługa nie miała VPC, więc plik pozostaje bez zmian w tej sekcji,
+    # ale upewniamy się, że jest spójny.
 images:
 - 'europe-central2-docker.pkg.dev/$PROJECT_ID/trading-bot-image/data-collector-service:$SHORT_SHA'
 options:
