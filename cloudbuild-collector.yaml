@@ -18,7 +18,9 @@ steps:
     - 'managed'
     - '--service-account'
     - 'trading-bot-runner@$PROJECT_ID.iam.gserviceaccount.com'
-    # Ta usługa nie miała VPC, więc plik pozostaje bez zmian w tej sekcji.
+    # --- KLUCZOWA ZMIANA: Dodajemy zmienną środowiskową z ID projektu ---
+    - '--set-env-vars'
+    - 'GCP_PROJECT=$PROJECT_ID'
 images:
 - 'europe-central2-docker.pkg.dev/$PROJECT_ID/trading-bot-image/data-collector-service:$SHORT_SHA'
 options:
