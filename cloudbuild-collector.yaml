@@ -1,9 +1,9 @@
 # Lokalizacja: /cloudbuild-collector.yaml
 steps:
 - name: 'gcr.io/cloud-builders/docker'
-  args: ['build', '-t', 'europe-central2-docker.pkg.dev/$PROJECT_ID/trading-bot-image/data-collector-service:$SHORT_SHA', '--file', 'collector_service/Dockerfile', '.']
+  args: ['build', '-t', 'us-central1-docker.pkg.dev/$PROJECT_ID/trading-bot-image/data-collector-service:$SHORT_SHA', '--file', 'collector_service/Dockerfile', '.']
 - name: 'gcr.io/cloud-builders/docker'
-  args: ['push', 'europe-central2-docker.pkg.dev/$PROJECT_ID/trading-bot-image/data-collector-service:$SHORT_SHA']
+  args: ['push', 'us-central1-docker.pkg.dev/$PROJECT_ID/trading-bot-image/data-collector-service:$SHORT_SHA']
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
   entrypoint: gcloud
   args:
@@ -11,17 +11,15 @@ steps:
     - 'deploy'
     - 'data-collector-service'
     - '--image'
-    - 'europe-central2-docker.pkg.dev/$PROJECT_ID/trading-bot-image/data-collector-service:$SHORT_SHA'
+    - 'us-central1-docker.pkg.dev/$PROJECT_ID/trading-bot-image/data-collector-service:$SHORT_SHA'
+    # --- KLUCZOWA ZMIANA: Zmiana regionu na zgodny z Firestore ---
     - '--region'
-    - 'europe-central2'
+    - 'us-central1'
     - '--platform'
     - 'managed'
     - '--service-account'
     - 'trading-bot-runner@$PROJECT_ID.iam.gserviceaccount.com'
-    # --- KLUCZOWA ZMIANA: Dodajemy zmienną środowiskową z ID projektu ---
-    - '--set-env-vars'
-    - 'GCP_PROJECT=$PROJECT_ID'
 images:
-- 'europe-central2-docker.pkg.dev/$PROJECT_ID/trading-bot-image/data-collector-service:$SHORT_SHA'
+- 'us-central1-docker.pkg.dev/$PROJECT_ID/trading-bot-image/data-collector-service:$SHORT_SHA'
 options:
   logging: CLOUD_LOGGING_ONLY
