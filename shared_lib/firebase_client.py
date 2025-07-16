@@ -2,8 +2,9 @@
 
 import logging
 from typing import Optional, List
-import firebase_admin
-from firebase_admin import firestore
+
+# --- KLUCZOWA ZMIANA: Importujemy tylko i wyłącznie klienta google-cloud-firestore ---
+from google.cloud import firestore
 from google.cloud.firestore_v1.client import Client
 
 from shared_lib import constants
@@ -11,54 +12,50 @@ from shared_lib import constants
 logger = logging.getLogger(__name__)
 
 db_client: Optional[Client] = None
-_app_initialized = False
+_client_initialized = False
 
 def initialize_firebase() -> bool:
     """
-    Inicjalizuje połączenie z Firebase Admin SDK, wskazując na konkretną bazę danych.
+    Inicjalizuje klienta Firestore bezpośrednio, używając biblioteki google-cloud-firestore.
     """
-    global db_client, _app_initialized
+    global db_client, _client_initialized
     
-    if _app_initialized:
-        logger.debug("Firebase jest już zainicjalizowany.")
+    if _client_initialized:
+        logger.debug("Klient Firestore jest już zainicjalizowany.")
         return True
 
     try:
-        logger.info("Inicjalizuję Firebase Admin SDK...")
+        logger.info("Inicjalizuję klienta Google Cloud Firestore...")
         
-        if not firebase_admin._apps:
-            firebase_admin.initialize_app(options={
-                'projectId': constants.GCP_PROJECT_ID,
-            })
+        # --- OSTATECZNA, POPRAWNA SKŁADNIA ---
+        # Tworzymy klienta bezpośrednio z google.cloud.firestore.Client,
+        # podając ID projektu i ID bazy danych.
+        db_client = firestore.Client(
+            project=constants.GCP_PROJECT_ID,
+            database="trading-bot-data"
+        )
         
-        # --- OSTATECZNA, KLUCZOWA ZMIANA: Podajemy prawidłowe ID bazy danych ---
-        database_id = "trading-bot-data" 
-        db_client = firestore.client(database=database_id)
-        
-        # Teraz, gdy wskazujemy na właściwą bazę, możemy przywrócić krok weryfikacji.
-        logger.info(f"Sprawdzam połączenie z bazą danych Firestore: '{database_id}'...")
+        logger.info("Sprawdzam połączenie z bazą danych Firestore: 'trading-bot-data'...")
         db_client.collection(constants.BOT_CONFIG_COLLECTION).limit(1).get()
         logger.info("Weryfikacja połączenia z Firestore pomyślna.")
         
-        _app_initialized = True
-        logger.info(f"SUKCES! Klient Firestore dla bazy '{database_id}' został pomyślnie utworzony i zweryfikowany.")
+        _client_initialized = True
+        logger.info("SUKCES! Klient Firestore został pomyślnie utworzony i zweryfikowany.")
         return True
     except Exception as e:
         logger.critical(f"KRYTYCZNY BŁĄD: Nie udało się zainicjalizować klienta Firestore: {e}", exc_info=True)
         db_client = None
-        _app_initialized = False
+        _client_initialized = False
         return False
 
 def get_db() -> Client:
-    """
-    Zwraca zainicjalizowanego klienta Firestore.
-    """
-    if db_client is None or not _app_initialized:
+    """Zwraca zainicjalizowanego klienta Firestore."""
+    if db_client is None or not _client_initialized:
         raise RuntimeError("Krytyczny błąd: Klient Firestore nie został pomyślnie zainicjalizowany.")
     return db_client
 
+# Reszta pliku (get_symbols_to_watch_from_config) pozostaje bez zmian
 def get_symbols_to_watch_from_config() -> List[str]:
-    """Pobiera listę symboli do monitorowania z dokumentu konfiguracyjnego w Firestore."""
     try:
         db = get_db()
         doc_ref = db.collection(constants.BOT_CONFIG_COLLECTION).document(constants.SYMBOLS_CONFIG_DOC_ID)
