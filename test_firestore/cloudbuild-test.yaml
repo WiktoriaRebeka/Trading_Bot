@@ -1,0 +1,20 @@
+steps:
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['build', '-t', 'europe-central2-docker.pkg.dev/$PROJECT_ID/trading-bot-image/test-firestore-service:$SHORT_SHA', '--file', 'test_firestore/Dockerfile', '.']
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['push', 'europe-central2-docker.pkg.dev/$PROJECT_ID/trading-bot-image/test-firestore-service:$SHORT_SHA']
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  entrypoint: gcloud
+  args:
+    - 'run'
+    - 'deploy'
+    - 'test-firestore-service' # Nowa nazwa usługi
+    - '--image'
+    - 'europe-central2-docker.pkg.dev/$PROJECT_ID/trading-bot-image/test-firestore-service:$SHORT_SHA'
+    - '--region'
+    - 'europe-central2'
+    - '--platform'
+    - 'managed'
+    - '--allow-unauthenticated' # Pozwalamy na dostęp bez logowania, aby łatwo przetestować w przeglądarce
+    - '--service-account'
+    - 'trading-bot-runner@$PROJECT_ID.iam.gserviceaccount.com'
