@@ -1,4 +1,3 @@
-# Lokalizacja: /cloudbuild-bot.yaml
 steps:
 - name: 'gcr.io/cloud-builders/docker'
   args: ['build', '-t', 'europe-central2-docker.pkg.dev/$PROJECT_ID/trading-bot-image/trading-bot-service:$SHORT_SHA', '--file', 'bot_service/Dockerfile', '.']
@@ -18,9 +17,6 @@ steps:
     - 'managed'
     - '--service-account'
     - 'trading-bot-runner@$PROJECT_ID.iam.gserviceaccount.com'
-    # --- KLUCZOWA ZMIANA: Dodajemy zmienną środowiskową z ID projektu ---
-    - '--set-env-vars'
-    - 'GCP_PROJECT=$PROJECT_ID'
 images:
 - 'europe-central2-docker.pkg.dev/$PROJECT_ID/trading-bot-image/trading-bot-service:$SHORT_SHA'
 options:
