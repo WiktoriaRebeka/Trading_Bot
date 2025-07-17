@@ -4,12 +4,13 @@ ENV PYTHONUNBUFFERED 1
 WORKDIR /app
 ENV PYTHONPATH /app
 
-COPY bot_service/requirements.txt /app/requirements.txt
+# Używamy zależności kolektora
+COPY collector_service/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Kopiujemy tylko kod potrzebny kolektorowi
 COPY shared_lib/ /app/shared_lib/
-COPY bot_service/ /app/bot_service/
+COPY collector_service/ /app/collector_service/
 
-CMD exec gunicorn --bind :$PORT --workers 1 --threads 8 --timeout 300 "bot_service.main:create_app()"
-
-# Cache buster comment - 2025-07-17-v1
+# Uruchamiamy APLIKACJĘ KOLEKTORA
+CMD exec gunicorn --bind :$PORT --workers 1 --threads 8 --timeout 300 "collector_service.collector_main:app"
