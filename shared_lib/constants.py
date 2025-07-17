@@ -1,26 +1,32 @@
 # Lokalizacja: shared_lib/constants.py
 import os
 
+# --- Konfiguracja Projektu ---
 GCP_PROJECT_ID = "trading-bot-463318"
 BIGQUERY_PROJECT_ID = "trading-bot-463318"
+BIGQUERY_DATASET_ID = "trading_analytics"
+BIGQUERY_TABLE_ID = "trades_history"
 
-# Reszta stałych bez zmian
-FIRESTORE_COLLECTION_ALERTS = "alerts"
+# --- Konfiguracja Firestore ---
+FIRESTORE_DATABASE_ID = "trading-bot-data"
+# Nazwy kolekcji
+ALERTS_COLLECTION = "alerts"
 BOT_CONFIG_COLLECTION = "bot_config"
-LAST_FETCH_STATE_DOC_ID = "last_fetch_state"
-LAST_PROCESSED_TS_FIELD = "last_processed_firestore_timestamp"
-SYMBOLS_CONFIG_DOC_ID = "symbols_config"
-
 SETUP_COLLECTION = "active_setups"
 TRADE_COLLECTION = "open_trades"
 ANALYZED_COLLECTION = "analyzed_trades"
 LATEST_KLINES_COLLECTION = "latest_klines"
+# Nazwy dokumentów
+LAST_FETCH_STATE_DOC_ID = "last_fetch_state"
+SYMBOLS_CONFIG_DOC_ID = "symbols_config"
+# Nazwy pól
+LAST_PROCESSED_TS_FIELD = "last_processed_firestore_timestamp"
+SYMBOLS_FIELD_NAME = "symbols_to_watch" # Ujednolicona nazwa pola z symbolami
 
+# --- Konfiguracja API Zewnętrznego ---
 BYBIT_API_URL_V5_KLINE = "https://api.bybit.com/v5/market/kline"
 
-# Te zmienne wciąż będą ładowane z Secret Managera przez config_loader
+# --- Zmienne ładowane z Sekretów ---
+# Te pozostają zależne od os.getenv, ponieważ zostaną załadowane przez config_loader
 BYBIT_API_KEY = os.getenv("BYBIT_API_KEY")
 BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET")
-
-BIGQUERY_DATASET_ID = "trading_analytics"
-BIGQUERY_TABLE_ID = "trades_history"
