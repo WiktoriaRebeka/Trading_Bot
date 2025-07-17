@@ -7,7 +7,7 @@ from io import StringIO
 from dotenv import load_dotenv
 import requests
 
-# Importujemy nasz nowy obiekt konfiguracyjny
+
 from shared_lib.config import config
 from shared_lib import constants
 
@@ -36,7 +36,7 @@ def load_config():
         logger.info("Środowisko lokalne. Ładowanie konfiguracji z pliku .env.")
         _load_from_dotenv()
     
-    # Po załadowaniu zmiennych do środowiska, aktualizujemy nasz obiekt konfiguracyjny
+  
     config.load()
     logger.info("Obiekt konfiguracyjny został zaktualizowany.")
 
