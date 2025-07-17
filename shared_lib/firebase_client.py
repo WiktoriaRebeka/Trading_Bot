@@ -34,19 +34,17 @@ def initialize_firebase() -> bool:
             client_options=client_options
         )
         
-        # --- LOGOWANIE DEBUGOWE ---
-        # Sprawdźmy, czy w ogóle możemy wylistować kolekcje
+
         collections = [c.id for c in db_client.collections()]
         logger.info(f"DIAGNOSTYKA: Znalezione kolekcje w bazie: {collections}")
-        # --- KONIEC LOGOWANIA DEBUGOWEGO ---
         
         logger.info(f"DIAGNOSTYKA: Inicjalizacja Firestore zakończona sukcesem.")
         return True
     
     except Exception as e:
-        # --- LOGOWANIE DEBUGOWE ---
+
         logger.critical(f"DIAGNOSTYKA: KRYTYCZNY BŁĄD podczas inicjalizacji Firestore: Typ błędu: {type(e).__name__}, Treść: {e}", exc_info=True)
-        # --- KONIEC LOGOWANIA DEBUGOWEGO ---
+
         db_client = None
         return False
 
