@@ -3,7 +3,7 @@ gunicorn
 google-cloud-firestore
 google-cloud-secret-manager
 google-cloud-logging
+aiohttp
 pydantic
 python-dotenv
-aiohttp
 requests

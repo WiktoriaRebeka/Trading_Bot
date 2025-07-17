@@ -1,4 +1,5 @@
 # Lokalizacja: shared_lib/constants.py
+
 import os
 
 # --- Konfiguracja Projektu ---
@@ -21,12 +22,13 @@ LAST_FETCH_STATE_DOC_ID = "last_fetch_state"
 SYMBOLS_CONFIG_DOC_ID = "symbols_config"
 # Nazwy pól
 LAST_PROCESSED_TS_FIELD = "last_processed_firestore_timestamp"
-SYMBOLS_FIELD_NAME = "symbols_to_watch" # Ujednolicona nazwa pola z symbolami
+SYMBOLS_FIELD_NAME = "symbols_to_watch"
 
 # --- Konfiguracja API Zewnętrznego ---
 BYBIT_API_URL_V5_KLINE = "https://api.bybit.com/v5/market/kline"
 
 # --- Zmienne ładowane z Sekretów ---
 # Te pozostają zależne od os.getenv, ponieważ zostaną załadowane przez config_loader
+# i odczytane przez obiekt AppConfig.
 BYBIT_API_KEY = os.getenv("BYBIT_API_KEY")
 BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET")

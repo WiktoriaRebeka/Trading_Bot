@@ -1,28 +1,48 @@
 # Lokalizacja: shared_lib/config_loader.py
+
 import os
 import logging
 from google.cloud import secretmanager
 from io import StringIO
 from dotenv import load_dotenv
+import requests
 
-# Usunięto import requests, nie jest już potrzebny
+# Importujemy nasz nowy obiekt konfiguracyjny
+from shared_lib.config import config
+from shared_lib import constants
 
 logger = logging.getLogger(__name__)
 
+def _get_project_id_from_metadata():
+    """Pobiera ID projektu z serwera metadanych GCP."""
+    try:
+        metadata_url = "http://metadata.google.internal/computeMetadata/v1/project/project-id"
+        headers = {"Metadata-Flavor": "Google"}
+        response = requests.get(metadata_url, headers=headers, timeout=2)
+        response.raise_for_status()
+        return response.text
+    except Exception as e:
+        logger.warning(f"Nie udało się pobrać ID projektu z serwera metadanych: {e}")
+        return None
+
 def load_config():
-    """Ładuje konfigurację w zależności od środowiska."""
+    """
+    Ładuje konfigurację w zależności od środowiska i aktualizuje globalny obiekt konfiguracyjny.
+    """
     if 'K_SERVICE' in os.environ:
         logger.info("Wykryto środowisko Cloud Run. Ładowanie konfiguracji z Secret Manager.")
         _load_from_secret_manager()
     else:
         logger.info("Środowisko lokalne. Ładowanie konfiguracji z pliku .env.")
         _load_from_dotenv()
+    
+    # Po załadowaniu zmiennych do środowiska, aktualizujemy nasz obiekt konfiguracyjny
+    config.load()
+    logger.info("Obiekt konfiguracyjny został zaktualizowany.")
 
 def _load_from_secret_manager():
     """Pobiera konfigurację z GCP Secret Manager."""
-    # Używamy teraz ID projektu bezpośrednio ze stałych
-    from shared_lib import constants
-    project_id = constants.GCP_PROJECT_ID
+    project_id = _get_project_id_from_metadata() or constants.GCP_PROJECT_ID
     secret_id = "trading-bot-secrets"
 
     try:
@@ -34,7 +54,7 @@ def _load_from_secret_manager():
         fake_file = StringIO(payload)
         load_dotenv(stream=fake_file, override=True)
         
-        logger.info(f"Pomyślnie załadowano konfigurację z sekretu: {secret_id}")
+        logger.info(f"Pomyślnie załadowano zmienne środowiskowe z sekretu: {secret_id}")
     except Exception as e:
         logger.error(f"Nie udało się załadować konfiguracji z Secret Manager. Błąd: {e}", exc_info=True)
 
