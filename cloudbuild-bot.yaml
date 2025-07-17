@@ -19,6 +19,8 @@ steps:
     - 'managed'
     - '--service-account'
     - 'trading-bot-runner@$PROJECT_ID.iam.gserviceaccount.com'
+    - '--set-env-vars'
+    - 'GCP_PROJECT=$PROJECT_ID'
 images:
 - 'us-central1-docker.pkg.dev/$PROJECT_ID/trading-bot-image/trading-bot-service:$SHORT_SHA'
 options:
