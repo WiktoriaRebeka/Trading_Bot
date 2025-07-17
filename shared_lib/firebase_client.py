@@ -12,9 +12,8 @@ from shared_lib import constants
 logger = logging.getLogger(__name__)
 db_client = None
 
-FIRESTORE_REGION = "us-central1"
-
 def initialize_firebase() -> bool:
+    """Inicjalizuje globalnego klienta Firestore, jawnie określając ID projektu i bazy danych."""
     global db_client
 
     if db_client is not None:
@@ -22,70 +21,56 @@ def initialize_firebase() -> bool:
 
     try:
         project_id = os.getenv("GCP_PROJECT", "trading-bot-463318")
-        database_id = "trading-bot-data"
-        api_endpoint = f"{FIRESTORE_REGION}-firestore.googleapis.com"
-        client_options = ClientOptions(api_endpoint=api_endpoint)
         
-        logger.info(f"DIAGNOSTYKA: Inicjalizacja klienta Firestore dla projektu '{project_id}' w regionie '{FIRESTORE_REGION}'...")
+        # --- KLUCZOWA ZMIANA: JAWNIE PODAJEMY NAZWĘ BAZY DANYCH ---
+        database_id = "trading-bot-data"
+        
+        logger.info(f"Inicjalizacja klienta Firestore dla projektu '{project_id}' i bazy '{database_id}'...")
 
+        # Przekazujemy ID bazy danych do konstruktora klienta
         db_client = firestore.Client(
             project=project_id,
-            database=database_id,
-            client_options=client_options
+            database=database_id
         )
-        
 
-        collections = [c.id for c in db_client.collections()]
-        logger.info(f"DIAGNOSTYKA: Znalezione kolekcje w bazie: {collections}")
+        # Szybki test, czy możemy połączyć się z bazą i odczytać dane
+        # Ten test teraz powinien się powieść
+        test_doc_ref = db_client.collection(constants.BOT_CONFIG_COLLECTION).document(constants.SYMBOLS_CONFIG_DOC_ID)
+        test_doc = test_doc_ref.get()
+        if not test_doc.exists:
+            # Jeśli to się nie uda, to znaczy, że problem jest jeszcze gdzieś indziej, ale to mało prawdopodobne
+            logger.warning("Testowy odczyt dokumentu konfiguracji nie powiódł się. Sprawdź, czy dokument na pewno istnieje w bazie 'trading-bot-data'.")
         
-        logger.info(f"DIAGNOSTYKA: Inicjalizacja Firestore zakończona sukcesem.")
+        logger.info(f"Inicjalizacja Firestore dla bazy '{database_id}' zakończona sukcesem.")
         return True
     
     except Exception as e:
-
-        logger.critical(f"DIAGNOSTYKA: KRYTYCZNY BŁĄD podczas inicjalizacji Firestore: Typ błędu: {type(e).__name__}, Treść: {e}", exc_info=True)
-
+        logger.critical(f"KRYTYCZNY BŁĄD podczas inicjalizacji Firestore: {e}", exc_info=True)
         db_client = None
         return False
 
 def get_db() -> firestore.Client:
+    """Zwraca zainicjalizowanego klienta Firestore lub zgłasza wyjątek."""
     if db_client is None:
         raise RuntimeError("Krytyczny błąd: Klient Firestore nie został pomyślnie zainicjalizowany.")
     return db_client
 
 def get_symbols_to_watch_from_config() -> List[str]:
-    logger.info("DIAGNOSTYKA: Wejście do funkcji get_symbols_to_watch_from_config.")
+    """Pobiera listę symboli do monitorowania z dokumentu konfiguracyjnego w Firestore."""
     try:
         db = get_db()
-        collection_name = constants.BOT_CONFIG_COLLECTION
-        doc_id = constants.SYMBOLS_CONFIG_DOC_ID
-        
-        # --- LOGOWANIE DEBUGOWE ---
-        logger.info(f"DIAGNOSTYKA: Próba odczytu dokumentu: kolekcja='{collection_name}', dokument='{doc_id}'.")
-        doc_ref = db.collection(collection_name).document(doc_id)
+        doc_ref = db.collection(constants.BOT_CONFIG_COLLECTION).document(constants.SYMBOLS_CONFIG_DOC_ID)
         doc = doc_ref.get()
-        logger.info(f"DIAGNOSTYKA: Operacja .get() zakończona.")
-
+        
         if doc.exists:
-            logger.info("DIAGNOSTYKA: doc.exists zwróciło TRUE.")
-            doc_data = doc.to_dict()
-            logger.info(f"DIAGNOSTYKA: Zawartość dokumentu (to_dict()): {doc_data}")
-            symbols = doc_data.get("symbols_to_watch", [])
-            logger.info(f"DIAGNOSTYKA: Odczytano pole 'symbols_to_watch', wynik: {symbols}")
-            
+            symbols = doc.to_dict().get("symbols_to_watch", [])
             if isinstance(symbols, list):
                 logger.info(f"Pobrano {len(symbols)} symboli do monitorowania z konfiguracji.")
                 return symbols
             else:
-                logger.error("DIAGNOSTYKA: Pole 'symbols_to_watch' nie jest listą.")
+                logger.error("Pole 'symbols_to_watch' w konfiguracji nie jest listą.")
         else:
-            # To jest blok, który prawdopodobnie jest wykonywany
-            logger.warning("DIAGNOSTYKA: doc.exists zwróciło FALSE. Dokument nie został znaleziony przez bibliotekę.")
-            
+            logger.warning(f"Dokument konfiguracyjny '{constants.SYMBOLS_CONFIG_DOC_ID}' nie istnieje w bazie danych '{db.database}'.")
     except Exception as e:
-        # --- LOGOWANIE DEBUGOWE ---
-        logger.error(f"DIAGNOSTYKA: Błąd wewnątrz get_symbols_to_watch_from_config: Typ błędu: {type(e).__name__}, Treść: {e}", exc_info=True)
-        # --- KONIEC LOGOWANIA DEBUGOWEGO ---
-    
-    logger.warning("DIAGNOSTYKA: Funkcja kończy działanie i zwraca PUSTĄ listę.")
+        logger.error(f"Błąd podczas pobierania konfiguracji symboli: {e}", exc_info=True)
     return []
