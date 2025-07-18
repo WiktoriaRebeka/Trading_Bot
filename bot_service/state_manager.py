@@ -106,27 +106,23 @@ def remove_analyzed_trade(trade_id: str):
     _get_db().collection(constants.ANALYZED_COLLECTION).document(trade_id).delete()
     logger.info(f"[{trade_id}] Zakończono i usunięto 'ducha'.")
 
-def get_latest_klines_from_cache(symbols: Iterable[str]) -> Dict[str, Dict[str, Any]]:
-    if not symbols: return {}
-    db = _get_db()
-    klines_cache = {}
-    unique_symbols = list(set(s for s in symbols if isinstance(s, str) and s))
-    if not unique_symbols: return {}
-    for i in range(0, len(unique_symbols), 30):
-        chunk = unique_symbols[i:i + 30]
-        if not chunk: continue
-        try:
-            docs = db.collection(constants.LATEST_KLINES_COLLECTION).where("__name__", "in", chunk).stream()
-            for doc in docs:
-                klines_cache[doc.id] = doc.to_dict()
-        except Exception as e:
-            logger.error(f"Błąd podczas pobierania kline z cache'u dla {chunk}: {e}", exc_info=True)
-    if klines_cache:
-        logger.info(f"Pobrano {len(klines_cache)} rekordów kline z cache'u.")
-    else:
-        logger.warning("Nie pobrano żadnych rekordów kline z cache'u.")
-    return klines_cache
 
+def get_all_analyzed_trades() -> Iterable[DocumentSnapshot]:
+    """Pobiera wszystkie dokumenty 'duchów' z dodatkowym logowaniem diagnostycznym."""
+    logger.info("[DIAGNOSTYKA DUCHA] Próba pobrania dokumentów z kolekcji 'analyzed_trades'...")
+    try:
+        collection_ref = _get_db().collection(constants.ANALYZED_COLLECTION)
+        docs_stream = collection_ref.stream()
+        
+        # Konwertujemy iterator na listę, aby policzyć elementy i uniknąć wyczerpania iteratora
+        docs_list = list(docs_stream) 
+        
+        logger.info(f"[DIAGNOSTYKA DUCHA] Pomyślnie pobrano {len(docs_list)} dokumentów z 'analyzed_trades'.")
+        return docs_list
+    except Exception as e:
+        logger.error(f"[DIAGNOSTYKA DUCHA] KRYTYCZNY BŁĄD podczas pobierania duchów: {e}", exc_info=True)
+        # Zwracamy pustą listę w przypadku błędu, aby nie zatrzymać całego cyklu
+        return []
 @firestore.transactional
 def update_setup_after_immediate_close_transactional(transaction, symbol: str, is_loss: bool):
     setup_doc_ref = _get_db().collection(constants.SETUP_COLLECTION).document(symbol)

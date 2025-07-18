@@ -202,13 +202,17 @@ def _handle_manage_open_trades(klines_data: Dict[str, Kline], open_trades: List[
             logger.error(f"[{trade_id}] Nieoczekiwany błąd podczas monitorowania otwartej pozycji: {e}", exc_info=True)
 
 
+
 def _handle_post_mortem_analysis(analyzed_trades: List[DocumentSnapshot], klines_data: Dict[str, Kline]):
     """
     Analizuje 'duchy', logując kluczowe etapy ich życia i aktualizując BQ na końcu.
     """
     if not analyzed_trades:
+        # Ten log pojawi się, jeśli get_all_analyzed_trades zwróci pustą listę
+        logger.info("[ANALIZA DUCHA] Brak aktywnych duchów do analizy w tym cyklu.")
         return
     
+    # Ten import jest tutaj celowo, aby uniknąć problemów z cyklicznymi zależnościami
     from bot_service.bigquery_logger import update_analyzed_trade_in_bigquery
     
     logger.info(f"[ANALIZA DUCHA] Rozpoczynam analizę dla {len(analyzed_trades)} 'duchów'.")
@@ -224,7 +228,7 @@ def _handle_post_mortem_analysis(analyzed_trades: List[DocumentSnapshot], klines
                 logger.warning(f"[ANALIZA DUCHA][{trade_id}] Brak danych kline dla symbolu {symbol}. Pomijam w tym cyklu.")
                 continue
 
-            # --- NOWY LOG: Informacja o aktywnym śledzeniu ---
+            # Log informujący o aktywnym śledzeniu
             logger.info(
                 f"[ANALIZA DUCHA][{trade_id}] Śledzę {symbol}. "
                 f"Aktualna cena: {latest_kline.close}, "
@@ -241,7 +245,7 @@ def _handle_post_mortem_analysis(analyzed_trades: List[DocumentSnapshot], klines
                 new_extreme = latest_kline.low
             
             if new_extreme != current_extreme:
-                # --- NOWY LOG: Informacja o nowym ekstremum ---
+                # Log informujący o nowym ekstremum
                 logger.info(f"[ANALIZA DUCHA][{trade_id}] Nowe ekstremum ceny: {new_extreme}. Aktualizuję stan w Firestore.")
                 state_manager.update_analyzed_trade_state(trade_id, new_extreme, latest_kline.timestamp)
                 analysis_trade.last_known_extreme_price = new_extreme # Aktualizujemy lokalny obiekt
@@ -259,7 +263,7 @@ def _handle_post_mortem_analysis(analyzed_trades: List[DocumentSnapshot], klines
                     is_analysis_finished, reason = True, f"cena dotknęła TP5 ({analysis_trade.original_tp_5_0})"
 
             if is_analysis_finished:
-                # --- NOWY, BARDZIEJ SZCZEGÓŁOWY LOG ---
+                # Bardziej szczegółowy log o "śmierci" ducha
                 logger.info(
                     f"[ANALIZA DUCHA][{trade_id}] ZAKOŃCZONO ANALIZĘ. Powód: {reason}. "
                     f"Ostateczne ekstremum: {analysis_trade.last_known_extreme_price}. "
@@ -283,7 +287,6 @@ def _handle_post_mortem_analysis(analyzed_trades: List[DocumentSnapshot], klines
 
         except Exception as e: 
             logger.error(f"[ANALIZA DUCHA][{trade_id}] Błąd podczas analizy post-mortem: {e}", exc_info=True)
-
 def run_trading_logic():
     logger.info("Rozpoczynam główną pętlę logiki tradingowej.")
 
