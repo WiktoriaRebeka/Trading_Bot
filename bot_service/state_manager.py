@@ -1,8 +1,8 @@
 # Lokalizacja: bot_service/state_manager.py
-import logging
-from typing import Iterable, Dict, Any, Optional
-from datetime import datetime, timezone
 
+import logging
+from typing import Iterable, Dict, Any
+from datetime import datetime, timezone
 from google.cloud import firestore
 from google.cloud.firestore_v1.document import DocumentSnapshot
 
@@ -15,25 +15,8 @@ logger = logging.getLogger(__name__)
 def _get_db() -> firestore.Client:
     return get_db()
 
-# --- Funkcje zarządzania setupami i pozycjami ---
-
 def get_all_active_setups() -> Iterable[DocumentSnapshot]:
     return _get_db().collection(constants.SETUP_COLLECTION).stream()
-
-def update_setup_entry_attempt(symbol: str):
-    doc_ref = _get_db().collection(constants.SETUP_COLLECTION).document(symbol)
-    doc_ref.update({"entry_attempts": firestore.Increment(1)})
-    logger.debug(f"[{symbol}] Zwiększono licznik prób wejścia.")
-
-def update_setup_after_trade_open(symbol: str):
-    doc_ref = _get_db().collection(constants.SETUP_COLLECTION).document(symbol)
-    doc_ref.update({"is_position_open_on_this_setup": True})
-    logger.info(f"[{symbol}] Zaktualizowano setup: pozycja otwarta.")
-
-def update_setup_after_trade_close(symbol: str, is_loss: bool):
-    doc_ref = _get_db().collection(constants.SETUP_COLLECTION).document(symbol)
-    doc_ref.update({"is_position_open_on_this_setup": False, "is_reset_needed_after_loss": is_loss})
-    logger.info(f"[{symbol}] Zresetowano flagę otwartej pozycji w setupie. is_loss={is_loss}")
 
 def update_setup_after_price_reset(symbol: str):
     doc_ref = _get_db().collection(constants.SETUP_COLLECTION).document(symbol)
@@ -43,30 +26,19 @@ def update_setup_after_price_reset(symbol: str):
 def get_all_open_trades() -> Iterable[DocumentSnapshot]:
     return _get_db().collection(constants.TRADE_COLLECTION).stream()
 
-# Lokalizacja: bot_service/state_manager.py
-
 def create_open_trade(trade_id: str, symbol: str, direction: str, ob_type: str, entry_price: float, sl_price: float, tp_price: float, alert_data: AlertData):
     db = _get_db()
-    
-    # Używamy transakcji, aby zapewnić atomowość operacji
     transaction = db.transaction()
     
     @firestore.transactional
     def _create_trade_in_transaction(transaction, trade_id, symbol, direction, ob_type, entry_price, sl_price, tp_price, alert_data):
-        # Referencje do dokumentów
         trade_doc_ref = db.collection(constants.TRADE_COLLECTION).document(trade_id)
         setup_doc_ref = db.collection(constants.SETUP_COLLECTION).document(symbol)
-
-        # Sprawdzenie, czy setup wciąż istnieje i nie ma otwartej pozycji
-        # To dodatkowe zabezpieczenie przed race condition
         setup_snapshot = setup_doc_ref.get(transaction=transaction)
         if not setup_snapshot.exists:
-            raise RuntimeError(f"Setup dla symbolu {symbol} już nie istnieje. Anulowano tworzenie pozycji.")
-        
+            raise RuntimeError(f"Setup dla {symbol} już nie istnieje.")
         if setup_snapshot.to_dict().get("is_position_open_on_this_setup", False):
-            raise RuntimeError(f"Pozycja dla setupu {symbol} jest już oznaczona jako otwarta. Anulowano tworzenie zduplikowanej pozycji.")
-
-        # 1. Utwórz nową pozycję
+            raise RuntimeError(f"Pozycja dla setupu {symbol} jest już otwarta.")
         timestamp_utc = datetime.now(timezone.utc)
         new_trade = OpenTradeData(
             trade_id=trade_id, symbol=symbol, direction=direction.upper(), ob_type=ob_type,
@@ -76,52 +48,33 @@ def create_open_trade(trade_id: str, symbol: str, direction: str, ob_type: str, 
             alert_data_snapshot=alert_data.model_dump(by_alias=True)
         )
         transaction.set(trade_doc_ref, new_trade.model_dump())
-
-        # 2. Zaktualizuj setup
         update_data = {
             "is_position_open_on_this_setup": True,
             "entry_attempts": firestore.Increment(1)
         }
         transaction.update(setup_doc_ref, update_data)
-        
         logger.info(f"[{symbol}][{trade_id}] Transakcja przygotowana: utworzenie pozycji i aktualizacja setupu.")
 
     try:
         _create_trade_in_transaction(transaction, trade_id, symbol, direction, ob_type, entry_price, sl_price, tp_price, alert_data)
-        logger.info(f"[{symbol}][{trade_id}] SUKCES. Transakcja atomowa zakończona pomyślnie.")
+        logger.info(f"[{symbol}][{trade_id}] SUKCES. Transakcja atomowa zakończona.")
     except Exception as e:
-        logger.error(f"[{symbol}][{trade_id}] BŁĄD TRANSAKCJI. Nie udało się atomowo utworzyć pozycji: {e}", exc_info=True)
-        # Rzucamy wyjątek dalej, aby logika wywołująca mogła zareagować
+        logger.error(f"[{symbol}][{trade_id}] BŁĄD TRANSAKCJI: {e}", exc_info=True)
         raise
-
-def remove_open_trade(trade_id: str):
-    _get_db().collection(constants.TRADE_COLLECTION).document(trade_id).delete()
-    logger.info(f"[{trade_id}] Usunięto pozycję z aktywnego monitorowania.")
 
 def get_all_analyzed_trades() -> Iterable[DocumentSnapshot]:
     return _get_db().collection(constants.ANALYZED_COLLECTION).stream()
 
-# Lokalizacja: bot_service/state_manager.py
-
 def create_analyzed_trade(trade_data: OpenTradeData):
-    """Tworzy 'ducha' dla transakcji WIN do analizy post-mortem z DODATKOWYM LOGOWANIEM."""
     db = _get_db()
     trade_id = trade_data.trade_id
-    
-    # --- KROK 1: Sprawdzenie, czy w ogóle mamy co tworzyć ---
     if not trade_id:
-        logger.error("[CREATE_GHOST] Otrzymano dane transakcji bez trade_id. Nie można utworzyć 'ducha'.")
+        logger.error("[CREATE_GHOST] Brak trade_id.")
         return
-
-    logger.info(f"[CREATE_GHOST][{trade_id}] Rozpoczynam tworzenie 'ducha' dla transakcji WIN.")
-    
+    logger.info(f"[CREATE_GHOST][{trade_id}] Tworzenie 'ducha' dla transakcji WIN.")
     try:
         doc_ref = db.collection(constants.ANALYZED_COLLECTION).document(trade_id)
-        
-        # --- KROK 2: Bezpieczne pobieranie wartości ---
         tp5_value = trade_data.alert_data_snapshot.get('tp_5_0')
-        logger.info(f"[CREATE_GHOST][{trade_id}] Odczytano tp_5_0: {tp5_value}")
-        
         analysis_data = AnalyzedTradeData(
             trade_id=trade_id,
             symbol=trade_data.symbol,
@@ -133,19 +86,12 @@ def create_analyzed_trade(trade_data: OpenTradeData):
             alert_data_snapshot=trade_data.alert_data_snapshot,
             last_known_extreme_price=trade_data.tp_price,
             last_analysis_timestamp_ms=int(datetime.now(timezone.utc).timestamp() * 1000),
-            achieved_tps=["rr_1_0_achieved"] # Zakładamy, że WIN oznacza osiągnięcie co najmniej 1R
+            achieved_tps=["rr_1_0_achieved"]
         )
-        
-        # --- KROK 3: Zapis do Firestore ---
-        logger.info(f"[CREATE_GHOST][{trade_id}] Przygotowano dane 'ducha'. Próbuję zapisać do Firestore.")
         doc_ref.set(analysis_data.model_dump())
-        logger.info(f"[CREATE_GHOST][{trade_id}] SUKCES! Utworzono 'ducha' w kolekcji '{constants.ANALYZED_COLLECTION}'.")
-
+        logger.info(f"[CREATE_GHOST][{trade_id}] SUKCES! Utworzono 'ducha'.")
     except Exception as e:
-        # --- KROK 4: Logowanie ewentualnych błędów ---
-        logger.error(f"[CREATE_GHOST][{trade_id}] KRYTYCZNY BŁĄD podczas tworzenia 'ducha': {e}", exc_info=True)
-
-# Lokalizacja: bot_service/state_manager.py
+        logger.error(f"[CREATE_GHOST][{trade_id}] KRYTYCZNY BŁĄD: {e}", exc_info=True)
 
 def update_analyzed_trade_state(trade_id: str, new_extreme_price: float, new_timestamp_ms: int):
     doc_ref = _get_db().collection(constants.ANALYZED_COLLECTION).document(trade_id)
@@ -154,21 +100,18 @@ def update_analyzed_trade_state(trade_id: str, new_extreme_price: float, new_tim
         "last_analysis_timestamp_ms": new_timestamp_ms
     }
     doc_ref.update(update_data)
-    logger.info(f"[{trade_id}] Zaktualizowano stan 'ducha'. Nowa cena ekstremalna: {new_extreme_price}")
+    logger.info(f"[{trade_id}] Zaktualizowano stan 'ducha'. Nowa cena: {new_extreme_price}")
 
 def remove_analyzed_trade(trade_id: str):
     _get_db().collection(constants.ANALYZED_COLLECTION).document(trade_id).delete()
-    logger.info(f"[{trade_id}] Zakończono i usunięto pozycję z analizy post-mortem.")
+    logger.info(f"[{trade_id}] Zakończono i usunięto 'ducha'.")
 
 def get_latest_klines_from_cache(symbols: Iterable[str]) -> Dict[str, Dict[str, Any]]:
     if not symbols: return {}
     db = _get_db()
     klines_cache = {}
     unique_symbols = list(set(s for s in symbols if isinstance(s, str) and s))
-    if not unique_symbols:
-        logger.warning("Lista symboli po wstępnym przefiltrowaniu jest pusta.")
-        return {}
-    # Zwiększono limit do 30 (maksymalny dla 'in' w Firestore)
+    if not unique_symbols: return {}
     for i in range(0, len(unique_symbols), 30):
         chunk = unique_symbols[i:i + 30]
         if not chunk: continue
@@ -177,19 +120,15 @@ def get_latest_klines_from_cache(symbols: Iterable[str]) -> Dict[str, Dict[str, 
             for doc in docs:
                 klines_cache[doc.id] = doc.to_dict()
         except Exception as e:
-            logger.error(f"Błąd podczas pobierania danych kline z cache'u dla chunk'a: {chunk}. Błąd: {e}", exc_info=True)
+            logger.error(f"Błąd podczas pobierania kline z cache'u dla {chunk}: {e}", exc_info=True)
     if klines_cache:
-        logger.info(f"Pobrano {len(klines_cache)} rekordów kline z cache'u w Firestore.")
+        logger.info(f"Pobrano {len(klines_cache)} rekordów kline z cache'u.")
     else:
-        logger.warning("Nie udało się pobrać żadnych rekordów kline z cache'u. Sprawdź, czy kolekcja '%s' zawiera dokumenty o podanych ID.", constants.LATEST_KLINES_COLLECTION)
+        logger.warning("Nie pobrano żadnych rekordów kline z cache'u.")
     return klines_cache
 
 @firestore.transactional
 def update_setup_after_immediate_close_transactional(transaction, symbol: str, is_loss: bool):
-    """
-    Atomowo aktualizuje setup po natychmiastowym zamknięciu (w tej samej świecy),
-    zwiększając licznik prób i ustawiając flagi zamknięcia.
-    """
     setup_doc_ref = _get_db().collection(constants.SETUP_COLLECTION).document(symbol)
     update_data = {
         "is_position_open_on_this_setup": False,
@@ -198,3 +137,20 @@ def update_setup_after_immediate_close_transactional(transaction, symbol: str, i
     }
     transaction.update(setup_doc_ref, update_data)
     logger.info(f"[{symbol}] Transakcja przygotowana: aktualizacja setupu po natychmiastowym zamknięciu.")
+
+@firestore.transactional
+def close_trade_transactional(transaction, trade_id: str, symbol: str, is_loss: bool):
+    """
+    Atomowo usuwa otwartą pozycję z kolekcji 'open_trades' i aktualizuje
+    powiązany z nią dokument w 'active_setups'.
+    """
+    db = _get_db()
+    trade_doc_ref = db.collection(constants.TRADE_COLLECTION).document(trade_id)
+    setup_doc_ref = db.collection(constants.SETUP_COLLECTION).document(symbol)
+    transaction.delete(trade_doc_ref)
+    update_data = {
+        "is_position_open_on_this_setup": False,
+        "is_reset_needed_after_loss": is_loss
+    }
+    transaction.update(setup_doc_ref, update_data)
+    logger.info(f"[{trade_id}][{symbol}] Transakcja przygotowana: usunięcie pozycji i reset setupu.")
