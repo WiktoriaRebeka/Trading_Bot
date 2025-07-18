@@ -1,4 +1,4 @@
-# Lokalizacja: /bot_service/Dockerfile
+# Lokalizacja: /bot_service/Dockerfile (POPRAWIONY)
 FROM python:3.11-slim
 ENV PYTHONUNBUFFERED 1
 WORKDIR /app
@@ -10,6 +10,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY shared_lib/ /app/shared_lib/
 COPY bot_service/ /app/bot_service/
 
-CMD exec gunicorn --bind :$PORT --workers 1 --threads 8 --timeout 300 "bot_service.main:create_app()"
-
-# Cache buster comment - 2025-07-17-v1
+# --- POPRAWKA ---
+CMD exec gunicorn --bind :$PORT --workers 1 --threads 8 --timeout 300 "bot_service.main:app"

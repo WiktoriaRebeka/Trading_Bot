@@ -2,6 +2,7 @@
 
 import os
 
+# Nazwy kolekcji i dokumentów w Firestore
 FIRESTORE_COLLECTION_ALERTS = "alerts"
 BOT_CONFIG_COLLECTION = "bot_config"
 LAST_FETCH_STATE_DOC_ID = "last_fetch_state"
@@ -13,11 +14,14 @@ TRADE_COLLECTION = "open_trades"
 ANALYZED_COLLECTION = "analyzed_trades"
 LATEST_KLINES_COLLECTION = "latest_klines"
 
+# Adresy URL API
 BYBIT_API_URL_V5_KLINE = "https://api.bybit.com/v5/market/kline"
 
+# Klucze API ładowane ze zmiennych środowiskowych (przez config_loader.py)
 BYBIT_API_KEY = os.getenv("BYBIT_API_KEY")
 BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET")
 
+# Konfiguracja BigQuery
 BIGQUERY_PROJECT_ID = os.getenv("GCP_PROJECT", "trading-bot-463318")
 BIGQUERY_DATASET_ID = "trading_analytics"
 BIGQUERY_TABLE_ID = "trades_history"

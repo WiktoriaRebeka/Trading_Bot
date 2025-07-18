@@ -1,27 +1,36 @@
 # Lokalizacja: /cloudbuild-collector.yaml
 steps:
+# Krok 1: Zbuduj obraz Docker
 - name: 'gcr.io/cloud-builders/docker'
-  args: ['build', '-t', 'us-central1-docker.pkg.dev/$PROJECT_ID/trading-bot-image/data-collector-service:$SHORT_SHA', '--file', 'collector_service/Dockerfile', '.']
+  id: 'Build Image'
+  args: ['build', '-t', 'europe-central2-docker.pkg.dev/$PROJECT_ID/trading-bot-image/data-collector-service:$SHORT_SHA', '--file', 'collector_service/Dockerfile', '.']
+
+# Krok 2: Wypchnij obraz do Artifact Registry
 - name: 'gcr.io/cloud-builders/docker'
-  args: ['push', 'us-central1-docker.pkg.dev/$PROJECT_ID/trading-bot-image/data-collector-service:$SHORT_SHA']
+  id: 'Push Image'
+  args: ['push', 'europe-central2-docker.pkg.dev/$PROJECT_ID/trading-bot-image/data-collector-service:$SHORT_SHA']
+
+# Krok 3: Wdróż obraz na Cloud Run
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  id: 'Deploy to Cloud Run'
   entrypoint: gcloud
   args:
     - 'run'
     - 'deploy'
     - 'data-collector-service'
     - '--image'
-    - 'us-central1-docker.pkg.dev/$PROJECT_ID/trading-bot-image/data-collector-service:$SHORT_SHA'
-    # --- KLUCZOWA ZMIANA: Zmiana regionu na zgodny z Firestore ---
+    - 'europe-central2-docker.pkg.dev/$PROJECT_ID/trading-bot-image/data-collector-service:$SHORT_SHA'
     - '--region'
-    - 'us-central1'
+    - 'europe-central2'
     - '--platform'
     - 'managed'
     - '--service-account'
-    - 'trading-bot-runner@$PROJECT_ID.iam.gserviceaccount.com'
-    - '--set-env-vars'
-    - 'GCP_PROJECT=$PROJECT_ID'
+    - 'trading-bot-463318@appspot.gserviceaccount.com'
+    - '--vpc-connector'
+    - 'app-connector-warsaw'
+    - '--vpc-egress'
+    - 'all'
 images:
-- 'us-central1-docker.pkg.dev/$PROJECT_ID/trading-bot-image/data-collector-service:$SHORT_SHA'
+- 'europe-central2-docker.pkg.dev/$PROJECT_ID/trading-bot-image/data-collector-service:$SHORT_SHA'
 options:
   logging: CLOUD_LOGGING_ONLY
