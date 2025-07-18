@@ -31,7 +31,7 @@ async def _fetch_kline_for_symbol(session: aiohttp.ClientSession, symbol: str, c
                         "high": float(target_kline[2]), 
                         "low": float(target_kline[3]), 
                         "close": float(target_kline[4]), 
-                        "kline_timestamp": int(target_kline[0])
+                        "timestamp": int(target_kline[0])
                     }
                 else:
                     logger.warning(f"API zwróciło błąd: {data.get('retMsg', 'Brak wiadomości')}", extra=log_extra)
