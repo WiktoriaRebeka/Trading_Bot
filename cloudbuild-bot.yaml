@@ -23,8 +23,7 @@ steps:
     - 'app-connector-warsaw'
     - '--vpc-egress'
     - 'all-traffic'
-    - '--set-env-vars'
-    - 'GCP_PROJECT=$PROJECT_ID'
+    - '--set-env-vars=GCP_PROJECT=$PROJECT_ID'
 images:
 - 'europe-central2-docker.pkg.dev/$PROJECT_ID/trading-bot-image/trading-bot-service:$SHORT_SHA'
 options:
