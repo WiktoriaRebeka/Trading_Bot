@@ -193,7 +193,13 @@ def _handle_post_mortem_analysis(analyzed_trades: List[DocumentSnapshot], klines
                 logger.warning(f"[ANALIZA DUCHA][{trade_id}] Brak danych kline dla {symbol}.")
                 continue
             
-            logger.info(f"[ANALIZA DUCHA][{trade_id}] Śledzę {symbol}. Cena: {latest_kline.close}, Ekstremum: {analysis_trade.last_known_extreme_price}, SL: {analysis_trade.original_sl}, TP5: {analysis_trade.original_tp_5_0}")
+            logger.info(
+                f"[DIAGNOSTYKA DUCHA][{trade_id}] Porównanie dla {analysis_trade.direction}: "
+                f"kline.low={latest_kline.low} (typ: {type(latest_kline.low)}), "
+                f"kline.high={latest_kline.high} (typ: {type(latest_kline.high)}), "
+                f"original_sl={analysis_trade.original_sl} (typ: {type(analysis_trade.original_sl)}), "
+                f"original_tp_5_0={analysis_trade.original_tp_5_0} (typ: {type(analysis_trade.original_tp_5_0)})"
+            )
             
             current_extreme = analysis_trade.last_known_extreme_price
             new_extreme = current_extreme

@@ -1,7 +1,7 @@
 # Lokalizacja: bot_service/state_manager.py
 
 import logging
-from typing import Iterable, Dict, Any
+from typing import Iterable, Dict, Any, List
 from datetime import datetime, timezone
 from google.cloud import firestore
 from google.cloud.firestore_v1.document import DocumentSnapshot
@@ -63,7 +63,16 @@ def create_open_trade(trade_id: str, symbol: str, direction: str, ob_type: str, 
         raise
 
 def get_all_analyzed_trades() -> Iterable[DocumentSnapshot]:
-    return _get_db().collection(constants.ANALYZED_COLLECTION).stream()
+    logger.info("[DIAGNOSTYKA DUCHA] Próba pobrania dokumentów z 'analyzed_trades'...")
+    try:
+        collection_ref = _get_db().collection(constants.ANALYZED_COLLECTION)
+        docs_stream = collection_ref.stream()
+        docs_list = list(docs_stream) 
+        logger.info(f"[DIAGNOSTYKA DUCHA] Pomyślnie pobrano {len(docs_list)} dokumentów z 'analyzed_trades'.")
+        return docs_list
+    except Exception as e:
+        logger.error(f"[DIAGNOSTYKA DUCHA] KRYTYCZNY BŁĄD podczas pobierania duchów: {e}", exc_info=True)
+        return []
 
 def create_analyzed_trade(trade_data: OpenTradeData):
     db = _get_db()
@@ -106,23 +115,37 @@ def remove_analyzed_trade(trade_id: str):
     _get_db().collection(constants.ANALYZED_COLLECTION).document(trade_id).delete()
     logger.info(f"[{trade_id}] Zakończono i usunięto 'ducha'.")
 
+def get_latest_klines_from_cache(symbols: Iterable[str]) -> Dict[str, Dict[str, Any]]:
+    if not symbols: 
+        logger.info("[KLINE_CACHE] Otrzymano pustą listę symboli.")
+        return {}
+    db = _get_db()
+    klines_cache = {}
+    unique_symbols = list(set(s for s in symbols if isinstance(s, str) and s))
+    if not unique_symbols:
+        logger.warning("[KLINE_CACHE] Lista symboli po przefiltrowaniu jest pusta.")
+        return {}
+    logger.info(f"[KLINE_CACHE] Próba pobrania danych dla {len(unique_symbols)} symboli.")
+    for i in range(0, len(unique_symbols), 30):
+        chunk = unique_symbols[i:i + 30]
+        if not chunk: continue
+        try:
+            logger.debug(f"[KLINE_CACHE] Przetwarzam część: {chunk}")
+            docs = db.collection(constants.LATEST_KLINES_COLLECTION).where("__name__", "in", chunk).stream()
+            chunk_results = 0
+            for doc in docs:
+                klines_cache[doc.id] = doc.to_dict()
+                chunk_results += 1
+            logger.debug(f"[KLINE_CACHE] Pomyślnie pobrano {chunk_results} dokumentów dla tej części.")
+        except Exception as e:
+            logger.error(f"[KLINE_CACHE] KRYTYCZNY BŁĄD podczas pobierania danych dla części {chunk}: {e}", exc_info=True)
+            continue
+    if klines_cache:
+        logger.info(f"[KLINE_CACHE] Pomyślnie pobrano łącznie {len(klines_cache)} rekordów kline z cache'u.")
+    else:
+        logger.warning(f"[KLINE_CACHE] Nie udało się pobrać ŻADNYCH rekordów kline z cache'u.")
+    return klines_cache
 
-def get_all_analyzed_trades() -> Iterable[DocumentSnapshot]:
-    """Pobiera wszystkie dokumenty 'duchów' z dodatkowym logowaniem diagnostycznym."""
-    logger.info("[DIAGNOSTYKA DUCHA] Próba pobrania dokumentów z kolekcji 'analyzed_trades'...")
-    try:
-        collection_ref = _get_db().collection(constants.ANALYZED_COLLECTION)
-        docs_stream = collection_ref.stream()
-        
-        # Konwertujemy iterator na listę, aby policzyć elementy i uniknąć wyczerpania iteratora
-        docs_list = list(docs_stream) 
-        
-        logger.info(f"[DIAGNOSTYKA DUCHA] Pomyślnie pobrano {len(docs_list)} dokumentów z 'analyzed_trades'.")
-        return docs_list
-    except Exception as e:
-        logger.error(f"[DIAGNOSTYKA DUCHA] KRYTYCZNY BŁĄD podczas pobierania duchów: {e}", exc_info=True)
-        # Zwracamy pustą listę w przypadku błędu, aby nie zatrzymać całego cyklu
-        return []
 @firestore.transactional
 def update_setup_after_immediate_close_transactional(transaction, symbol: str, is_loss: bool):
     setup_doc_ref = _get_db().collection(constants.SETUP_COLLECTION).document(symbol)
@@ -136,10 +159,6 @@ def update_setup_after_immediate_close_transactional(transaction, symbol: str, i
 
 @firestore.transactional
 def close_trade_transactional(transaction, trade_id: str, symbol: str, is_loss: bool):
-    """
-    Atomowo usuwa otwartą pozycję z kolekcji 'open_trades' i aktualizuje
-    powiązany z nią dokument w 'active_setups'.
-    """
     db = _get_db()
     trade_doc_ref = db.collection(constants.TRADE_COLLECTION).document(trade_id)
     setup_doc_ref = db.collection(constants.SETUP_COLLECTION).document(symbol)
@@ -150,56 +169,3 @@ def close_trade_transactional(transaction, trade_id: str, symbol: str, is_loss: 
     }
     transaction.update(setup_doc_ref, update_data)
     logger.info(f"[{trade_id}][{symbol}] Transakcja przygotowana: usunięcie pozycji i reset setupu.")
-# Lokalizacja: bot_service/state_manager.py (ZASTĄP TĘ FUNKCJĘ)
-
-def get_latest_klines_from_cache(symbols: Iterable[str]) -> Dict[str, Dict[str, Any]]:
-    """
-    Pobiera najnowsze dane o świecach z cache'u w Firestore z dodatkowym,
-    szczegółowym logowaniem i obsługą błędów.
-    """
-    if not symbols: 
-        logger.info("[KLINE_CACHE] Otrzymano pustą listę symboli. Zwracam pusty słownik.")
-        return {}
-    
-    db = _get_db()
-    klines_cache = {}
-    # Upewniamy się, że mamy unikalną listę poprawnych stringów
-    unique_symbols = list(set(s for s in symbols if isinstance(s, str) and s))
-    
-    if not unique_symbols:
-        logger.warning("[KLINE_CACHE] Lista symboli po przefiltrowaniu jest pusta.")
-        return {}
-
-    logger.info(f"[KLINE_CACHE] Próba pobrania danych dla {len(unique_symbols)} symboli.")
-    
-    # Firestore ma limit 30 wartości w zapytaniu 'in', więc dzielimy listę na części
-    for i in range(0, len(unique_symbols), 30):
-        chunk = unique_symbols[i:i + 30]
-        if not chunk: 
-            continue
-        
-        try:
-            logger.debug(f"[KLINE_CACHE] Przetwarzam część: {chunk}")
-            docs = db.collection(constants.LATEST_KLINES_COLLECTION).where("__name__", "in", chunk).stream()
-            
-            chunk_results = 0
-            for doc in docs:
-                klines_cache[doc.id] = doc.to_dict()
-                chunk_results += 1
-            logger.debug(f"[KLINE_CACHE] Pomyślnie pobrano {chunk_results} dokumentów dla tej części.")
-
-        except Exception as e:
-            # Ten log pokaże nam, czy problem leży w samej komunikacji z Firestore
-            logger.error(f"[KLINE_CACHE] KRYTYCZNY BŁĄD podczas pobierania danych dla części {chunk}: {e}", exc_info=True)
-            # Kontynuujemy z następną częścią, zamiast zawieszać całą funkcję
-            continue
-            
-    if klines_cache:
-        logger.info(f"[KLINE_CACHE] Pomyślnie pobrano łącznie {len(klines_cache)} rekordów kline z cache'u.")
-    else:
-        logger.warning(
-            f"[KLINE_CACHE] Nie udało się pobrać ŻADNYCH rekordów kline z cache'u dla {len(unique_symbols)} symboli. "
-            f"Sprawdź, czy kolekcja '{constants.LATEST_KLINES_COLLECTION}' zawiera dokumenty o podanych ID."
-        )
-        
-    return klines_cache
