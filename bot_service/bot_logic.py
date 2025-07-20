@@ -220,30 +220,28 @@ def _handle_manage_open_trades(klines_data: Dict[str, Kline], open_trades: List[
         except Exception as e:
             logger.error(f"Nieoczekiwany błąd podczas monitorowania pozycji {trade_id}: {e}", exc_info=True)
 
+
 def _handle_post_mortem_analysis(analyzed_trades: List[DocumentSnapshot], klines_data: Dict[str, Kline]):
     if not analyzed_trades:
-        logger.info("[ANALIZA DUCHA] Brak aktywnych duchów do analizy.")
+        # Zmieniamy log, aby był bardziej informacyjny
+        # logger.info("[ANALIZA DUCHA] Brak aktywnych duchów do analizy.")
         return
+    
     from bot_service.bigquery_logger import update_analyzed_trade_in_bigquery
+    
     logger.info(f"[ANALIZA DUCHA] Rozpoczynam analizę dla {len(analyzed_trades)} 'duchów'.")
+    
     for trade_doc in analyzed_trades:
         trade_id = trade_doc.id
         try:
             analysis_trade = AnalyzedTradeData.model_validate(trade_doc.to_dict())
             symbol = analysis_trade.symbol
+            
             latest_kline = klines_data.get(symbol)
             if not latest_kline:
                 logger.warning(f"[ANALIZA DUCHA][{trade_id}] Brak danych kline dla {symbol}.")
                 continue
-            
-            logger.info(
-                f"[DIAGNOSTYKA DUCHA][{trade_id}] Porównanie dla {analysis_trade.direction}: "
-                f"kline.low={latest_kline.low} (typ: {type(latest_kline.low)}), "
-                f"kline.high={latest_kline.high} (typ: {type(latest_kline.high)}), "
-                f"original_sl={analysis_trade.original_sl} (typ: {type(analysis_trade.original_sl)}), "
-                f"original_tp_5_0={analysis_trade.original_tp_5_0} (typ: {type(analysis_trade.original_tp_5_0)})"
-            )
-            
+
             current_extreme = analysis_trade.last_known_extreme_price
             new_extreme = current_extreme
             if analysis_trade.direction == 'LONG' and latest_kline.high > current_extreme:
@@ -252,7 +250,6 @@ def _handle_post_mortem_analysis(analyzed_trades: List[DocumentSnapshot], klines
                 new_extreme = latest_kline.low
             
             if new_extreme != current_extreme:
-                logger.info(f"[ANALIZA DUCHA][{trade_id}] Nowe ekstremum: {new_extreme}. Aktualizuję stan.")
                 state_manager.update_analyzed_trade_state(trade_id, new_extreme, latest_kline.timestamp)
                 analysis_trade.last_known_extreme_price = new_extreme
             
@@ -260,19 +257,28 @@ def _handle_post_mortem_analysis(analyzed_trades: List[DocumentSnapshot], klines
             if analysis_trade.direction == 'LONG':
                 if latest_kline.low <= analysis_trade.original_sl: is_analysis_finished, reason = True, f"cena dotknęła SL ({analysis_trade.original_sl})"
                 elif analysis_trade.original_tp_5_0 and latest_kline.high >= analysis_trade.original_tp_5_0: is_analysis_finished, reason = True, f"cena dotknęła TP5 ({analysis_trade.original_tp_5_0})"
-            else:
+            else: # SHORT
                 if latest_kline.high >= analysis_trade.original_sl: is_analysis_finished, reason = True, f"cena dotknęła SL ({analysis_trade.original_sl})"
                 elif analysis_trade.original_tp_5_0 and latest_kline.low <= analysis_trade.original_tp_5_0: is_analysis_finished, reason = True, f"cena dotknęła TP5 ({analysis_trade.original_tp_5_0})"
             
             if is_analysis_finished:
-                logger.info(f"[ANALIZA DUCHA][{trade_id}] ZAKOŃCZONO ANALIZĘ. Powód: {reason}. Ostateczne ekstremum: {analysis_trade.last_known_extreme_price}. Aktualizuję BQ.")
+                logger.info(f"[ANALIZA DUCHA][{trade_id}] ZAKOŃCZONO ANALIZĘ. Powód: {reason}. Ostateczne ekstremum: {analysis_trade.last_known_extreme_price}.")
+                
                 final_analytics = _calculate_rr_analytics(analysis_trade.entry_price, analysis_trade.original_sl, analysis_trade.last_known_extreme_price, analysis_trade.direction)
-                final_updates = {"timestamp_close": datetime.now(timezone.utc).isoformat()}
+                
+                final_updates = {
+                    "timestamp_close": datetime.now(timezone.utc).isoformat()
+                }
                 final_updates.update(final_analytics)
+                
+                # --- OSTATECZNY LOG DIAGNOSTYCZNY ---
+                logger.info(f"[DIAGNOSTYKA BQ_UPDATE][{trade_id}] Przygotowano finalne dane do aktualizacji: {final_updates}")
+                
                 update_analyzed_trade_in_bigquery(trade_id, final_updates)
                 state_manager.remove_analyzed_trade(trade_id)
+
         except Exception as e: 
-            logger.error(f"[ANALIZA DUCHA][{trade_id}] Błąd: {e}", exc_info=True)
+            logger.error(f"[ANALIZA DUCHA][{trade_id}] Błąd podczas analizy post-mortem: {e}", exc_info=True)
 
 def run_trading_logic():
     logger.info("Rozpoczynam główną pętlę logiki tradingowej.")
