@@ -55,25 +55,68 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]]):
         except Exception as e:
             logger.error(f"Nieoczekiwany błąd podczas przetwarzania alertu: {e}", exc_info=True, extra={"json_fields": {"alert_id": alert_dict.get('id')}})
 
+
 def finalize_trade(trade: OpenTradeData, closed_result: str, close_price: float):
+    """
+    Finalizuje transakcję zgodnie z rozdzieloną logiką dla WIN i LOSE.
+    """
     logger.info(f"--- [FINALIZACJA] --- [{trade.symbol}] | ID: {trade.trade_id} | Wynik: {closed_result}")
-    analytics_data = _calculate_rr_analytics(trade.entry_price, trade.sl_price, close_price, trade.direction)
-    bq_data = {
-        "trade_id": trade.trade_id, 
-        "timestamp_entry": trade.opened_at_iso,
-        "timestamp_close": datetime.now(timezone.utc).isoformat(), 
-        "symbol": trade.symbol,
-        "direction": trade.direction.upper(), 
-        "main_result": closed_result, 
-        "ob_type": trade.ob_type
-    }
-    bq_data.update(analytics_data)
+
+    # --- LOGIKA DLA POZYCJI LOSE ---
     if closed_result == "LOSE":
-        logger.info(f"[{trade.trade_id}] Pozycja przegrana. Zapisuję do BigQuery.")
+        logger.info(f"[{trade.trade_id}] Pozycja przegrana. Rozpoczynam analizę historyczną.")
+        
+        # 1. Pobierz historię świec od otwarcia do zamknięcia
+        end_time_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        historical_klines = state_manager.get_historical_klines(trade.symbol, trade.opened_at_ms, end_time_ms)
+        
+        # 2. Znajdź maksymalną cenę osiągniętą w trakcie trwania pozycji
+        extreme_price = trade.entry_price
+        if historical_klines:
+            if trade.direction == 'LONG':
+                extreme_price = max(k['high'] for k in historical_klines)
+            elif trade.direction == 'SHORT':
+                extreme_price = min(k['low'] for k in historical_klines)
+        
+        logger.info(f"[{trade.trade_id}] Analiza historyczna: maksymalna cena osiągnięta to {extreme_price}.")
+
+        # 3. Oblicz analitykę na podstawie tej maksymalnej ceny
+        analytics_data = _calculate_rr_analytics(trade.entry_price, trade.sl_price, extreme_price, trade.direction)
+        
+        # 4. Przygotuj i zapisz dane do BigQuery
+        bq_data = {
+            "trade_id": trade.trade_id, 
+            "timestamp_entry": trade.opened_at_iso,
+            "timestamp_close": datetime.now(timezone.utc).isoformat(), 
+            "symbol": trade.symbol,
+            "direction": trade.direction.upper(), 
+            "main_result": "LOSE", 
+            "ob_type": trade.ob_type
+        }
+        bq_data.update(analytics_data)
         log_trade_to_bigquery(bq_data)
+
+    # --- LOGIKA DLA POZYCJI WIN ---
     elif closed_result == "WIN":
-        logger.info(f"[{trade.trade_id}] Pozycja wygrana. Zapisuję wstępny rekord do BQ i tworzę 'ducha'.")
+        logger.info(f"[{trade.trade_id}] Pozycja wygrana. Zapisuję wstępny rekord i tworzę 'ducha'.")
+        
+        # 1. Oblicz analitykę tylko do momentu zamknięcia (ceny TP)
+        analytics_data = _calculate_rr_analytics(trade.entry_price, trade.sl_price, close_price, trade.direction)
+        
+        # 2. Przygotuj i zapisz wstępne dane do BigQuery
+        bq_data = {
+            "trade_id": trade.trade_id, 
+            "timestamp_entry": trade.opened_at_iso,
+            "timestamp_close": datetime.now(timezone.utc).isoformat(), 
+            "symbol": trade.symbol,
+            "direction": trade.direction.upper(), 
+            "main_result": "WIN", 
+            "ob_type": trade.ob_type
+        }
+        bq_data.update(analytics_data)
         log_trade_to_bigquery(bq_data)
+        
+        # 3. Stwórz ducha do dalszego, bieżącego monitorowania
         state_manager.create_analyzed_trade(trade)
 
 def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSnapshot]):

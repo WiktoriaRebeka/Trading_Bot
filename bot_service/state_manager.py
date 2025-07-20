@@ -169,3 +169,49 @@ def close_trade_transactional(transaction, trade_id: str, symbol: str, is_loss: 
     }
     transaction.update(setup_doc_ref, update_data)
     logger.info(f"[{trade_id}][{symbol}] Transakcja przygotowana: usunięcie pozycji i reset setupu.")
+
+
+# Lokalizacja: bot_service/state_manager.py (DODAJ TĘ FUNKCJĘ)
+
+def get_historical_klines(symbol: str, start_time_ms: int, end_time_ms: int) -> List[Dict[str, Any]]:
+    """
+    Pobiera historyczne świece 1-minutowe z API Bybit.
+    UWAGA: Ta funkcja wykonuje zapytanie sieciowe i nie korzysta z cache'u.
+    """
+    import requests # Lokalny import, aby uniknąć zależności w całym module
+    
+    logger.info(f"[{symbol}] Pobieranie historii świec od {start_time_ms} do {end_time_ms}")
+    klines = []
+    api_symbol = symbol.replace('.P', '')
+    
+    # API Bybit pozwala na pobranie max 1000 świec na raz.
+    # Dla bezpieczeństwa, zakładamy, że nie będziemy potrzebować więcej.
+    params = {
+        "category": "linear",
+        "symbol": api_symbol,
+        "interval": "1",
+        "start": start_time_ms,
+        "end": end_time_ms,
+        "limit": 1000
+    }
+    try:
+        response = requests.get(constants.BYBIT_API_URL_V5_KLINE, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        if data.get("retCode") == 0 and data.get("result") and data["result"].get("list"):
+            # API zwraca świece od najnowszej do najstarszej, odwracamy kolejność
+            kline_list = reversed(data["result"]["list"])
+            for k in kline_list:
+                klines.append({
+                    "timestamp": int(k[0]),
+                    "high": float(k[2]),
+                    "low": float(k[3])
+                })
+            logger.info(f"[{symbol}] Pomyślnie pobrano {len(klines)} historycznych świec.")
+            return klines
+        else:
+            logger.error(f"[{symbol}] Błąd API Bybit podczas pobierania historii: {data.get('retMsg')}")
+    except Exception as e:
+        logger.error(f"[{symbol}] Krytyczny błąd podczas pobierania historii świec: {e}", exc_info=True)
+        
+    return []
