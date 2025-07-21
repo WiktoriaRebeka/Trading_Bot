@@ -66,7 +66,7 @@ class AnalyzedTradeData(BaseModel):
     trade_id: str
     symbol: str
     direction: str
-    ob_type: str
+    ob_type: str  # <-- DODANE NOWE POLE
     entry_price: float
     original_sl: float
     original_tp_5_0: Optional[float] = None
@@ -75,6 +75,4 @@ class AnalyzedTradeData(BaseModel):
     
     last_known_extreme_price: float
     last_analysis_timestamp_ms: int
-    achieved_tps: List[str] = [] 
-        class Config:
-        extra = 'ignore
+    achieved_tps: List[str] = []

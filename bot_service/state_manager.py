@@ -75,20 +75,26 @@ def get_all_analyzed_trades() -> Iterable[DocumentSnapshot]:
         return []
 
 def create_analyzed_trade(trade_data: OpenTradeData):
+    """Tworzy 'ducha' dla transakcji WIN do analizy post-mortem."""
     db = _get_db()
     trade_id = trade_data.trade_id
+    
     if not trade_id:
-        logger.error("[CREATE_GHOST] Brak trade_id.")
+        logger.error("[CREATE_GHOST] Otrzymano dane transakcji bez trade_id.")
         return
-    logger.info(f"[CREATE_GHOST][{trade_id}] Tworzenie 'ducha' dla transakcji WIN.")
+
+    logger.info(f"[CREATE_GHOST][{trade_id}] Rozpoczynam tworzenie 'ducha' dla transakcji WIN.")
+    
     try:
         doc_ref = db.collection(constants.ANALYZED_COLLECTION).document(trade_id)
+        
         tp5_value = trade_data.alert_data_snapshot.get('tp_5_0')
+        
         analysis_data = AnalyzedTradeData(
             trade_id=trade_id,
             symbol=trade_data.symbol,
             direction=trade_data.direction,
-            ob_type=trade_data.ob_type,
+            ob_type=trade_data.ob_type,  # <-- DODANA LINIA
             entry_price=trade_data.entry_price,
             original_sl=trade_data.sl_price,
             original_tp_5_0=float(tp5_value) if tp5_value is not None else None,
@@ -98,10 +104,12 @@ def create_analyzed_trade(trade_data: OpenTradeData):
             last_analysis_timestamp_ms=int(datetime.now(timezone.utc).timestamp() * 1000),
             achieved_tps=["rr_1_0_achieved"]
         )
+        
         doc_ref.set(analysis_data.model_dump())
         logger.info(f"[CREATE_GHOST][{trade_id}] SUKCES! Utworzono 'ducha'.")
+
     except Exception as e:
-        logger.error(f"[CREATE_GHOST][{trade_id}] KRYTYCZNY BŁĄD: {e}", exc_info=True)
+        logger.error(f"[CREATE_GHOST][{trade_id}] KRYTYCZNY BŁĄD podczas tworzenia 'ducha': {e}", exc_info=True)
 
 def update_analyzed_trade_state(trade_id: str, new_extreme_price: float, new_timestamp_ms: int):
     doc_ref = _get_db().collection(constants.ANALYZED_COLLECTION).document(trade_id)

@@ -204,37 +204,23 @@ def _handle_manage_open_trades(klines_data: Dict[str, Kline], open_trades: List[
             logger.error(f"Nieoczekiwany błąd podczas monitorowania pozycji {trade_id}: {e}", exc_info=True)
 
 
-# Lokalizacja: bot_service/bot_logic.py (ZASTĄP TĘ FUNKCJĘ)
-
 def _handle_post_mortem_analysis(analyzed_trades: List[DocumentSnapshot], klines_data: Dict[str, Kline]):
     """
-    Analizuje duchy z ulepszoną obsługą błędów walidacji.
+    Analizuje duchy. Po zakończeniu analizy, wstawia JEDEN, finalny rekord do BigQuery.
     """
     if not analyzed_trades:
         return
     
-    from bot_service.bigquery_logger import log_trade_to_bigquery
+    from bot_service.bigquery_logger import log_trade_to_bigquery # Zmieniamy na log_trade_to_bigquery
     
     logger.info(f"[ANALIZA DUCHA] Rozpoczynam analizę dla {len(analyzed_trades)} 'duchów'.")
     
     for trade_doc in analyzed_trades:
         trade_id = trade_doc.id
-        document_data = trade_doc.to_dict() # Pobieramy dane raz
-
         try:
-            # --- ULEPSZONA OBSŁUGA BŁĘDÓW WALIDACJI ---
-            try:
-                analysis_trade = AnalyzedTradeData.model_validate(document_data)
-            except ValidationError as ve:
-                # Logujemy dokładny błąd walidacji ORAZ pełną zawartość dokumentu, który go spowodował
-                logger.error(
-                    f"[ANALIZA DUCHA][{trade_id}] Błąd walidacji Pydantic: {ve}", 
-                    extra={"json_fields": {"invalid_ghost_data": document_data}}
-                )
-                # Pomijamy tego jednego, wadliwego ducha i przechodzimy do następnego
-                continue
-
+            analysis_trade = AnalyzedTradeData.model_validate(trade_doc.to_dict())
             symbol = analysis_trade.symbol
+            
             latest_kline = klines_data.get(symbol)
             if not latest_kline:
                 continue
@@ -268,6 +254,7 @@ def _handle_post_mortem_analysis(analyzed_trades: List[DocumentSnapshot], klines
                     analysis_trade.direction
                 )
                 
+                # Tworzymy PEŁNY, finalny obiekt do zapisu
                 final_bq_data = {
                     "trade_id": trade_id,
                     "timestamp_entry": datetime.fromtimestamp(analysis_trade.opened_at_ms / 1000, tz=timezone.utc).isoformat(),
@@ -275,16 +262,16 @@ def _handle_post_mortem_analysis(analyzed_trades: List[DocumentSnapshot], klines
                     "symbol": analysis_trade.symbol,
                     "direction": analysis_trade.direction,
                     "main_result": "WIN",
-                    "ob_type": analysis_trade.ob_type
+                    "ob_type": analysis_trade.ob_type 
                 }
                 final_bq_data.update(final_analytics)
                 
+                # Używamy INSERT (log_trade_to_bigquery) zamiast UPDATE
                 log_trade_to_bigquery(final_bq_data)
                 state_manager.remove_analyzed_trade(trade_id)
 
         except Exception as e: 
-            # Ten blok złapie wszystkie inne, nieoczekiwane błędy
-            logger.error(f"[ANALIZA DUCHA][{trade_id}] Nieoczekiwany błąd: {e}", exc_info=True)
+            logger.error(f"[ANALIZA DUCHA][{trade_id}] Błąd: {e}", exc_info=True)
 
 def run_trading_logic():
     logger.info("Rozpoczynam główną pętlę logiki tradingowej.")
