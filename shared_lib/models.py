@@ -76,3 +76,5 @@ class AnalyzedTradeData(BaseModel):
     last_known_extreme_price: float
     last_analysis_timestamp_ms: int
     achieved_tps: List[str] = [] 
+        class Config:
+        extra = 'ignore
