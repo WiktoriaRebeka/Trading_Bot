@@ -256,7 +256,7 @@ def _handle_post_mortem_analysis(analyzed_trades: List[DocumentSnapshot], klines
                     "symbol": analysis_trade.symbol,
                     "direction": analysis_trade.direction,
                     "main_result": "WIN",
-                    "ob_type": analysis_trade.alert_data_snapshot.get("ob_type", "Unknown") # Pobieramy z danych ducha
+                    "ob_type": analysis_trade.ob_type 
                 }
                 final_bq_data.update(final_analytics)
                 

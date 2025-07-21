@@ -88,6 +88,7 @@ def create_analyzed_trade(trade_data: OpenTradeData):
             trade_id=trade_id,
             symbol=trade_data.symbol,
             direction=trade_data.direction,
+            ob_type=trade_data.ob_type,
             entry_price=trade_data.entry_price,
             original_sl=trade_data.sl_price,
             original_tp_5_0=float(tp5_value) if tp5_value is not None else None,

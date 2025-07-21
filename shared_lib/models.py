@@ -66,6 +66,7 @@ class AnalyzedTradeData(BaseModel):
     trade_id: str
     symbol: str
     direction: str
+    ob_type: str
     entry_price: float
     original_sl: float
     original_tp_5_0: Optional[float] = None
