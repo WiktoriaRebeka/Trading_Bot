@@ -97,6 +97,7 @@ def finalize_trade(trade: OpenTradeData, closed_result: str, close_price: float)
         state_manager.create_analyzed_trade(trade)
 
 def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSnapshot]):
+    """Przetwarza aktywne setupy w poszukiwaniu wejść."""
     if not active_setups: return
     logger.info(f"Sprawdzam {len(active_setups)} aktywnych setupów.")
     for setup_doc in active_setups:
@@ -143,6 +144,8 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
                         alert_data_snapshot=setup.alert_data.model_dump(by_alias=True)
                     )
                     finalize_trade(fake_trade, closed_result, close_price)
+                    
+                    # --- POPRAWIONE WYWOŁANIE TRANSAKCJI ---
                     try:
                         db = get_db()
                         transaction = db.transaction()
@@ -163,6 +166,7 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
             logger.error(f"Błąd podczas sprawdzania wejścia dla {symbol}: {e}", exc_info=True)
 
 def _handle_manage_open_trades(klines_data: Dict[str, Kline], open_trades: List[DocumentSnapshot]):
+    """Zarządza otwartymi pozycjami, sprawdza warunki zamknięcia i inicjuje proces finalizacji."""
     if not open_trades: return
     logger.info(f"Zarządzam {len(open_trades)} otwartymi pozycjami.")
     for trade_doc in open_trades:
@@ -185,6 +189,8 @@ def _handle_manage_open_trades(klines_data: Dict[str, Kline], open_trades: List[
             if closed_result:
                 logger.info(f"--- [DECYZJA: ZAMKNIĘCIE] --- [{trade.symbol}] | ID: {trade_id} | Wynik: {closed_result}")
                 finalize_trade(trade, closed_result, close_price)
+                
+                # --- POPRAWIONE WYWOŁANIE TRANSAKCJI ---
                 try:
                     db = get_db()
                     transaction = db.transaction()
