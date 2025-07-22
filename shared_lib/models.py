@@ -1,4 +1,5 @@
 # Lokalizacja: shared_lib/models.py
+
 from pydantic import BaseModel, Field, validator
 from typing import Optional, Dict, Any, List
 from datetime import datetime
@@ -66,7 +67,7 @@ class AnalyzedTradeData(BaseModel):
     trade_id: str
     symbol: str
     direction: str
-    ob_type: str  # <-- DODANE NOWE POLE
+    ob_type: str
     entry_price: float
     original_sl: float
     original_tp_5_0: Optional[float] = None
@@ -76,3 +77,28 @@ class AnalyzedTradeData(BaseModel):
     last_known_extreme_price: float
     last_analysis_timestamp_ms: int
     achieved_tps: List[str] = []
+
+# --- NOWY MODEL (na tym samym poziomie co inne klasy) ---
+
+class OrderData(BaseModel):
+    """
+    Model reprezentujący kompletny "rozkaz" tradingowy.
+    Operuje na stałej wartości marginu w USDC.
+    """
+    symbol: str
+    direction: str
+    entry_price: float
+    sl_price: float
+    tp_price: float
+    
+    # Wartość marginu w USDC, którą chcemy zaangażować w pozycję.
+    margin_value_usdc: float
+    
+    # Obliczona, docelowa dźwignia do ustawienia na giełdzie.
+    leverage: int
+
+    @validator('direction')
+    def direction_must_be_valid(cls, v):
+        if v.upper() not in ['LONG', 'SHORT']:
+            raise ValueError('Kierunek musi być "LONG" lub "SHORT"')
+        return v.upper()

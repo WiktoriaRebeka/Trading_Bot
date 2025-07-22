@@ -8,9 +8,9 @@ from google.cloud import firestore
 from google.cloud.firestore_v1.document import DocumentSnapshot
 from pydantic import ValidationError
 
-from shared_lib.firebase_client import get_db, get_symbols_to_watch_from_config
 from shared_lib.leverage_calculator import get_all_calculations_for_alert
-
+from shared_lib.constants import POSITION_SIZE_PERCENT, TOTAL_CAPITAL
+from shared_lib.models import OrderData, SetupData, OpenTradeData, AnalyzedTradeData, AlertData, Kline
 
 from bot_service import state_manager
 from bot_service.bigquery_logger import log_trade_to_bigquery, update_analyzed_trade_in_bigquery
@@ -40,46 +40,66 @@ def _calculate_rr_analytics(entry_price: float, sl_price: float, extreme_price: 
     return analytics
 
 def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]]):
-    if not newly_fetched_alerts: return
+    if not newly_fetched_alerts:
+        return
     logger.info(f"Przetwarzam {len(newly_fetched_alerts)} nowych alertów.")
     db = get_db()
     for alert_dict in newly_fetched_alerts:
         try:
-            # Krok 1: Walidujemy dane. Jeśli to się nie uda, przechodzimy do except.
+            # Krok 1: Walidacja danych przychodzących z alertu
             alert_data = AlertData.model_validate(alert_dict)
 
-            # Krok 2: Jeśli walidacja się powiodła, OD RAZU testujemy kalkulator.
-
-            # --- POCZĄTEK TYMCZASOWEGO KODU DO TESTOWANIA ---
+            # --- POCZĄTEK BLOKU SYMULACJI I OBLICZEŃ DŹWIGNI ---
             try:
-                # Używamy nowej nazwy funkcji
+                # Wywołujemy funkcję z naszego kalkulatora
                 calculations = get_all_calculations_for_alert(alert_data)
                 leverage = calculations.get('required_leverage')
-                leverage_str = f"{leverage}x" if leverage is not None else "Nie można obliczyć"
                 
-                logger.info(
-                    f"[LEVERAGE_CALCULATOR_TEST] Wyniki dla {alert_data.symbol}: "
-                    f"Real_SL_Dist={calculations['distance_percentage_real']}% -> "
-                    # ZAKTUALIZOWANA LINIA LOGOWANIA
-                    f"Wymagana Dźwignia={leverage_str}"
-                )
+                if leverage and leverage >= 1:
+                    margin_usd = (POSITION_SIZE_PERCENT / 100) * TOTAL_CAPITAL
+
+                    # Tworzymy obiekt "rozkazu" do symulacji
+                    order_command = OrderData(
+                        symbol=alert_data.symbol,
+                        direction=alert_data.direction,
+                        entry_price=alert_data.entry,
+                        sl_price=alert_data.sl,
+                        tp_price=alert_data.tp,
+                        margin_value_usdc=margin_usd,
+                        leverage=leverage
+                    )
+                    
+                    logger.info(
+                        f"[ORDER_SIMULATION][{alert_data.symbol}] "
+                        f"Decyzja: ZLECENIE AKCEPTOWANE. "
+                        f"Dźwignia: {leverage}x, "
+                        f"Margin (Value): {margin_usd:.2f} USDC."
+                    )
+                    # W przyszłości tutaj wywołamy: bybit_executor.execute_trade(order_command)
+                else:
+                    # Ten przypadek wystąpi, jeśli dźwignia jest < 1 (zbyt duże ryzyko)
+                    logger.warning(
+                        f"[ORDER_SIMULATION][{alert_data.symbol}] ZLECENIE ODRZUCONE. "
+                        f"Obliczona dźwignia ({leverage}) jest zbyt niska lub nie mogła zostać obliczona. Ryzyko jest za duże."
+                    )
+
             except Exception as e:
-                logger.error(f"[LEVERAGE_CALCULATOR_TEST] Błąd podczas testowania kalkulatora: {e}", exc_info=True)
-            # --- KONIEC TYMCZASOWEGO KODU DO TESTOWANIA ---
-            # Krok 3: Kontynuujemy normalną logikę przetwarzania alertu.
+                logger.error(f"[ORDER_SIMULATION] Krytyczny błąd podczas symulacji: {e}", exc_info=True)
+            # --- KONIEC BLOKU SYMULACJI ---
+
+            # Krok 2: Kontynuujemy normalną, obecną logikę - tworzenie setupu do analizy
             new_setup = SetupData(
                 alert_data=alert_data,
                 updated_at=datetime.now(timezone.utc)
             )
             doc_ref = db.collection(constants.SETUP_COLLECTION).document(alert_data.symbol)
             doc_ref.set(new_setup.model_dump(by_alias=True))
-            logger.info(f"[{alert_data.symbol}] Zarejestrowano/zaktualizowano aktywny setup.")
+            logger.info(f"[{alert_data.symbol}] Zarejestrowano/zaktualizowano aktywny setup (tryb analityczny).")
 
         except ValidationError as e:
-            logger.error(f"Błąd walidacji alertu: {e}", extra={"json_fields": {"alert_id": alert_dict.get('id')}})
+            logger.error(f"Błąd walidacji danych alertu: {e}", extra={"json_fields": {"alert_id": alert_dict.get('id')}})
         except Exception as e:
             logger.error(f"Nieoczekiwany błąd podczas przetwarzania alertu: {e}", exc_info=True, extra={"json_fields": {"alert_id": alert_dict.get('id')}})
-
 
 def finalize_trade(trade: OpenTradeData, closed_result: str, close_price: float):
     """
