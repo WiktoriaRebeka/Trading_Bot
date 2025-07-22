@@ -9,7 +9,7 @@ from google.cloud.firestore_v1.document import DocumentSnapshot
 from pydantic import ValidationError
 
 from shared_lib.firebase_client import get_db, get_symbols_to_watch_from_config
-from shared_lib.leverage_calculator import get_sl_distances_for_alert
+from shared_lib.leverage_calculator import get_all_calculations_for_alert
 
 
 from bot_service import state_manager
@@ -50,15 +50,18 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]]):
 
             # Krok 2: Jeśli walidacja się powiodła, OD RAZU testujemy kalkulator.
 
+            # --- POCZĄTEK TYMCZASOWEGO KODU DO TESTOWANIA ---
             try:
-                sl_distances = get_sl_distances_for_alert(alert_data)
+                # Używamy nowej nazwy funkcji
+                calculations = get_all_calculations_for_alert(alert_data)
+                leverage = calculations.get('required_leverage')
+                leverage_str = f"{leverage}x" if leverage is not None else "Nie można obliczyć"
+                
                 logger.info(
                     f"[LEVERAGE_CALCULATOR_TEST] Wyniki dla {alert_data.symbol}: "
-                    f"Entry={alert_data.entry}, SL={alert_data.sl} -> "
-                    f"Points_Distance={sl_distances['distance_points']}, "
-                    f"Percentage_Distance={sl_distances['distance_percentage']}%, "
+                    f"Real_SL_Dist={calculations['distance_percentage_real']}% -> "
                     # ZAKTUALIZOWANA LINIA LOGOWANIA
-                    f"Percentage_Distance_Real={sl_distances['distance_percentage_real']}% (z prowizją)"
+                    f"Wymagana Dźwignia={leverage_str}"
                 )
             except Exception as e:
                 logger.error(f"[LEVERAGE_CALCULATOR_TEST] Błąd podczas testowania kalkulatora: {e}", exc_info=True)
