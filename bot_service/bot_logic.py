@@ -11,8 +11,12 @@ from pydantic import ValidationError
 
 # --- JEDEN, CZYSTY BLOK IMPORTÓW Z SHARED_LIB ---
 from shared_lib import constants
-from shared_lib.firebase_client import get_db # <-- KLUCZOWY BRAKUJĄCY IMPORT
-from shared_lib.leverage_calculator import get_all_calculations_for_alert
+from shared_lib.firebase_client import get_db  # <-- NAPRAWIA BŁĄD #1
+from shared_lib.leverage_calculator import (
+    get_all_calculations_for_alert,
+    POSITION_SIZE_PERCENT,  # <-- NAPRAWIA BŁĄD #2
+    TOTAL_CAPITAL           # <-- NAPRAWIA BŁĄD #2
+)
 from shared_lib.models import (
     AlertData,
     AnalyzedTradeData,
@@ -25,7 +29,6 @@ from shared_lib.models import (
 # --- IMPORTY Z TEGO SAMEGO SERWISU (bot_service) ---
 from bot_service import state_manager
 from bot_service.bigquery_logger import log_trade_to_bigquery, update_analyzed_trade_in_bigquery
-
 logger = logging.getLogger(__name__)
 
 def _calculate_rr_analytics(entry_price: float, sl_price: float, extreme_price: float, direction: str) -> Dict[str, Any]:
