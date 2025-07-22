@@ -9,6 +9,9 @@ from google.cloud.firestore_v1.document import DocumentSnapshot
 from pydantic import ValidationError
 
 from shared_lib.firebase_client import get_db, get_symbols_to_watch_from_config
+from shared_lib.leverage_calculator import get_sl_distances_for_alert
+
+
 from bot_service import state_manager
 from bot_service.bigquery_logger import log_trade_to_bigquery, update_analyzed_trade_in_bigquery
 from shared_lib import constants
@@ -42,7 +45,25 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]]):
     db = get_db()
     for alert_dict in newly_fetched_alerts:
         try:
+            # Krok 1: Walidujemy dane. Jeśli to się nie uda, przechodzimy do except.
             alert_data = AlertData.model_validate(alert_dict)
+
+            # Krok 2: Jeśli walidacja się powiodła, OD RAZU testujemy kalkulator.
+            # --- POCZĄTEK TYMCZASOWEGO KODU DO TESTOWANIA ---
+            try:
+                sl_distances = get_sl_distances_for_alert(alert_data)
+                logger.info(
+                    f"[LEVERAGE_CALCULATOR_TEST] Wyniki dla {alert_data.symbol}: "
+                    f"Entry={alert_data.entry}, SL={alert_data.sl} -> "
+                    f"Points_Distance={sl_distances['distance_points']}, "
+                    f"Percentage_Distance={sl_distances['distance_percentage']}%"
+                )
+            except Exception as e:
+                # Ten log pojawi się tylko, jeśli sam kalkulator zawiedzie.
+                logger.error(f"[LEVERAGE_CALCULATOR_TEST] Błąd podczas testowania kalkulatora: {e}", exc_info=True)
+            # --- KONIEC TYMCZASOWEGO KODU DO TESTOWANIA ---
+
+            # Krok 3: Kontynuujemy normalną logikę przetwarzania alertu.
             new_setup = SetupData(
                 alert_data=alert_data,
                 updated_at=datetime.now(timezone.utc)
@@ -50,6 +71,7 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]]):
             doc_ref = db.collection(constants.SETUP_COLLECTION).document(alert_data.symbol)
             doc_ref.set(new_setup.model_dump(by_alias=True))
             logger.info(f"[{alert_data.symbol}] Zarejestrowano/zaktualizowano aktywny setup.")
+
         except ValidationError as e:
             logger.error(f"Błąd walidacji alertu: {e}", extra={"json_fields": {"alert_id": alert_dict.get('id')}})
         except Exception as e:
