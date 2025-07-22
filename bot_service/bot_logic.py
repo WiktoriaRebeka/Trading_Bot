@@ -49,20 +49,20 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]]):
             alert_data = AlertData.model_validate(alert_dict)
 
             # Krok 2: Jeśli walidacja się powiodła, OD RAZU testujemy kalkulator.
-            # --- POCZĄTEK TYMCZASOWEGO KODU DO TESTOWANIA ---
+
             try:
                 sl_distances = get_sl_distances_for_alert(alert_data)
                 logger.info(
                     f"[LEVERAGE_CALCULATOR_TEST] Wyniki dla {alert_data.symbol}: "
                     f"Entry={alert_data.entry}, SL={alert_data.sl} -> "
                     f"Points_Distance={sl_distances['distance_points']}, "
-                    f"Percentage_Distance={sl_distances['distance_percentage']}%"
+                    f"Percentage_Distance={sl_distances['distance_percentage']}%, "
+                    # ZAKTUALIZOWANA LINIA LOGOWANIA
+                    f"Percentage_Distance_Real={sl_distances['distance_percentage_real']}% (z prowizją)"
                 )
             except Exception as e:
-                # Ten log pojawi się tylko, jeśli sam kalkulator zawiedzie.
                 logger.error(f"[LEVERAGE_CALCULATOR_TEST] Błąd podczas testowania kalkulatora: {e}", exc_info=True)
             # --- KONIEC TYMCZASOWEGO KODU DO TESTOWANIA ---
-
             # Krok 3: Kontynuujemy normalną logikę przetwarzania alertu.
             new_setup = SetupData(
                 alert_data=alert_data,
