@@ -4,18 +4,27 @@ import logging
 import uuid
 from typing import Dict, Any, List
 from datetime import datetime, timezone
+
 from google.cloud import firestore
 from google.cloud.firestore_v1.document import DocumentSnapshot
 from pydantic import ValidationError
 
+# --- JEDEN, CZYSTY BLOK IMPORTÓW Z SHARED_LIB ---
+from shared_lib import constants
+from shared_lib.firebase_client import get_db # <-- KLUCZOWY BRAKUJĄCY IMPORT
 from shared_lib.leverage_calculator import get_all_calculations_for_alert
-from shared_lib.constants import POSITION_SIZE_PERCENT, TOTAL_CAPITAL
-from shared_lib.models import OrderData, SetupData, OpenTradeData, AnalyzedTradeData, AlertData, Kline
+from shared_lib.models import (
+    AlertData,
+    AnalyzedTradeData,
+    Kline,
+    OpenTradeData,
+    OrderData,
+    SetupData,
+)
 
+# --- IMPORTY Z TEGO SAMEGO SERWISU (bot_service) ---
 from bot_service import state_manager
 from bot_service.bigquery_logger import log_trade_to_bigquery, update_analyzed_trade_in_bigquery
-from shared_lib import constants
-from shared_lib.models import SetupData, OpenTradeData, AnalyzedTradeData, AlertData, Kline
 
 logger = logging.getLogger(__name__)
 
