@@ -38,36 +38,54 @@ def calculate_real_sl_distance_percentage(sl_distance_percentage: float) -> floa
     real_distance = sl_distance_percentage + total_fee
     return round(real_distance, 4)
 
-def calculate_required_leverage(real_sl_percentage: float) -> Optional[float]:
-    """Oblicza wymaganą dźwignię, aby strata na SL odpowiadała zdefiniowanemu ryzyku."""
+def calculate_required_leverage(real_sl_percentage: float) -> Optional[int]: # Zmieniono typ na int
+    """
+    Oblicza wymaganą dźwignię, zaokrąglając ją w dół do najbliższej liczby całkowitej.
+    """
     if real_sl_percentage <= 0:
-        logger.error(f"Realna odległość SL ({real_sl_percentage}%) jest zerowa lub ujemna. Nie można obliczyć dźwigni.")
+        logger.error(
+            f"Realna odległość SL ({real_sl_percentage}%) jest zerowa lub ujemna. "
+            "Nie można obliczyć dźwigni."
+        )
         return None
-    
-    # Wzór: Dźwignia = (Docelowe Ryzyko %) / (Realna Strata na Kapitale %)
-    leverage = RISK_PER_TRADE_PERCENT / real_sl_percentage
-    return round(leverage, 2)
 
-# --- GŁÓWNA FUNKCJA POMOCNICZA ---
-def get_all_calculations_for_alert(alert: AlertData) -> Dict[str, Optional[float]]:
+    risk_in_usd = (RISK_PER_TRADE_PERCENT / 100) * TOTAL_CAPITAL
+    margin_in_usd = (POSITION_SIZE_PERCENT / 100) * TOTAL_CAPITAL
+    loss_on_margin_in_usd = (real_sl_percentage / 100) * margin_in_usd
+    
+    if loss_on_margin_in_usd <= 0:
+        logger.error("Strata na marginie jest zerowa lub ujemna. Nie można obliczyć dźwigni.")
+        return None
+
+    leverage = risk_in_usd / loss_on_margin_in_usd
+    
+    # --- KLUCZOWA ZMIANA: ZAOKRĄGLANIE W DÓŁ ---
+    # Używamy math.floor do obcięcia części dziesiętnej i rzutujemy na int.
+    safe_leverage = math.floor(leverage)
+    
+    # Dodatkowe zabezpieczenie: dźwignia nie może być mniejsza niż 1.
+    if safe_leverage < 1:
+        logger.warning(
+            f"Obliczona dźwignia ({leverage:.2f}x) jest mniejsza niż 1. "
+            "Oznacza to, że ryzyko jest bardzo duże. Zwracam None, aby uniknąć transakcji."
+        )
+        return None
+
+    return int(safe_leverage)
+
+# --- GŁÓWNA FUNKCJA POMOCNICZA (zaktualizowany typ) ---
+def get_all_calculations_for_alert(alert: AlertData) -> Dict[str, Optional[float | int]]:
     """
     Kompleksowa funkcja, która dla danego alertu oblicza wszystkie parametry ryzyka i dźwigni.
-    To jest jedyna funkcja, którą powinniśmy wywoływać z zewnątrz.
     """
     entry = alert.entry
     sl = alert.sl
     
-    # Krok 1: Oblicz podstawowe odległości
     distance_points = calculate_sl_distance_points(entry, sl)
     distance_percentage = calculate_sl_distance_percentage(entry, sl)
-    
-    # Krok 2: Dodaj prowizje
     real_distance_percentage = calculate_real_sl_distance_percentage(distance_percentage)
-    
-    # Krok 3: Na podstawie realnej odległości oblicz dźwignię
     required_leverage = calculate_required_leverage(real_distance_percentage)
     
-    # Krok 4: Zwróć wszystkie wyniki w jednym słowniku
     return {
         "distance_points": distance_points,
         "distance_percentage": distance_percentage,
