@@ -1,83 +1,140 @@
-# Lokalizacja: bot_service/bybit_executor.py
-
 import logging
 import time
 import hmac
 import hashlib
 import json
-from typing import Optional
+from typing import Optional, Dict, Any, Tuple
+from decimal import Decimal, ROUND_DOWN
 
-from shared_lib.models import OrderData
+import requests
+from requests.exceptions import RequestException
+
 from shared_lib.config import config
 from shared_lib import constants
 
 logger = logging.getLogger(__name__)
 
-def _generate_signature(timestamp: str, api_key: str, api_secret: str, payload: str) -> str:
-    """
-    Generuje sygnaturę HMAC-SHA256 zgodnie z dokumentacją Bybit V5 API.
-    """
-    # Bybit wymaga, aby recv_window był częścią stringu do podpisania
-    recv_window = "5000" 
-    param_str = timestamp + api_key + recv_window + payload
-    hash_val = hmac.new(bytes(api_secret, "utf-8"), param_str.encode("utf-8"), hashlib.sha256)
-    return hash_val.hexdigest()
+# Dedykowany wyjątek dla błędów API Bybit
+class BybitAPIError(Exception):
+    def __init__(self, ret_code: int, ret_msg: str):
+        self.ret_code = ret_code
+        self.ret_msg = ret_msg
+        super().__init__(f"Bybit API Error: [Code: {ret_code}] {ret_msg}")
 
-def _test_signature_generation():
-    """Tymczasowa funkcja do weryfikacji poprawności generowania sygnatury."""
-    logger.info("--- URUCHAMIAM TEST GENEROWANIA SYGNATURY ---")
-    
-    # Prawdziwe dane testowe z oficjalnej dokumentacji Bybit V5 API
-    api_key = "test_api_key"
-    api_secret = "test_api_secret"
-    timestamp = "1689672221235"
-    payload = '{"category":"linear","symbol":"BTCUSDT","side":"Buy","orderType":"Limit","qty":"0.1","price":"25000"}'
-    
-    # Oczekiwana sygnatura dla powyższych danych (zgodnie z dokumentacją)
-    expected_signature = "8a52e178604277a23119e578a11079f3116e880a52a83955f5e321c82355bf9c"
-    
-    generated_signature = _generate_signature(timestamp, api_key, api_secret, payload)
-    
-    logger.info(f"Oczekiwana sygnatura: {expected_signature}")
-    logger.info(f"Wygenerowana sygnatura: {generated_signature}")
-    
-    if generated_signature == expected_signature:
-        logger.info("TEST ZAKOŃCZONY SUKCESEM: Sygnatury są identyczne!")
-    else:
-        logger.error("BŁĄD TESTU: Wygenerowana sygnatura jest NIEPOPRAWNA!")
-
-def _set_leverage(symbol: str, leverage: int) -> bool:
-    """Ustawia dźwignię dla danego symbolu na koncie Bybit."""
-    logger.info(f"[{symbol}] Próba ustawienia dźwigni na {leverage}x.")
-    logger.warning(f"[{symbol}] SYMULACJA: Dźwignia nie została zmieniona.")
-    return True
-
-def _place_limit_order(order: OrderData) -> Optional[str]:
-    """Składa zlecenie typu Limit, operując na wartości w USDC."""
-    logger.info(f"[{order.symbol}] Próba złożenia zlecenia o wartości {order.margin_value_usdc} USDC.")
-    logger.warning(f"[{order.symbol}] SYMULACJA: Zlecenie nie zostało wysłane.")
-    return "simulated_order_12345"
-
-def execute_trade(order: OrderData) -> Optional[str]:
+class BybitExecutor:
     """
-    Wykonuje pełny proces otwarcia transakcji: ustawia dźwignię, a następnie składa zlecenie.
+    Klasa odpowiedzialna za komunikację z API Bybit V5.
+    Hermetyzuje logikę autoryzacji, składania zleceń i obsługi błędów.
     """
-    # Uruchamiamy nasz test za każdym razem, gdy ta funkcja jest wywoływana
-    _test_signature_generation()
-    
-    logger.info(f"[{order.symbol}] Rozpoczynam proces wykonania transakcji.")
-    
-    leverage_set_successfully = _set_leverage(order.symbol, order.leverage)
-    
-    if not leverage_set_successfully:
-        logger.error(f"[{order.symbol}] KRYTYCZNY BŁĄD: Nie udało się ustawić dźwigni. Przerywam składanie zlecenia.")
-        return None
+    def __init__(self):
+        if not config.is_loaded:
+            raise RuntimeError("Konfiguracja (config) nie została załadowana. Uruchom config_loader.load_config().")
         
-    order_id = _place_limit_order(order)
-    
-    if order_id:
-        logger.info(f"[{order.symbol}] Zlecenie pomyślnie złożone. Order ID: {order_id}")
-    else:
-        logger.error(f"[{order.symbol}] Nie udało się złożyć zlecenia.")
+        self.api_key: str = config.BYBIT_API_KEY
+        self.api_secret: str = config.BYBIT_API_SECRET
+        self.base_url: str = constants.BYBIT_API_URL_V5
+        self.session = requests.Session()
         
-    return order_id
+        if not self.api_key or not self.api_secret:
+            raise ValueError("Klucze API Bybit nie są ustawione w konfiguracji.")
+
+    def _generate_signature(self, timestamp: str, payload: str) -> str:
+        """Generuje sygnaturę HMAC-SHA256."""
+        recv_window = "10000"  # Zwiększony recv_window dla większej tolerancji na opóźnienia sieciowe
+        param_str = timestamp + self.api_key + recv_window + payload
+        hash_val = hmac.new(bytes(self.api_secret, "utf-8"), param_str.encode("utf-8"), hashlib.sha256)
+        return hash_val.hexdigest()
+
+    def _send_request(self, method: str, endpoint: str, payload: Dict = None) -> Dict[str, Any]:
+        """Wysyła podpisane zapytanie do API Bybit i obsługuje podstawowe błędy."""
+        url = self.base_url + endpoint
+        payload_str = json.dumps(payload) if payload else ""
+        timestamp = str(int(time.time() * 1000))
+        
+        headers = {
+            'X-B-API-KEY': self.api_key,
+            'X-B-API-TIMESTAMP': timestamp,
+            'X-B-API-SIGN': self._generate_signature(timestamp, payload_str),
+            'X-B-API-RECV-WINDOW': '10000',
+            'Content-Type': 'application/json'
+        }
+        
+        try:
+            response = self.session.request(method, url, headers=headers, data=payload_str, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+
+            if data.get("retCode") != 0:
+                raise BybitAPIError(ret_code=data.get("retCode"), ret_msg=data.get("retMsg"))
+            
+            return data.get("result", {})
+        except RequestException as e:
+            logger.error(f"Błąd sieciowy podczas komunikacji z Bybit: {e}", exc_info=True)
+            raise  # Rzucamy dalej, aby logika wyższego rzędu mogła zareagować
+        except BybitAPIError as e:
+            logger.error(f"Błąd API Bybit: {e}", extra={"json_fields": {"ret_code": e.ret_code, "ret_msg": e.ret_msg}})
+            raise
+
+    def get_instrument_info(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Pobiera informacje o instrumencie, w tym max_leverage i qty_step."""
+        logger.info(f"[{symbol}] Pobieranie informacji o instrumencie z Bybit.")
+        try:
+            result = self._send_request(
+                "GET",
+                f"/v5/market/instruments-info?category=linear&symbol={symbol}"
+            )
+            # API zwraca listę, nawet dla jednego symbolu
+            if result and result.get('list'):
+                instrument_data = result['list'][0]
+                leverage_filter = instrument_data.get('leverageFilter', {})
+                lot_size_filter = instrument_data.get('lotSizeFilter', {})
+                
+                info = {
+                    "max_leverage": int(float(leverage_filter.get('maxLeverage', '1'))),
+                    "qty_step": lot_size_filter.get('qtyStep', '0.001') # Domyślna wartość na wszelki wypadek
+                }
+                logger.info(f"[{symbol}] Pobrane informacje: max_leverage={info['max_leverage']}, qty_step={info['qty_step']}")
+                return info
+            return None
+        except (RequestException, BybitAPIError) as e:
+            logger.error(f"[{symbol}] Nie udało się pobrać informacji o instrumencie: {e}")
+            return None
+
+    def place_limit_order(self, order_params: Dict[str, Any]) -> Optional[str]:
+        """Składa zlecenie typu Limit na giełdzie Bybit."""
+        symbol = order_params.get('symbol')
+        logger.info(f"[{symbol}] Próba złożenia zlecenia: {order_params}")
+        
+        payload = {
+            "category": "linear",
+            "symbol": symbol,
+            "side": "Buy" if order_params['side'].upper() == 'LONG' else "Sell",
+            "orderType": "Limit",
+            "qty": str(order_params['qty']),
+            "price": str(order_params['price']),
+            "leverage": str(order_params['leverage']),
+            "takeProfit": str(order_params['takeProfit']),
+            "stopLoss": str(order_params['stopLoss']),
+            "timeInForce": "GTC" # Good-Til-Canceled
+        }
+        
+        try:
+            result = self._send_request("POST", "/v5/order/create", payload)
+            order_id = result.get("orderId")
+            if order_id:
+                logger.info(f"[{symbol}] SUKCES! Zlecenie pomyślnie złożone. Order ID: {order_id}")
+                return order_id
+            else:
+                logger.error(f"[{symbol}] Zlecenie złożone, ale API nie zwróciło orderId. Odpowiedź: {result}")
+                return None
+        except (RequestException, BybitAPIError) as e:
+            logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się złożyć zlecenia: {e}")
+            return None
+
+def format_quantity(quantity: float, qty_step: str) -> str:
+    """Formatuje wielkość zlecenia zgodnie z wymaganą precyzją (qty_step)."""
+    qty_decimal = Decimal(str(quantity))
+    step_decimal = Decimal(qty_step)
+    # Używamy kwantyzacji z zaokrągleniem w dół, aby nie przekroczyć limitów
+    formatted_qty = qty_decimal.quantize(step_decimal, rounding=ROUND_DOWN)
+    return str(formatted_qty)

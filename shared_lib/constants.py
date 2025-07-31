@@ -1,5 +1,3 @@
-# Lokalizacja: shared_lib/constants.py
-
 import os
 
 # Nazwy kolekcji i dokumentów w Firestore
@@ -14,12 +12,9 @@ TRADE_COLLECTION = "open_trades"
 ANALYZED_COLLECTION = "analyzed_trades"
 LATEST_KLINES_COLLECTION = "latest_klines"
 
-# Adresy URL API
-BYBIT_API_URL_V5_KLINE = "https://api.bybit.com/v5/market/kline"
-
-# Klucze API ładowane ze zmiennych środowiskowych (przez config_loader.py)
-BYBIT_API_KEY = os.getenv("BYBIT_API_KEY")
-BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET")
+# Adresy URL API Bybit - SKONFIGUROWANE DLA TESTNETU
+BYBIT_API_URL_V5 = "https://api-testnet.bybit.com"
+BYBIT_API_URL_V5_KLINE = "https://api-testnet.bybit.com/v5/market/kline"
 
 # Konfiguracja BigQuery
 BIGQUERY_PROJECT_ID = os.getenv("GCP_PROJECT", "trading-bot-463318")

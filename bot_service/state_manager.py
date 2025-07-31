@@ -26,37 +26,54 @@ def update_setup_after_price_reset(symbol: str):
 def get_all_open_trades() -> Iterable[DocumentSnapshot]:
     return _get_db().collection(constants.TRADE_COLLECTION).stream()
 
-def create_open_trade(trade_id: str, symbol: str, direction: str, ob_type: str, entry_price: float, sl_price: float, tp_price: float, alert_data: AlertData):
+# Zmień sygnaturę funkcji, dodając na końcu bybit_order_id
+def create_open_trade(trade_id: str, symbol: str, direction: str, ob_type: str, entry_price: float, sl_price: float, tp_price: float, alert_data: AlertData, bybit_order_id: str):
     db = _get_db()
     transaction = db.transaction()
     
     @firestore.transactional
-    def _create_trade_in_transaction(transaction, trade_id, symbol, direction, ob_type, entry_price, sl_price, tp_price, alert_data):
+    # Zmień również sygnaturę wewnętrznej funkcji transakcyjnej
+    def _create_trade_in_transaction(transaction, trade_id, symbol, direction, ob_type, entry_price, sl_price, tp_price, alert_data, bybit_order_id):
         trade_doc_ref = db.collection(constants.TRADE_COLLECTION).document(trade_id)
         setup_doc_ref = db.collection(constants.SETUP_COLLECTION).document(symbol)
+        
+        # Sprawdzenie warunków wewnątrz transakcji pozostaje bez zmian
         setup_snapshot = setup_doc_ref.get(transaction=transaction)
         if not setup_snapshot.exists:
             raise RuntimeError(f"Setup dla {symbol} już nie istnieje.")
         if setup_snapshot.to_dict().get("is_position_open_on_this_setup", False):
             raise RuntimeError(f"Pozycja dla setupu {symbol} jest już otwarta.")
+            
         timestamp_utc = datetime.now(timezone.utc)
+        
+        # Zaktualizuj tworzenie obiektu OpenTradeData o nowe pole
         new_trade = OpenTradeData(
-            trade_id=trade_id, symbol=symbol, direction=direction.upper(), ob_type=ob_type,
-            entry_price=entry_price, sl_price=sl_price, tp_price=tp_price,
+            trade_id=trade_id, 
+            symbol=symbol, 
+            direction=direction.upper(), 
+            ob_type=ob_type,
+            entry_price=entry_price, 
+            sl_price=sl_price, 
+            tp_price=tp_price,
             opened_at_ms=int(timestamp_utc.timestamp() * 1000),
             opened_at_iso=timestamp_utc.isoformat(),
-            alert_data_snapshot=alert_data.model_dump(by_alias=True)
+            alert_data_snapshot=alert_data.model_dump(by_alias=True),
+            bybit_order_id=bybit_order_id  # <-- DODANA NOWA, KLUCZOWA LINIA
         )
+        
         transaction.set(trade_doc_ref, new_trade.model_dump())
+        
+        # Aktualizacja setupu pozostaje bez zmian
         update_data = {
             "is_position_open_on_this_setup": True,
             "entry_attempts": firestore.Increment(1)
         }
         transaction.update(setup_doc_ref, update_data)
-        logger.info(f"[{symbol}][{trade_id}] Transakcja przygotowana: utworzenie pozycji i aktualizacja setupu.")
+        logger.info(f"[{symbol}][{trade_id}] Transakcja przygotowana: utworzenie pozycji (z Bybit ID: {bybit_order_id}) i aktualizacja setupu.")
 
     try:
-        _create_trade_in_transaction(transaction, trade_id, symbol, direction, ob_type, entry_price, sl_price, tp_price, alert_data)
+        # Zaktualizuj wywołanie, przekazując nowy argument
+        _create_trade_in_transaction(transaction, trade_id, symbol, direction, ob_type, entry_price, sl_price, tp_price, alert_data, bybit_order_id)
         logger.info(f"[{symbol}][{trade_id}] SUKCES. Transakcja atomowa zakończona.")
     except Exception as e:
         logger.error(f"[{symbol}][{trade_id}] BŁĄD TRANSAKCJI: {e}", exc_info=True)

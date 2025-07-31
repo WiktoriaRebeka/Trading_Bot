@@ -9,29 +9,36 @@ from google.cloud import firestore
 from google.cloud.firestore_v1.document import DocumentSnapshot
 from pydantic import ValidationError
 
-# --- JEDEN, CZYSTY BLOK IMPORTÓW Z SHARED_LIB ---
+from requests.exceptions import RequestException
+from bot_service.bybit_executor import BybitExecutor, BybitAPIError, format_quantity
+
+
+
 from shared_lib import constants
-# ZMIANA W TEJ LINII:
 from shared_lib.firebase_client import get_db, get_symbols_to_watch_from_config
 from shared_lib.leverage_calculator import (
-    get_all_calculations_for_alert,
-    POSITION_SIZE_PERCENT,
-    TOTAL_CAPITAL
+    get_all_calculations_for_alert
 )
 from shared_lib.models import (
     AlertData,
     AnalyzedTradeData,
     Kline,
     OpenTradeData,
-    OrderData,
     SetupData,
 )
 
-# --- IMPORTY Z TEGO SAMEGO SERWISU (bot_service) ---
-from bot_service import state_manager
-from bot_service.bigquery_logger import log_trade_to_bigquery, update_analyzed_trade_in_bigquery
 
+from bot_service import state_manager
+from bot_service.bigquery_logger import log_trade_to_bigquery
 logger = logging.getLogger(__name__)
+
+
+try:
+    bybit_executor = BybitExecutor()
+except (RuntimeError, ValueError) as e:
+    logger.critical(f"Nie można zainicjalizować BybitExecutor: {e}. Funkcjonalność handlowa będzie wyłączona.")
+    bybit_executor = None
+
 
 def _calculate_rr_analytics(entry_price: float, sl_price: float, extreme_price: float, direction: str) -> Dict[str, Any]:
     risk_diff = abs(entry_price - sl_price)
@@ -60,48 +67,7 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]]):
     db = get_db()
     for alert_dict in newly_fetched_alerts:
         try:
-            # Krok 1: Walidacja danych przychodzących z alertu
             alert_data = AlertData.model_validate(alert_dict)
-
-            # --- POCZĄTEK BLOKU SYMULACJI I OBLICZEŃ DŹWIGNI ---
-            try:
-                # Wywołujemy funkcję z naszego kalkulatora
-                calculations = get_all_calculations_for_alert(alert_data)
-                leverage = calculations.get('required_leverage')
-                
-                if leverage and leverage >= 1:
-                    margin_usd = (POSITION_SIZE_PERCENT / 100) * TOTAL_CAPITAL
-
-                    # Tworzymy obiekt "rozkazu" do symulacji
-                    order_command = OrderData(
-                        symbol=alert_data.symbol,
-                        direction=alert_data.direction,
-                        entry_price=alert_data.entry,
-                        sl_price=alert_data.sl,
-                        tp_price=alert_data.tp,
-                        margin_value_usdc=margin_usd,
-                        leverage=leverage
-                    )
-                    
-                    logger.info(
-                        f"[ORDER_SIMULATION][{alert_data.symbol}] "
-                        f"Decyzja: ZLECENIE AKCEPTOWANE. "
-                        f"Dźwignia: {leverage}x, "
-                        f"Margin (Value): {margin_usd:.2f} USDC."
-                    )
-                    # W przyszłości tutaj wywołamy: bybit_executor.execute_trade(order_command)
-                else:
-                    # Ten przypadek wystąpi, jeśli dźwignia jest < 1 (zbyt duże ryzyko)
-                    logger.warning(
-                        f"[ORDER_SIMULATION][{alert_data.symbol}] ZLECENIE ODRZUCONE. "
-                        f"Obliczona dźwignia ({leverage}) jest zbyt niska lub nie mogła zostać obliczona. Ryzyko jest za duże."
-                    )
-
-            except Exception as e:
-                logger.error(f"[ORDER_SIMULATION] Krytyczny błąd podczas symulacji: {e}", exc_info=True)
-            # --- KONIEC BLOKU SYMULACJI ---
-
-            # Krok 2: Kontynuujemy normalną, obecną logikę - tworzenie setupu do analizy
             new_setup = SetupData(
                 alert_data=alert_data,
                 updated_at=datetime.now(timezone.utc)
@@ -109,7 +75,6 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]]):
             doc_ref = db.collection(constants.SETUP_COLLECTION).document(alert_data.symbol)
             doc_ref.set(new_setup.model_dump(by_alias=True))
             logger.info(f"[{alert_data.symbol}] Zarejestrowano/zaktualizowano aktywny setup (tryb analityczny).")
-
         except ValidationError as e:
             logger.error(f"Błąd walidacji danych alertu: {e}", extra={"json_fields": {"alert_id": alert_dict.get('id')}})
         except Exception as e:
@@ -191,34 +156,93 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
                     elif latest_kline.low <= tp_price: closed_result, close_price = "WIN", tp_price
                 
                 ob_type = "Fresh OB" if setup.entry_attempts == 0 else "Used OB"
-                trade_id = str(uuid.uuid4())
-
+                
                 if closed_result:
+                    trade_id = str(uuid.uuid4())
                     logger.info(f"--- [WEJŚCIE I ZAMKNIĘCIE W 1 MIN] --- [{symbol}] | Wynik: {closed_result} | ID: {trade_id}")
                     entry_timestamp = datetime.fromtimestamp(latest_kline.timestamp / 1000, tz=timezone.utc)
                     fake_trade = OpenTradeData(
                         trade_id=trade_id, symbol=symbol, direction=direction, ob_type=ob_type,
                         entry_price=entry_level, sl_price=sl_price, tp_price=tp_price,
                         opened_at_ms=latest_kline.timestamp, opened_at_iso=entry_timestamp.isoformat(),
-                        alert_data_snapshot=setup.alert_data.model_dump(by_alias=True)
+                        alert_data_snapshot=setup.alert_data.model_dump(by_alias=True),
+                        bybit_order_id="immediate_close_no_order" # Specjalny identyfikator dla tego przypadku
                     )
                     finalize_trade(fake_trade, closed_result, close_price)
-                    
-                    # --- POPRAWIONE WYWOŁANIE TRANSAKCJI ---
                     try:
                         db = get_db()
                         transaction = db.transaction()
                         state_manager.update_setup_after_immediate_close_transactional(transaction, symbol, is_loss=(closed_result == "LOSE"))
-                        logger.info(f"[{symbol}] Transakcja natychmiastowego zamknięcia zakończona.")
                     except Exception as ex:
                         logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD TRANSAKCJI NATYCHMIASTOWEGO ZAMKNIĘCIA: {ex}", exc_info=True)
                 else:
-                    logger.info(f"--- [DECYZJA: WEJŚCIE {ob_type}] --- [{symbol}] | Cena: {entry_level} | ID: {trade_id}")
-                    state_manager.create_open_trade(
-                        trade_id=trade_id, symbol=symbol, direction=direction, ob_type=ob_type,
-                        entry_price=entry_level, sl_price=sl_price, tp_price=tp_price,
-                        alert_data=setup.alert_data
-                    )
+                    # --- POCZĄTEK NOWEJ LOGIKI WYKONAWCZEJ ---
+                    if not bybit_executor:
+                        logger.error(f"[{symbol}] Pomijam próbę otwarcia pozycji, ponieważ BybitExecutor nie jest dostępny.")
+                        continue
+
+                    logger.info(f"--- [DECYZJA: WEJŚCIE {ob_type}] --- [{symbol}] | Cena: {entry_level} | Rozpoczynam proces składania zlecenia.")
+                    
+                    # Krok 1: Obliczenie wymaganej dźwigni
+                    leverage_calcs = get_all_calculations_for_alert(setup.alert_data)
+                    required_leverage = leverage_calcs.get('required_leverage')
+
+                    if not required_leverage or required_leverage < 1:
+                        logger.warning(f"[{symbol}] Zlecenie odrzucone. Wymagana dźwignia ({required_leverage}) jest nieprawidłowa lub ryzyko jest zbyt duże.")
+                        continue
+
+                    try:
+                        # Krok 2: Weryfikacja maksymalnej dźwigni i precyzji na giełdzie
+                        instrument_info = bybit_executor.get_instrument_info(symbol)
+                        if not instrument_info:
+                            logger.error(f"[{symbol}] Nie udało się pobrać informacji o instrumencie. Przerywam otwieranie pozycji.")
+                            continue
+                        
+                        max_leverage = instrument_info['max_leverage']
+                        qty_step = instrument_info['qty_step']
+
+                        # Krok 3: Wybór ostatecznej dźwigni
+                        final_leverage = min(required_leverage, max_leverage)
+                        logger.info(f"[{symbol}] Dźwignia: Wymagana={required_leverage}x, Max giełdy={max_leverage}x. Wybrano: {final_leverage}x.")
+
+                        # Krok 4: Obliczenie i sformatowanie wielkości zlecenia (10 USD / cena wejścia)
+                   
+                        position_value = 10.0 * final_leverage
+                        # Obliczamy wielkość (qty) na podstawie wartości pozycji i ceny wejścia
+                        raw_qty = position_value / entry_level
+                        formatted_qty = format_quantity(raw_qty, qty_step)
+
+                        logger.info(f"[{symbol}] Obliczenia pozycji: Margin=10.00 USD, Wartość pozycji={position_value:.2f} USD, Qty={formatted_qty}")
+                                                
+                        if float(formatted_qty) <= 0:
+                            logger.error(f"[{symbol}] Obliczona wielkość zlecenia ({formatted_qty}) jest zerowa. Przerywam.")
+                            continue
+
+                        # Krok 5: Złożenie zlecenia
+                        order_params = {
+                            "symbol": symbol, "side": direction, "price": entry_level,
+                            "qty": formatted_qty, "leverage": final_leverage,
+                            "takeProfit": setup.alert_data.tp_2_0, "stopLoss": sl_price
+                        }
+                        order_id = bybit_executor.place_limit_order(order_params)
+
+                        # Krok 6: Zapis do Firestore TYLKO po pomyślnym złożeniu zlecenia
+                        if order_id:
+                            trade_id = str(uuid.uuid4())
+                            logger.info(f"[{symbol}] Zlecenie pomyślnie wysłane. Tworzę dokument w open_trades z trade_id: {trade_id} i bybit_order_id: {order_id}")
+                            state_manager.create_open_trade(
+                                trade_id=trade_id, symbol=symbol, direction=direction, ob_type=ob_type,
+                                entry_price=entry_level, sl_price=sl_price, tp_price=tp_price,
+                                alert_data=setup.alert_data, bybit_order_id=order_id
+                            )
+                        else:
+                            logger.error(f"[{symbol}] Nie udało się uzyskać ID zlecenia od Bybit. Pozycja nie zostanie utworzona w Firestore.")
+
+                    except (BybitAPIError, RequestException) as e:
+                        logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD podczas interakcji z API Bybit. Operacja otwarcia pozycji przerwana. Błąd: {e}")
+                    except Exception as e:
+                        logger.critical(f"[{symbol}] Nieoczekiwany błąd w logice otwierania pozycji: {e}", exc_info=True)
+                    # --- KONIEC NOWEJ LOGIKI WYKONAWCZEJ ---
         except ValidationError as e:
             logger.error(f"Błąd walidacji danych setupu dla {symbol}: {e}")
         except Exception as e:

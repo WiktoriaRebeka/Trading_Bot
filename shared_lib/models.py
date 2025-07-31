@@ -53,6 +53,7 @@ class OpenTradeData(BaseModel):
     opened_at_ms: int
     opened_at_iso: str
     alert_data_snapshot: Dict[str, Any]
+    bybit_order_id: str 
 
 class Kline(BaseModel):
     timestamp: int
