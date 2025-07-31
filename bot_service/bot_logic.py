@@ -2,23 +2,19 @@
 
 import logging
 import uuid
-from typing import Dict, Any, List
 from datetime import datetime, timezone
+from typing import Any, Dict, List
 
+# Importy bibliotek zewnętrznych
 from google.cloud import firestore
 from google.cloud.firestore_v1.document import DocumentSnapshot
 from pydantic import ValidationError
-
 from requests.exceptions import RequestException
-from bot_service.bybit_executor import BybitExecutor, BybitAPIError, format_quantity
 
-
-
+# Importy z własnego projektu (shared_lib)
 from shared_lib import constants
 from shared_lib.firebase_client import get_db, get_symbols_to_watch_from_config
-from shared_lib.leverage_calculator import (
-    get_all_calculations_for_alert
-)
+from shared_lib.leverage_calculator import get_all_calculations_for_alert
 from shared_lib.models import (
     AlertData,
     AnalyzedTradeData,
@@ -27,10 +23,17 @@ from shared_lib.models import (
     SetupData,
 )
 
-
+# Importy z własnego projektu (bot_service)
 from bot_service import state_manager
 from bot_service.bigquery_logger import log_trade_to_bigquery
+from bot_service.bybit_executor import (
+    BybitAPIError,
+    BybitExecutor,
+    format_quantity,
+)
+
 logger = logging.getLogger(__name__)
+
 
 
 try:
