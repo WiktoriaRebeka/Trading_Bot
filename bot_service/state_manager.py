@@ -221,7 +221,10 @@ def get_historical_klines(symbol: str, start_time_ms: int, end_time_ms: int) -> 
         "limit": 1000
     }
     try:
-        response = requests.get(constants.BYBIT_API_URL_V5_KLINE, params=params, timeout=10)
+
+        kline_endpoint = "/v5/market/kline"
+        full_url = constants.BYBIT_API_URL_V5 + kline_endpoint
+        response = requests.get(full_url, params=params, timeout=10)
         response.raise_for_status()
         data = response.json()
         if data.get("retCode") == 0 and data.get("result") and data["result"].get("list"):

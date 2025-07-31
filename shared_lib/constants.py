@@ -12,9 +12,8 @@ TRADE_COLLECTION = "open_trades"
 ANALYZED_COLLECTION = "analyzed_trades"
 LATEST_KLINES_COLLECTION = "latest_klines"
 
-# Adresy URL API Bybit - SKONFIGUROWANE DLA TESTNETU
-BYBIT_API_URL_V5 = "https://api-testnet.bybit.com"
-BYBIT_API_URL_V5_KLINE = "https://api-testnet.bybit.com/v5/market/kline"
+# Adres URL API Bybit
+BYBIT_API_URL_V5 = "https://api.bybit.com"
 
 # Konfiguracja BigQuery
 BIGQUERY_PROJECT_ID = os.getenv("GCP_PROJECT", "trading-bot-463318")
