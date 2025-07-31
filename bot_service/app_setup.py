@@ -7,10 +7,8 @@ from flask import Flask, jsonify
 # Importy logiki biznesowej i inicjalizatorów
 from shared_lib.config_loader import load_config
 from shared_lib.firebase_client import initialize_firebase
-from bot_service.bigquery_logger import initialize_bigquery
-from bot_service.bot_logic import process_new_alerts, run_trading_logic
-from bot_service.fetch_from_firestore import load_last_processed_timestamp, fetch_new_alerts_since, save_last_processed_timestamp
 from bot_service.bot_logic import process_new_alerts, run_trading_logic, initialize_trading_services
+from bot_service.fetch_from_firestore import load_last_processed_timestamp, fetch_new_alerts_since, save_last_processed_timestamp
 
 
 logger = logging.getLogger(__name__)
