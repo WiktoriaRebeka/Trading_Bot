@@ -10,6 +10,8 @@ from shared_lib.firebase_client import initialize_firebase
 from bot_service.bigquery_logger import initialize_bigquery
 from bot_service.bot_logic import process_new_alerts, run_trading_logic
 from bot_service.fetch_from_firestore import load_last_processed_timestamp, fetch_new_alerts_since, save_last_processed_timestamp
+from bot_service.bot_logic import process_new_alerts, run_trading_logic, initialize_trading_services
+
 
 logger = logging.getLogger(__name__)
 
@@ -60,28 +62,39 @@ def initialize_app_services(app: Flask):
     """Wykonuje całą logikę inicjalizacji w kontekście aplikacji."""
     with app.app_context():
         logger.info("Rozpoczynam konfigurację aplikacji `bot_service` wewnątrz kontekstu.")
+        
+        # Krok 1: Załaduj konfigurację i sekrety. To musi być pierwsze.
         load_config()
 
-        # --- KLUCZOWA ZMIANA: Bardziej szczegółowe logowanie błędów inicjalizacji ---
+        # Krok 2: Inicjalizuj poszczególne usługi i śledź ich status.
         firebase_ok = initialize_firebase()
         if not firebase_ok:
             app.config['INITIALIZATION_FAILURE_REASON'] = "Failed to initialize Firebase/Firestore."
             logger.critical(app.config['INITIALIZATION_FAILURE_REASON'])
-            # Nie przerywamy, aby sprawdzić resztę
         
         bigquery_ok = initialize_bigquery()
         if not bigquery_ok:
-            # Jeśli Firebase już zawiodło, dopisujemy informację
             reason = app.config.get('INITIALIZATION_FAILURE_REASON', '')
             new_reason = "Failed to initialize BigQuery."
             app.config['INITIALIZATION_FAILURE_REASON'] = f"{reason} {new_reason}".strip()
             logger.critical(new_reason)
 
-        if firebase_ok and bigquery_ok:
+        # --- POCZĄTEK NOWEJ LOGIKI ---
+        # Krok 3: Inicjalizuj usługi tradingowe, które zależą od załadowanej konfiguracji.
+        trading_ok = initialize_trading_services()
+        if not trading_ok:
+            reason = app.config.get('INITIALIZATION_FAILURE_REASON', '')
+            new_reason = "Failed to initialize BybitExecutor."
+            app.config['INITIALIZATION_FAILURE_REASON'] = f"{reason} {new_reason}".strip()
+            logger.critical(new_reason)
+        # --- KONIEC NOWEJ LOGIKI ---
+
+        # Krok 4: Sprawdź, czy WSZYSTKIE kluczowe usługi zostały zainicjalizowane poprawnie.
+        if firebase_ok and bigquery_ok and trading_ok:
             app.config['INITIALIZATION_SUCCESS'] = True
             logger.info("Aplikacja Flask [bot_service] została pomyślnie utworzona i skonfigurowana.")
         else:
             app.config['INITIALIZATION_SUCCESS'] = False
-            # Logujemy ostateczny powód
+            # Logujemy ostateczny, skumulowany powód błędu.
             final_reason = app.config.get('INITIALIZATION_FAILURE_REASON', 'Unknown initialization error.')
             logger.critical(f"Krytyczny błąd podczas inicjalizacji. Aplikacja będzie zwracać błędy 503. Powód: {final_reason}")

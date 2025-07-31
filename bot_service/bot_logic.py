@@ -34,13 +34,21 @@ from bot_service.bybit_executor import (
 
 logger = logging.getLogger(__name__)
 
+bybit_executor: BybitExecutor | None = None
 
-
-try:
-    bybit_executor = BybitExecutor()
-except (RuntimeError, ValueError) as e:
-    logger.critical(f"Nie można zainicjalizować BybitExecutor: {e}. Funkcjonalność handlowa będzie wyłączona.")
-    bybit_executor = None
+def initialize_trading_services():
+    """Inicjalizuje usługi tradingowe, takie jak BybitExecutor."""
+    global bybit_executor
+    logger.info("Inicjalizacja usług tradingowych...")
+    try:
+        # Inicjalizacja odbywa się teraz tutaj, a nie globalnie.
+        bybit_executor = BybitExecutor()
+        logger.info("BybitExecutor pomyślnie zainicjalizowany.")
+        return True
+    except (RuntimeError, ValueError) as e:
+        logger.critical(f"Nie można zainicjalizować BybitExecutor: {e}. Funkcjonalność handlowa będzie wyłączona.")
+        bybit_executor = None
+        return False
 
 
 def _calculate_rr_analytics(entry_price: float, sl_price: float, extreme_price: float, direction: str) -> Dict[str, Any]:
