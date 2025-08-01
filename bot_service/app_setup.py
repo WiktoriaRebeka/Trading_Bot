@@ -1,21 +1,20 @@
-# Lokalizacja: bot_service/app_setup.py
-
 import logging
 import uuid
 from flask import Flask, jsonify
 
-# Importy logiki biznesowej i inicjalizatorów
+# Importy z bibliotek współdzielonych
 from shared_lib.config_loader import load_config
 from shared_lib.firebase_client import initialize_firebase
-from bot_service.bot_logic import process_new_alerts, run_trading_logic, initialize_trading_services
-from bot_service.fetch_from_firestore import load_last_processed_timestamp, fetch_new_alerts_since, save_last_processed_timestamp
 
+# Importy z bieżącego serwisu (bot_service)
+from bot_service.bigquery_logger import initialize_bigquery  # <-- KLUCZOWA POPRAWKA
+from bot_service.bot_logic import initialize_trading_services, process_new_alerts, run_trading_logic
+from bot_service.fetch_from_firestore import fetch_new_alerts_since, load_last_processed_timestamp, save_last_processed_timestamp
 
 logger = logging.getLogger(__name__)
 
 def register_endpoints(app: Flask):
     """Rejestruje wszystkie endpointy aplikacji."""
-    # ... (reszta funkcji bez zmian, skopiuj ją z poprzedniej wersji) ...
     @app.route('/')
     def health_check():
         return "Trading Bot Service is running.", 200
@@ -25,7 +24,6 @@ def register_endpoints(app: Flask):
         if app.config.get('INITIALIZATION_SUCCESS', False):
             return jsonify({"status": "healthy"}), 200
         else:
-            # Dodajemy powód błędu do odpowiedzi, co ułatwi debugowanie
             reason = app.config.get('INITIALIZATION_FAILURE_REASON', 'Unknown initialization error.')
             return jsonify({"status": "unhealthy", "reason": reason}), 503
 
@@ -77,7 +75,6 @@ def initialize_app_services(app: Flask):
             app.config['INITIALIZATION_FAILURE_REASON'] = f"{reason} {new_reason}".strip()
             logger.critical(new_reason)
 
-        # --- POCZĄTEK NOWEJ LOGIKI ---
         # Krok 3: Inicjalizuj usługi tradingowe, które zależą od załadowanej konfiguracji.
         trading_ok = initialize_trading_services()
         if not trading_ok:
@@ -85,7 +82,6 @@ def initialize_app_services(app: Flask):
             new_reason = "Failed to initialize BybitExecutor."
             app.config['INITIALIZATION_FAILURE_REASON'] = f"{reason} {new_reason}".strip()
             logger.critical(new_reason)
-        # --- KONIEC NOWEJ LOGIKI ---
 
         # Krok 4: Sprawdź, czy WSZYSTKIE kluczowe usługi zostały zainicjalizowane poprawnie.
         if firebase_ok and bigquery_ok and trading_ok:
