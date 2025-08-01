@@ -75,15 +75,21 @@ class BybitExecutor:
             logger.error(f"Błąd API Bybit: {e}", extra={"json_fields": {"ret_code": e.ret_code, "ret_msg": e.ret_msg}})
             raise
 
+
     def get_instrument_info(self, symbol: str) -> Optional[Dict[str, Any]]:
         """Pobiera informacje o instrumencie, w tym max_leverage i qty_step."""
         logger.info(f"[{symbol}] Pobieranie informacji o instrumencie z Bybit.")
+        
+        # --- NOWA LINIA: Usuwamy przyrostek .P z symbolu ---
+        api_symbol = symbol.replace('.P', '')
+        
         try:
             result = self._send_request(
                 "GET",
-                f"/v5/market/instruments-info?category=linear&symbol={symbol}"
+                # --- ZMIANA: Używamy oczyszczonego symbolu ---
+                f"/v5/market/instruments-info?category=linear&symbol={api_symbol}"
             )
-            # API zwraca listę, nawet dla jednego symbolu
+            # API zwraca listę, nawet dla jednego symbolu.
             if result and result.get('list'):
                 instrument_data = result['list'][0]
                 leverage_filter = instrument_data.get('leverageFilter', {})
@@ -91,44 +97,49 @@ class BybitExecutor:
                 
                 info = {
                     "max_leverage": int(float(leverage_filter.get('maxLeverage', '1'))),
-                    "qty_step": lot_size_filter.get('qtyStep', '0.001') # Domyślna wartość na wszelki wypadek
+                    "qty_step": lot_size_filter.get('qtyStep', '0.001')
                 }
-                logger.info(f"[{symbol}] Pobrane informacje: max_leverage={info['max_leverage']}, qty_step={info['qty_step']}")
+                logger.info(f"[{symbol}] Pobrane informacje dla {api_symbol}: max_leverage={info['max_leverage']}, qty_step={info['qty_step']}")
                 return info
+            logger.warning(f"[{symbol}] API Bybit zwróciło pustą listę instrumentów dla {api_symbol}.")
             return None
         except (RequestException, BybitAPIError) as e:
-            logger.error(f"[{symbol}] Nie udało się pobrać informacji o instrumencie: {e}")
+            logger.error(f"[{symbol}] Nie udało się pobrać informacji o instrumencie dla {api_symbol}: {e}")
             return None
 
     def place_limit_order(self, order_params: Dict[str, Any]) -> Optional[str]:
         """Składa zlecenie typu Limit na giełdzie Bybit."""
         symbol = order_params.get('symbol')
-        logger.info(f"[{symbol}] Próba złożenia zlecenia: {order_params}")
+        logger.info(f"[{symbol}] Przygotowywanie zlecenia: {order_params}")
+        
+        # --- NOWA LINIA: Usuwamy przyrostek .P z symbolu ---
+        api_symbol = symbol.replace('.P', '')
         
         payload = {
             "category": "linear",
-            "symbol": symbol,
-            "side": "Buy" if order_params['side'].upper() == 'LONG' else "Sell",
+            # --- ZMIANA: Używamy oczyszczonego symbolu ---
+            "symbol": api_symbol,
+            "side": "Buy" if str(order_params['side']).upper() == 'LONG' else "Sell",
             "orderType": "Limit",
             "qty": str(order_params['qty']),
             "price": str(order_params['price']),
             "leverage": str(order_params['leverage']),
             "takeProfit": str(order_params['takeProfit']),
             "stopLoss": str(order_params['stopLoss']),
-            "timeInForce": "GTC" # Good-Til-Canceled
+            "timeInForce": "GTC"  # Good-Til-Canceled
         }
         
         try:
             result = self._send_request("POST", "/v5/order/create", payload)
             order_id = result.get("orderId")
             if order_id:
-                logger.info(f"[{symbol}] SUKCES! Zlecenie pomyślnie złożone. Order ID: {order_id}")
+                logger.info(f"[{symbol}] SUKCES! Zlecenie dla {api_symbol} pomyślnie złożone. Order ID: {order_id}")
                 return order_id
             else:
-                logger.error(f"[{symbol}] Zlecenie złożone, ale API nie zwróciło orderId. Odpowiedź: {result}")
+                logger.error(f"[{symbol}] Zlecenie dla {api_symbol} złożone, ale API nie zwróciło orderId. Odpowiedź: {result}")
                 return None
         except (RequestException, BybitAPIError) as e:
-            logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się złożyć zlecenia: {e}")
+            logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się złożyć zlecenia dla {api_symbol}: {e}")
             return None
 
 def format_quantity(quantity: float, qty_step: str) -> str:
