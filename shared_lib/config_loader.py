@@ -29,13 +29,14 @@ def load_config():
     """
     Ładuje konfigurację w zależności od środowiska i aktualizuje globalny obiekt konfiguracyjny.
     """
+    # --- DODATKOWY LOG ---
     if 'K_SERVICE' in os.environ:
-        logger.info("Wykryto środowisko Cloud Run. Ładowanie konfiguracji z Secret Manager.")
+        logger.info(f"Wykryto środowisko Cloud Run (K_SERVICE={os.environ['K_SERVICE']}). Ładowanie konfiguracji z Secret Manager.")
         _load_from_secret_manager()
     else:
-        logger.info("Środowisko lokalne. Ładowanie konfiguracji z pliku .env.")
+        logger.warning("Nie wykryto zmiennej K_SERVICE. Zakładam środowisko lokalne. Ładowanie konfiguracji z pliku .env.")
         _load_from_dotenv()
-    
+    # --- KONIEC DODATKOWEGO LOGU ---
   
     config.load()
     logger.info("Obiekt konfiguracyjny został zaktualizowany.")
@@ -60,9 +61,13 @@ def _load_from_secret_manager():
 
 def _load_from_dotenv():
     """Ładuje konfigurację z lokalnego pliku .env."""
+    # --- POPRAWKA PONIŻEJ ---
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # --- KONIEC POPRAWKI ---
     dotenv_path = os.path.join(project_root, '.env')
     if os.path.exists(dotenv_path):
         load_dotenv(dotenv_path=dotenv_path)
+        # --- DODATKOWY LOG ---
+        logger.info(f"Pomyślnie załadowano zmienne z pliku .env: {dotenv_path}")
     else:
         logger.warning(f"Plik .env nie został znaleziony w ścieżce: {dotenv_path}.")
