@@ -148,6 +148,14 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
             sl_price = setup.alert_data.sl
             tp_price = setup.alert_data.tp
 
+            # --- NOWY, KLUCZOWY LOG DIAGNOSTYCZNY ---
+            logger.info(
+                f"[{symbol}] DIAGNOSTYKA WEJŚCIA: Kierunek={direction}, "
+                f"Cena Wejścia (z alertu)={entry_level}, "
+                f"Świeca Low={latest_kline.low}, Świeca High={latest_kline.high}"
+            )
+            # --- KONIEC NOWEGO LOGU ---
+
             if setup.is_reset_needed_after_loss:
                 if (direction == 'LONG' and latest_kline.high > entry_level) or \
                    (direction == 'SHORT' and latest_kline.low < entry_level):
@@ -157,6 +165,8 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
 
             entry_triggered = (direction == 'LONG' and latest_kline.low <= entry_level) or \
                               (direction == 'SHORT' and latest_kline.high >= entry_level)
+            
+            
             if entry_triggered:
                 closed_result, close_price = None, None
                 if direction == 'LONG':
