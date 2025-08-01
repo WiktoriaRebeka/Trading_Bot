@@ -141,6 +141,33 @@ class BybitExecutor:
         except (RequestException, BybitAPIError) as e:
             logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się złożyć zlecenia dla {api_symbol}: {e}")
             return None
+    def set_isolated_margin(self, symbol: str, leverage: int) -> bool:
+        """Ustawia tryb Isolated Margin i dźwignię dla danego symbolu."""
+        logger.info(f"[{symbol}] Próba ustawienia trybu Isolated Margin z dźwignią {leverage}x.")
+        
+        api_symbol = symbol.replace('.P', '')
+        leverage_str = str(leverage)
+        
+        payload = {
+            "category": "linear",
+            "symbol": api_symbol,
+            "tradeMode": 1,  # 0: Cross Margin, 1: Isolated Margin
+            "buyLeverage": leverage_str,
+            "sellLeverage": leverage_str
+        }
+        
+        try:
+            self._send_request("POST", "/v5/position/switch-margin-mode", payload)
+            logger.info(f"[{symbol}] SUKCES! Pomyślnie ustawiono tryb Isolated Margin i dźwignię.")
+            return True
+        except (RequestException, BybitAPIError) as e:
+            # Błąd 110026 oznacza, że tryb jest już ustawiony na Isolated, co jest dla nas OK.
+            if isinstance(e, BybitAPIError) and e.ret_code == 110026:
+                logger.warning(f"[{symbol}] Tryb Isolated Margin jest już aktywny. Kontynuuję.")
+                return True
+            
+            logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się ustawić trybu Isolated Margin: {e}")
+            return False
 
 def format_quantity(quantity: float, qty_step: str) -> str:
     """Formatuje wielkość zlecenia zgodnie z wymaganą precyzją (qty_step)."""
@@ -149,3 +176,4 @@ def format_quantity(quantity: float, qty_step: str) -> str:
     # Używamy kwantyzacji z zaokrągleniem w dół, aby nie przekroczyć limitów
     formatted_qty = qty_decimal.quantize(step_decimal, rounding=ROUND_DOWN)
     return str(formatted_qty)
+
