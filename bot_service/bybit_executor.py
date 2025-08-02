@@ -151,22 +151,24 @@ class BybitExecutor:
         payload = {
             "category": "linear",
             "symbol": api_symbol,
-            "tradeMode": 1,  # 0: Cross Margin, 1: Isolated Margin
             "buyLeverage": leverage_str,
-            "sellLeverage": leverage_str
+            "sellLeverage": leverage_str,
+            "tradeMode": 1  # 0: Cross Margin, 1: Isolated Margin
         }
         
         try:
-            self._send_request("POST", "/v5/position/switch-margin-mode", payload)
+            # --- KLUCZOWA POPRAWKA: Zmiana endpointu ---
+            self._send_request("POST", "/v5/position/set-leverage", payload)
             logger.info(f"[{symbol}] SUKCES! Pomyślnie ustawiono tryb Isolated Margin i dźwignię.")
             return True
         except (RequestException, BybitAPIError) as e:
-            # Błąd 110026 oznacza, że tryb jest już ustawiony na Isolated, co jest dla nas OK.
-            if isinstance(e, BybitAPIError) and e.ret_code == 110026:
-                logger.warning(f"[{symbol}] Tryb Isolated Margin jest już aktywny. Kontynuuję.")
+            # Błąd 110043 oznacza, że dźwignia nie została zmodyfikowana (jest już taka sama).
+            # Traktujemy to jako sukces, ponieważ stan jest zgodny z oczekiwaniami.
+            if isinstance(e, BybitAPIError) and e.ret_code == 110043:
+                logger.warning(f"[{symbol}] Dźwignia i tryb margin są już poprawnie ustawione. Kontynuuję.")
                 return True
             
-            logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się ustawić trybu Isolated Margin: {e}")
+            logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się ustawić trybu Isolated Margin i dźwigni: {e}")
             return False
 
 def format_quantity(quantity: float, qty_step: str) -> str:
