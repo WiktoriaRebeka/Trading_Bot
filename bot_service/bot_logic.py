@@ -165,7 +165,7 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
 
             entry_triggered = (direction == 'LONG' and latest_kline.low <= entry_level) or \
                               (direction == 'SHORT' and latest_kline.high >= entry_level)
-            
+
             
             if entry_triggered:
                 closed_result, close_price = None, None
