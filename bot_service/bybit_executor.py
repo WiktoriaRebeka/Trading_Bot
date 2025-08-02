@@ -141,6 +141,56 @@ class BybitExecutor:
         except (RequestException, BybitAPIError) as e:
             logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się złożyć zlecenia dla {api_symbol}: {e}")
             return None
+    # ZASTĄP TĘ FUNKCJĘ:
+def _send_request(self, method: str, endpoint: str, payload: Dict = None, is_json: bool = True) -> Dict[str, Any]:
+    """Wysyła podpisane zapytanie do API Bybit, obsługując różne typy contentu."""
+    url = self.base_url + endpoint
+    
+    # Przygotuj payload i sygnaturę
+    payload_str = ""
+    if payload:
+        if is_json:
+            payload_str = json.dumps(payload)
+        else:
+            # Dla application/x-www-form-urlencoded, sygnatura jest z parametrów URL
+            payload_str = '&'.join([f'{k}={v}' for k, v in sorted(payload.items())])
+
+    timestamp = str(int(time.time() * 1000))
+    
+    headers = {
+        'X-B-API-KEY': self.api_key,
+        'X-B-API-TIMESTAMP': timestamp,
+        'X-B-API-SIGN': self._generate_signature(timestamp, payload_str),
+        'X-B-API-RECV-WINDOW': '10000',
+    }
+    
+    # Ustaw odpowiedni Content-Type
+    if is_json:
+        headers['Content-Type'] = 'application/json'
+    else:
+        headers['Content-Type'] = 'application/x-www-form-urlencoded'
+
+    try:
+        # Użyj json= lub data= w zależności od typu zapytania
+        if is_json:
+            response = self.session.request(method, url, headers=headers, json=payload, timeout=10)
+        else:
+            response = self.session.request(method, url, headers=headers, data=payload, timeout=10)
+            
+        response.raise_for_status()
+        data = response.json()
+
+        if data.get("retCode") != 0:
+            raise BybitAPIError(ret_code=data.get("retCode"), ret_msg=data.get("retMsg"))
+        
+        return data.get("result", {})
+    except RequestException as e:
+        logger.error(f"Błąd sieciowy podczas komunikacji z Bybit: {e}", exc_info=True)
+        raise
+    except BybitAPIError as e:
+        logger.error(f"Błąd API Bybit: {e}", extra={"json_fields": {"ret_code": e.ret_code, "ret_msg": e.ret_msg}})
+        raise
+
     def set_isolated_margin(self, symbol: str, leverage: int) -> bool:
         """Ustawia tryb Isolated Margin i dźwignię dla danego symbolu."""
         logger.info(f"[{symbol}] Próba ustawienia trybu Isolated Margin z dźwignią {leverage}x.")
@@ -157,13 +207,11 @@ class BybitExecutor:
         }
         
         try:
-            # --- KLUCZOWA POPRAWKA: Zmiana endpointu ---
-            self._send_request("POST", "/v5/position/set-leverage", payload)
+            # --- KLUCZOWA POPRAWKA: Przekazujemy is_json=False ---
+            self._send_request("POST", "/v5/position/set-leverage", payload, is_json=False)
             logger.info(f"[{symbol}] SUKCES! Pomyślnie ustawiono tryb Isolated Margin i dźwignię.")
             return True
         except (RequestException, BybitAPIError) as e:
-            # Błąd 110043 oznacza, że dźwignia nie została zmodyfikowana (jest już taka sama).
-            # Traktujemy to jako sukces, ponieważ stan jest zgodny z oczekiwaniami.
             if isinstance(e, BybitAPIError) and e.ret_code == 110043:
                 logger.warning(f"[{symbol}] Dźwignia i tryb margin są już poprawnie ustawione. Kontynuuję.")
                 return True
