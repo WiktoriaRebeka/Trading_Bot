@@ -165,7 +165,6 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
 
             entry_triggered = (direction == 'LONG' and latest_kline.low <= entry_level) or \
                               (direction == 'SHORT' and latest_kline.high >= entry_level)
-
             
             if entry_triggered:
                 closed_result, close_price = None, None
@@ -197,22 +196,21 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
                     except Exception as ex:
                         logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD TRANSAKCJI NATYCHMIASTOWEGO ZAMKNIĘCIA: {ex}", exc_info=True)
                 else:
-                    # --- POCZĄTEK NOWEJ LOGIKI WYKONAWCZEJ ---
-                    # Ten blok jest teraz poprawnie wcięty wewnątrz 'else'
+                    # --- POCZĄTEK POPRAWIONEJ LOGIKI ---
                     if not bybit_executor:
-                        logger.error(f"[{symbol}] Pomijam próbę otwarcia pozycji, ponieważ BybitExecutor nie jest dostępny.")
+                        logger.error(f"[{symbol}] Pomijam próbę otwarcia pozycji, ponieważ BybitExecutor nie jest dostępny (błąd inicjalizacji).")
                         continue
 
                     logger.info(f"--- [DECYZJA: WEJŚCIE {ob_type}] --- [{symbol}] | Cena: {entry_level} | Rozpoczynam proces składania zlecenia.")
                     
-                    leverage_calcs = get_all_calculations_for_alert(setup.alert_data)
-                    required_leverage = leverage_calcs.get('required_leverage')
-
-                    if not required_leverage or required_leverage < 1:
-                        logger.warning(f"[{symbol}] Zlecenie odrzucone. Wymagana dźwignia ({required_leverage}) jest nieprawidłowa lub ryzyko jest zbyt duże.")
-                        continue
-
                     try:
+                        leverage_calcs = get_all_calculations_for_alert(setup.alert_data)
+                        required_leverage = leverage_calcs.get('required_leverage')
+
+                        if not required_leverage or required_leverage < 1:
+                            logger.warning(f"[{symbol}] Zlecenie odrzucone. Wymagana dźwignia ({required_leverage}) jest nieprawidłowa lub ryzyko jest zbyt duże.")
+                            continue
+
                         instrument_info = bybit_executor.get_instrument_info(symbol)
                         if not instrument_info:
                             logger.error(f"[{symbol}] Nie udało się pobrać informacji o instrumencie. Przerywam otwieranie pozycji.")
@@ -259,7 +257,7 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
                         logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD podczas interakcji z API Bybit. Operacja otwarcia pozycji przerwana. Błąd: {e}")
                     except Exception as e:
                         logger.critical(f"[{symbol}] Nieoczekiwany błąd w logice otwierania pozycji: {e}", exc_info=True)
-                    # --- KONIEC NOWEJ LOGIKI WYKONAWCZEJ ---
+                    # --- KONIEC POPRAWIONEJ LOGIKI ---
         except ValidationError as e:
             logger.error(f"Błąd walidacji danych setupu dla {symbol}: {e}")
         except Exception as e:
