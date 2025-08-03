@@ -48,10 +48,11 @@ class BybitExecutor:
         return hash_val.hexdigest()
 
     # --- JEDYNA, POPRAWNA WERSJA _send_request ---
-    def _send_request(self, method: str, endpoint: str, payload: Optional[Dict] = None, is_json: bool = True) -> Dict[str, Any]:
+    def _send_request(self, method: str, endpoint: str, payload: Dict = None, is_json: bool = True) -> Dict[str, Any]:
         """Wysyła podpisane zapytanie do API Bybit, obsługując różne typy contentu."""
         url = self.base_url + endpoint
         
+        # Przygotuj payload i sygnaturę
         payload_str = ""
         if payload:
             if is_json:
@@ -69,14 +70,17 @@ class BybitExecutor:
             'X-B-API-RECV-WINDOW': '10000',
         }
         
+        # Ustaw odpowiedni Content-Type
         if is_json:
             headers['Content-Type'] = 'application/json'
-        
+        else:
+            headers['Content-Type'] = 'application/x-www-form-urlencoded'
+
         try:
+            # Użyj json= lub data= w zależności od typu zapytania
             if is_json:
-                response = self.session.request(method, url, headers=headers, data=payload_str, timeout=10)
+                response = self.session.request(method, url, headers=headers, json=payload, timeout=10)
             else:
-                # Dla application/x-www-form-urlencoded, payload idzie w data, a nie json
                 response = self.session.request(method, url, headers=headers, data=payload, timeout=10)
                 
             response.raise_for_status()
@@ -153,9 +157,14 @@ class BybitExecutor:
             return None
 
     # --- TA FUNKCJA JEST TERAZ POPRAWNIE WEWNĄTRZ KLASY ---
+# ZASTĄP TĘ FUNKCJĘ:
+
+
+# ZASTĄP RÓWNIEŻ TĘ FUNKCJĘ:
     def set_isolated_margin(self, symbol: str, leverage: int) -> bool:
         """Ustawia tryb Isolated Margin i dźwignię dla danego symbolu."""
         logger.info(f"[{symbol}] Próba ustawienia trybu Isolated Margin z dźwignią {leverage}x.")
+        
         api_symbol = symbol.replace('.P', '')
         leverage_str = str(leverage)
         
@@ -164,10 +173,11 @@ class BybitExecutor:
             "symbol": api_symbol,
             "buyLeverage": leverage_str,
             "sellLeverage": leverage_str,
-            "tradeMode": 1
+            "tradeMode": 1  # 0: Cross Margin, 1: Isolated Margin
         }
         
         try:
+            # --- KLUCZOWA POPRAWKA: Przekazujemy is_json=False ---
             self._send_request("POST", "/v5/position/set-leverage", payload, is_json=False)
             logger.info(f"[{symbol}] SUKCES! Pomyślnie ustawiono tryb Isolated Margin i dźwignię.")
             return True
