@@ -371,6 +371,20 @@ def _handle_post_mortem_analysis(analyzed_trades: List[DocumentSnapshot], klines
         except Exception as e: 
             logger.error(f"[ANALIZA DUCHA][{trade_id}] Błąd: {e}", exc_info=True)
 
+def initialize_trading_services() -> (bool, Optional[BybitExecutor]):
+    """Inicjalizuje usługi tradingowe, takie jak BybitExecutor."""
+    global bybit_executor
+    logger.info("Inicjalizacja usług tradingowych...")
+    try:
+        executor_instance = BybitExecutor()
+        bybit_executor = executor_instance # Ustawiamy globalną zmienną
+        logger.info("BybitExecutor pomyślnie zainicjalizowany.")
+        return True, executor_instance
+    except (RuntimeError, ValueError) as e:
+        logger.critical(f"Nie można zainicjalizować BybitExecutor: {e}. Funkcjonalność handlowa będzie wyłączona.")
+        bybit_executor = None
+        return False, None
+
 def run_trading_logic():
     logger.info("Rozpoczynam główną pętlę logiki tradingowej.")
     symbols_to_watch = set(get_symbols_to_watch_from_config())
