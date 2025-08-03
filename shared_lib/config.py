@@ -1,5 +1,8 @@
 # Lokalizacja: shared_lib/config.py 
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 class AppConfig:
     """
@@ -13,11 +16,26 @@ class AppConfig:
 
     def load(self):
         """
-        Ładuje konfigurację ze zmiennych środowiskowych.
-        Ta metoda powinna być wywołana PO załadowaniu sekretów do środowiska.
+        Ładuje konfigurację ze zmiennych środowiskowych, czyszcząc wartości z potencjalnych
+        błędów formatowania (białe znaki, cudzysłowy).
         """
-        self.BYBIT_API_KEY = os.getenv("BYBIT_API_KEY")
-        self.BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET")
+        raw_api_key = os.getenv("BYBIT_API_KEY")
+        raw_api_secret = os.getenv("BYBIT_API_SECRET")
+
+        if raw_api_key:
+            self.BYBIT_API_KEY = raw_api_key.strip().strip('"\'')
+            # Logowanie diagnostyczne - NIE UŻYWAĆ W PRODUKCJI Z PEŁNYM KLUCZEM
+            logger.info(f"Załadowano BYBIT_API_KEY (długość: {len(self.BYBIT_API_KEY)}, końcówka: '...{self.BYBIT_API_KEY[-4:]}')")
+        else:
+            logger.warning("Zmienna środowiskowa BYBIT_API_KEY nie została znaleziona.")
+
+        if raw_api_secret:
+            self.BYBIT_API_SECRET = raw_api_secret.strip().strip('"\'')
+            # Logowanie diagnostyczne
+            logger.info(f"Załadowano BYBIT_API_SECRET (długość: {len(self.BYBIT_API_SECRET)})")
+        else:
+            logger.warning("Zmienna środowiskowa BYBIT_API_SECRET nie została znaleziona.")
+        
         self.is_loaded = True
 
 config = AppConfig()
