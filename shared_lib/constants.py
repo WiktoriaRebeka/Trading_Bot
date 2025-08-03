@@ -1,3 +1,4 @@
+# Lokalizacja: shared_lib/constants.py 
 import os
 
 # Nazwy kolekcji i dokumentów w Firestore

@@ -1,5 +1,4 @@
-# Lokalizacja: shared_lib/config.py (NOWY PLIK)
-
+# Lokalizacja: shared_lib/config.py 
 import os
 
 class AppConfig:

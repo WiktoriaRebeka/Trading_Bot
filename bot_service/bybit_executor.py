@@ -16,7 +16,6 @@ from shared_lib import constants
 
 logger = logging.getLogger(__name__)
 
-# Dedykowany wyjątek dla błędów API Bybit
 class BybitAPIError(Exception):
     def __init__(self, ret_code: int, ret_msg: str):
         self.ret_code = ret_code
@@ -26,7 +25,8 @@ class BybitAPIError(Exception):
 class BybitExecutor:
     """
     Klasa odpowiedzialna za komunikację z API Bybit V5.
-    Hermetyzuje logikę autoryzacji, składania zleceň i obsługi błędów.
+    Hermetyzuje logikę autoryzacji, składania zleceń i obsługi błędów.
+    Wszystkie zapytania są wysyłane w formacie application/json.
     """
     def __init__(self):
         if not config.is_loaded:
@@ -40,49 +40,38 @@ class BybitExecutor:
         if not self.api_key or not self.api_secret:
             raise ValueError("Klucze API Bybit nie są ustawione w konfiguracji.")
 
-    def _generate_signature(self, timestamp: str, payload: str) -> str:
+    def _generate_signature(self, timestamp: str, payload_str: str) -> str:
         """Generuje sygnaturę HMAC-SHA256."""
         recv_window = "10000"
-        param_str = timestamp + self.api_key + recv_window + payload
+        param_str = timestamp + self.api_key + recv_window + payload_str
         hash_val = hmac.new(bytes(self.api_secret, "utf-8"), param_str.encode("utf-8"), hashlib.sha256)
         return hash_val.hexdigest()
 
-    # --- JEDYNA, POPRAWNA WERSJA _send_request ---
-    def _send_request(self, method: str, endpoint: str, payload: Dict = None, is_json: bool = True) -> Dict[str, Any]:
-        """Wysyła podpisane zapytanie do API Bybit, obsługując różne typy contentu."""
+    def _send_request(self, method: str, endpoint: str, params: Dict = None, payload: Dict = None) -> Dict[str, Any]:
+        """
+        Wysyła podpisane zapytanie do API Bybit V5.
+        Obsługuje parametry w URL (dla GET) i ciało żądania w formacie JSON (dla POST).
+        """
         url = self.base_url + endpoint
-        
-        # Przygotuj payload i sygnaturę
-        payload_str = ""
-        if payload:
-            if is_json:
-                payload_str = json.dumps(payload)
-            else:
-                # Dla application/x-www-form-urlencoded, sygnatura jest z parametrów URL
-                payload_str = '&'.join([f'{k}={v}' for k, v in sorted(payload.items())])
-
         timestamp = str(int(time.time() * 1000))
         
+        # Przygotuj payload i sygnaturę
+        # Dla GET sygnatura jest z parametrów URL, dla POST z ciała JSON
+        if method.upper() == 'GET':
+            payload_str = '&'.join([f'{k}={v}' for k, v in sorted(params.items())]) if params else ""
+        else: # POST, PUT, DELETE
+            payload_str = json.dumps(payload) if payload else ""
+
         headers = {
             'X-B-API-KEY': self.api_key,
             'X-B-API-TIMESTAMP': timestamp,
             'X-B-API-SIGN': self._generate_signature(timestamp, payload_str),
             'X-B-API-RECV-WINDOW': '10000',
+            'Content-Type': 'application/json',
         }
         
-        # Ustaw odpowiedni Content-Type
-        if is_json:
-            headers['Content-Type'] = 'application/json'
-        else:
-            headers['Content-Type'] = 'application/x-www-form-urlencoded'
-
         try:
-            # Użyj json= lub data= w zależności od typu zapytania
-            if is_json:
-                response = self.session.request(method, url, headers=headers, json=payload, timeout=10)
-            else:
-                response = self.session.request(method, url, headers=headers, data=payload, timeout=10)
-                
+            response = self.session.request(method, url, headers=headers, params=params, json=payload, timeout=10)
             response.raise_for_status()
             data = response.json()
 
@@ -103,9 +92,11 @@ class BybitExecutor:
         api_symbol = symbol.replace('.P', '')
         
         try:
+            # Używamy 'params' dla zapytań GET
             result = self._send_request(
                 "GET",
-                f"/v5/market/instruments-info?category=linear&symbol={api_symbol}"
+                "/v5/market/instruments-info",
+                params={"category": "linear", "symbol": api_symbol}
             )
             if result and result.get('list'):
                 instrument_data = result['list'][0]
@@ -144,7 +135,8 @@ class BybitExecutor:
         }
         
         try:
-            result = self._send_request("POST", "/v5/order/create", payload)
+            # Używamy 'payload' dla zapytań POST
+            result = self._send_request("POST", "/v5/order/create", payload=payload)
             order_id = result.get("orderId")
             if order_id:
                 logger.info(f"[{symbol}] SUKCES! Zlecenie dla {api_symbol} pomyślnie złożone. Order ID: {order_id}")
@@ -156,11 +148,6 @@ class BybitExecutor:
             logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się złożyć zlecenia dla {api_symbol}: {e}")
             return None
 
-    # --- TA FUNKCJA JEST TERAZ POPRAWNIE WEWNĄTRZ KLASY ---
-# ZASTĄP TĘ FUNKCJĘ:
-
-
-# ZASTĄP RÓWNIEŻ TĘ FUNKCJĘ:
     def set_isolated_margin(self, symbol: str, leverage: int) -> bool:
         """Ustawia tryb Isolated Margin i dźwignię dla danego symbolu."""
         logger.info(f"[{symbol}] Próba ustawienia trybu Isolated Margin z dźwignią {leverage}x.")
@@ -177,11 +164,12 @@ class BybitExecutor:
         }
         
         try:
-            # --- KLUCZOWA POPRAWKA: Przekazujemy is_json=False ---
-            self._send_request("POST", "/v5/position/set-leverage", payload, is_json=False)
+            # Poprawione wywołanie: używamy 'payload' dla POST, metoda _send_request sama zajmie się formatem JSON.
+            self._send_request("POST", "/v5/position/set-leverage", payload=payload)
             logger.info(f"[{symbol}] SUKCES! Pomyślnie ustawiono tryb Isolated Margin i dźwignię.")
             return True
         except (RequestException, BybitAPIError) as e:
+            # Kod 110043 oznacza, że ustawienia są już takie same - to nie jest błąd.
             if isinstance(e, BybitAPIError) and e.ret_code == 110043:
                 logger.warning(f"[{symbol}] Dźwignia i tryb margin są już poprawnie ustawione. Kontynuuję.")
                 return True

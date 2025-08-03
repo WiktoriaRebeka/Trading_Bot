@@ -1,5 +1,4 @@
-# Lokalizacja: collector_service/collector_main.py (ZASTĄP CAŁY PLIK)
-
+# Lokalizacja: collector_service/collector_main.py 
 import logging
 import sys
 import os

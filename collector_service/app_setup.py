@@ -1,4 +1,4 @@
-# Lokalizacja: collector_service/app_setup.py (NOWY PLIK)
+# Lokalizacja: collector_service/app_setup.py 
 
 import logging
 import uuid
