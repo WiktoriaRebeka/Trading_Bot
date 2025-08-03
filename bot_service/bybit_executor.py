@@ -7,6 +7,7 @@ import hashlib
 import json
 from typing import Optional, Dict, Any
 from decimal import Decimal, ROUND_DOWN
+from urllib.parse import urlencode
 
 import requests
 from requests.exceptions import RequestException
@@ -46,21 +47,24 @@ class BybitExecutor:
         param_str = timestamp + self.api_key + recv_window + payload_str
         hash_val = hmac.new(bytes(self.api_secret, "utf-8"), param_str.encode("utf-8"), hashlib.sha256)
         return hash_val.hexdigest()
-
     def _send_request(self, method: str, endpoint: str, params: Dict = None, payload: Dict = None) -> Dict[str, Any]:
         """
         Wysyła podpisane zapytanie do API Bybit V5.
         Obsługuje parametry w URL (dla GET) i ciało żądania w formacie JSON (dla POST).
+        Gwarantuje zgodność generowanej sygnatury z danymi wysyłanymi przez bibliotekę `requests`.
         """
         url = self.base_url + endpoint
         timestamp = str(int(time.time() * 1000))
         
-        # Przygotuj payload i sygnaturę
-        # Dla GET sygnatura jest z parametrów URL, dla POST z ciała JSON
+        # --- KLUCZOWA POPRAWKA LOGIKI GENEROWANIA SYGNATURY ---
         if method.upper() == 'GET':
-            payload_str = '&'.join([f'{k}={v}' for k, v in sorted(params.items())]) if params else ""
+            # Używamy urlencode do poprawnego zakodowania parametrów, co gwarantuje
+            # zgodność z tym, jak `requests` buduje URL.
+            payload_str = urlencode(sorted(params.items())) if params else ""
         else: # POST, PUT, DELETE
-            payload_str = json.dumps(payload) if payload else ""
+            # Używamy separators=(',', ':') do usunięcia wszystkich zbędnych spacji z JSON,
+            # co tworzy kanoniczną, skompresowaną formę do podpisu.
+            payload_str = json.dumps(payload, separators=(',', ':')) if payload else ""
 
         headers = {
             'X-B-API-KEY': self.api_key,
