@@ -48,6 +48,7 @@ class BybitExecutor:
         hash_val = hmac.new(bytes(self.api_secret, "utf-8"), param_str.encode("utf-8"), hashlib.sha256)
         return hash_val.hexdigest()
 
+
     def _send_request(self, method: str, endpoint: str, params: Dict = None, payload: Dict = None) -> Dict[str, Any]:
         """
         Wysyła podpisane zapytanie do API Bybit V5.
@@ -55,18 +56,23 @@ class BybitExecutor:
         url = self.base_url + endpoint
         timestamp = str(int(time.time() * 1000))
         
+        # Przygotuj dane do sygnatury
         if method.upper() == 'GET':
             payload_str = urlencode(sorted(params.items())) if params else ""
-        else:
+        else: # POST, PUT, DELETE
             payload_str = json.dumps(payload, separators=(',', ':')) if payload else ""
 
+        # Przygotuj podstawowe nagłówki
         headers = {
             'X-B-API-KEY': self.api_key,
             'X-B-API-TIMESTAMP': timestamp,
             'X-B-API-SIGN': self._generate_signature(timestamp, payload_str),
             'X-B-API-RECV-WINDOW': '10000',
-            'Content-Type': 'application/json',
         }
+        
+        # --- KLUCZOWA POPRAWKA: Dodaj Content-Type tylko dla zapytań z ciałem ---
+        if method.upper() != 'GET':
+            headers['Content-Type'] = 'application/json'
         
         try:
             response = self.session.request(method, url, headers=headers, params=params, json=payload, timeout=10)
@@ -78,11 +84,13 @@ class BybitExecutor:
             
             return data.get("result", {})
         except RequestException as e:
-            logger.error(f"Błąd sieciowy podczas komunikacji z Bybit: {e}", exc_info=True)
+            # Dodajemy logowanie treści odpowiedzi, jeśli jest dostępna, dla lepszej diagnostyki
+            error_content = e.response.text if e.response else "No response content"
+            logger.error(f"Błąd sieciowy podczas komunikacji z Bybit: {e}. Odpowiedź serwera: {error_content}", exc_info=True)
             raise
         except BybitAPIError as e:
             logger.error(f"Błąd API Bybit: {e}", extra={"json_fields": {"ret_code": e.ret_code, "ret_msg": e.ret_msg}})
-            raise
+        raise
 
     def get_instrument_info(self, symbol: str) -> Optional[Dict[str, Any]]:
         """Pobiera informacje o instrumencie, w tym max_leverage i qty_step."""
