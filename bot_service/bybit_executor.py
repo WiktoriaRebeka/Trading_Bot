@@ -1,5 +1,6 @@
 # Lokalizacja: bot_service/bybit_executor.py
 
+
 import logging
 import time
 import hmac
@@ -27,7 +28,6 @@ class BybitExecutor:
     """
     Klasa odpowiedzialna za komunikację z API Bybit V5.
     Hermetyzuje logikę autoryzacji, składania zleceń i obsługi błędów.
-    Wszystkie zapytania są wysyłane w formacie application/json.
     """
     def __init__(self):
         if not config.is_loaded:
@@ -47,23 +47,17 @@ class BybitExecutor:
         param_str = timestamp + self.api_key + recv_window + payload_str
         hash_val = hmac.new(bytes(self.api_secret, "utf-8"), param_str.encode("utf-8"), hashlib.sha256)
         return hash_val.hexdigest()
+
     def _send_request(self, method: str, endpoint: str, params: Dict = None, payload: Dict = None) -> Dict[str, Any]:
         """
         Wysyła podpisane zapytanie do API Bybit V5.
-        Obsługuje parametry w URL (dla GET) i ciało żądania w formacie JSON (dla POST).
-        Gwarantuje zgodność generowanej sygnatury z danymi wysyłanymi przez bibliotekę `requests`.
         """
         url = self.base_url + endpoint
         timestamp = str(int(time.time() * 1000))
         
-        # --- KLUCZOWA POPRAWKA LOGIKI GENEROWANIA SYGNATURY ---
         if method.upper() == 'GET':
-            # Używamy urlencode do poprawnego zakodowania parametrów, co gwarantuje
-            # zgodność z tym, jak `requests` buduje URL.
             payload_str = urlencode(sorted(params.items())) if params else ""
-        else: # POST, PUT, DELETE
-            # Używamy separators=(',', ':') do usunięcia wszystkich zbędnych spacji z JSON,
-            # co tworzy kanoniczną, skompresowaną formę do podpisu.
+        else:
             payload_str = json.dumps(payload, separators=(',', ':')) if payload else ""
 
         headers = {
@@ -96,7 +90,6 @@ class BybitExecutor:
         api_symbol = symbol.replace('.P', '')
         
         try:
-            # Używamy 'params' dla zapytań GET
             result = self._send_request(
                 "GET",
                 "/v5/market/instruments-info",
@@ -119,6 +112,27 @@ class BybitExecutor:
             logger.error(f"[{symbol}] Nie udało się pobrać informacji o instrumencie dla {api_symbol}: {e}")
             return None
 
+    # --- POPRAWIONE WCIĘCIE ---
+    def get_position_info(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Pobiera informacje o pozycji dla danego symbolu."""
+        logger.info(f"[{symbol}] Pobieranie informacji o pozycji z Bybit.")
+        api_symbol = symbol.replace('.P', '')
+        try:
+            result = self._send_request(
+                "GET",
+                "/v5/position/list",
+                params={"category": "linear", "symbol": api_symbol}
+            )
+            if result and result.get('list') and len(result['list']) > 0:
+                pos_info = result['list'][0]
+                logger.info(f"[{symbol}] Pobrane info o pozycji: size={pos_info.get('size')}, mode={pos_info.get('tradeMode')}, leverage={pos_info.get('leverage')}")
+                return pos_info
+            logger.info(f"[{symbol}] Brak otwartych pozycji lub informacji o nich.")
+            return None
+        except (RequestException, BybitAPIError) as e:
+            logger.error(f"[{symbol}] Nie udało się pobrać informacji o pozycji dla {api_symbol}: {e}")
+            return None
+        
     def place_limit_order(self, order_params: Dict[str, Any]) -> Optional[str]:
         """Składa zlecenie typu Limit na giełdzie Bybit."""
         symbol = order_params.get('symbol')
@@ -139,7 +153,6 @@ class BybitExecutor:
         }
         
         try:
-            # Używamy 'payload' dla zapytań POST
             result = self._send_request("POST", "/v5/order/create", payload=payload)
             order_id = result.get("orderId")
             if order_id:
@@ -164,16 +177,14 @@ class BybitExecutor:
             "symbol": api_symbol,
             "buyLeverage": leverage_str,
             "sellLeverage": leverage_str,
-            "tradeMode": 1  # 0: Cross Margin, 1: Isolated Margin
+            "tradeMode": 1
         }
         
         try:
-            # Poprawione wywołanie: używamy 'payload' dla POST, metoda _send_request sama zajmie się formatem JSON.
             self._send_request("POST", "/v5/position/set-leverage", payload=payload)
             logger.info(f"[{symbol}] SUKCES! Pomyślnie ustawiono tryb Isolated Margin i dźwignię.")
             return True
         except (RequestException, BybitAPIError) as e:
-            # Kod 110043 oznacza, że ustawienia są już takie same - to nie jest błąd.
             if isinstance(e, BybitAPIError) and e.ret_code == 110043:
                 logger.warning(f"[{symbol}] Dźwignia i tryb margin są już poprawnie ustawione. Kontynuuję.")
                 return True
@@ -181,7 +192,6 @@ class BybitExecutor:
             logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się ustawić trybu Isolated Margin i dźwigni: {e}")
             return False
 
-# Ta funkcja jest funkcją pomocniczą i poprawnie znajduje się poza klasą.
 def format_quantity(quantity: float, qty_step: str) -> str:
     """Formatuje wielkość zlecenia zgodnie z wymaganą precyzją (qty_step)."""
     qty_decimal = Decimal(str(quantity))
