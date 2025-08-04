@@ -49,20 +49,23 @@ class BybitExecutor:
         return hash_val.hexdigest()
 
 
-    def _send_request(self, method: str, endpoint: str, params: Dict = None, payload: Dict = None) -> Dict[str, Any]:
+        def _send_request(self, method: str, endpoint: str, params: Dict = None, payload: Dict = None) -> Dict[str, Any]:
         """
         Wysyła podpisane zapytanie do API Bybit V5.
         """
-        url = self.base_url + endpoint
         timestamp = str(int(time.time() * 1000))
         
-        # Przygotuj dane do sygnatury
+        # --- OSTATECZNA POPRAWKA LOGIKI GET vs POST ---
         if method.upper() == 'GET':
             payload_str = urlencode(sorted(params.items())) if params else ""
-        else: # POST, PUT, DELETE
+            # Ręcznie budujemy pełny URL z parametrami
+            full_url = f"{self.base_url}{endpoint}?{payload_str}" if payload_str else f"{self.base_url}{endpoint}"
+            # Zerujemy params, aby `requests` nie próbowało ich ponownie kodować
+            params = None 
+        else: # POST
             payload_str = json.dumps(payload, separators=(',', ':')) if payload else ""
+            full_url = self.base_url + endpoint
 
-        # Przygotuj podstawowe nagłówki
         headers = {
             'X-B-API-KEY': self.api_key,
             'X-B-API-TIMESTAMP': timestamp,
@@ -70,12 +73,11 @@ class BybitExecutor:
             'X-B-API-RECV-WINDOW': '10000',
         }
         
-        # --- KLUCZOWA POPRAWKA: Dodaj Content-Type tylko dla zapytań z ciałem ---
         if method.upper() != 'GET':
             headers['Content-Type'] = 'application/json'
         
         try:
-            response = self.session.request(method, url, headers=headers, params=params, json=payload, timeout=10)
+            response = self.session.request(method, full_url, headers=headers, params=params, json=payload, timeout=10)
             response.raise_for_status()
             data = response.json()
 
@@ -84,13 +86,14 @@ class BybitExecutor:
             
             return data.get("result", {})
         except RequestException as e:
-            # Dodajemy logowanie treści odpowiedzi, jeśli jest dostępna, dla lepszej diagnostyki
             error_content = e.response.text if e.response else "No response content"
-            logger.error(f"Błąd sieciowy podczas komunikacji z Bybit: {e}. Odpowiedź serwera: {error_content}", exc_info=True)
-            raise
+            logger.error(f"Błąd sieciowy podczas komunikacji z Bybit: {e}. Odpowiedź serwera: {error_content}")
+            # Rzucamy ponownie ten sam wyjątek, aby mógł być obsłużony wyżej
+            raise e
         except BybitAPIError as e:
             logger.error(f"Błąd API Bybit: {e}", extra={"json_fields": {"ret_code": e.ret_code, "ret_msg": e.ret_msg}})
-        raise
+            # Rzucamy ponownie ten sam wyjątek
+            raise e
 
     def get_instrument_info(self, symbol: str) -> Optional[Dict[str, Any]]:
         """Pobiera informacje o instrumencie, w tym max_leverage i qty_step."""

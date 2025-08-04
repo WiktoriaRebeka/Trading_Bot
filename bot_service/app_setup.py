@@ -54,26 +54,34 @@ def configure_bybit_account(executor: BybitExecutor) -> bool:
         try:
             position_info = executor.get_position_info(symbol)
             
-            is_cross_mode = position_info and position_info.get('tradeMode') == 0
-            is_position_active = position_info and float(position_info.get('size', '0')) > 0
-
-            if is_cross_mode and is_position_active:
-                logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD: Wykryto aktywną pozycję w trybie Cross. Nie można automatycznie przełączyć. Wymagana ręczna interwencja!")
-                all_successful = False
+            # Jeśli get_position_info zawiedzie, position_info będzie None
+            if position_info is None:
+                logger.warning(f"[{symbol}] Nie udało się pobrać informacji o pozycji. Próba ustawienia trybu Isolated 'na ślepo'.")
+                if not executor.set_isolated_margin(symbol, default_leverage):
+                    logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD: 'Ślepa' próba ustawienia trybu Isolated nie powiodła się.")
+                    all_successful = False
                 continue
 
-            if not position_info or position_info.get('tradeMode') == 0:
-                logger.info(f"[{symbol}] Symbol jest w trybie Cross lub nie ma informacji. Próba ustawienia trybu Isolated.")
-                if not executor.set_isolated_margin(symbol, default_leverage):
-                    logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się ustawić trybu Isolated. Sprawdź uprawnienia klucza API i stan konta.")
+            is_cross_mode = position_info.get('tradeMode') == 0
+            is_position_active = float(position_info.get('size', '0')) > 0
+
+            if is_cross_mode:
+                if is_position_active:
+                    logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD: Wykryto aktywną pozycję w trybie Cross. Wymagana ręczna interwencja!")
                     all_successful = False
                 else:
-                    logger.info(f"[{symbol}] SUKCES: Pomyślnie ustawiono tryb Isolated i dźwignię {default_leverage}x.")
+                    logger.info(f"[{symbol}] Symbol jest w trybie Cross. Próba przełączenia na Isolated.")
+                    if not executor.set_isolated_margin(symbol, default_leverage):
+                        logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się przełączyć na tryb Isolated.")
+                        all_successful = False
+                    else:
+                        logger.info(f"[{symbol}] SUKCES: Pomyślnie ustawiono tryb Isolated.")
             else: # tradeMode == 1 (Isolated)
                 logger.info(f"[{symbol}] jest już w trybie Isolated. OK.")
 
         except Exception as e:
-            logger.critical(f"[{symbol}] Nieoczekiwany błąd podczas konfiguracji: {e}", exc_info=True)
+            # Ten blok łapie teraz tylko nieoczekiwane błędy, a nie te z API
+            logger.critical(f"[{symbol}] Nieoczekiwany, krytyczny błąd podczas konfiguracji: {e}", exc_info=True)
             all_successful = False
     
     if all_successful:
