@@ -1,6 +1,5 @@
 # Lokalizacja: bot_service/bybit_executor.py
 
-
 import logging
 import time
 import hmac
@@ -48,19 +47,16 @@ class BybitExecutor:
         hash_val = hmac.new(bytes(self.api_secret, "utf-8"), param_str.encode("utf-8"), hashlib.sha256)
         return hash_val.hexdigest()
 
-
-        def _send_request(self, method: str, endpoint: str, params: Dict = None, payload: Dict = None) -> Dict[str, Any]:
+    # --- POPRAWIONE WCIĘCIA W CAŁEJ FUNKCJI ---
+    def _send_request(self, method: str, endpoint: str, params: Dict = None, payload: Dict = None) -> Dict[str, Any]:
         """
         Wysyła podpisane zapytanie do API Bybit V5.
         """
         timestamp = str(int(time.time() * 1000))
         
-        # --- OSTATECZNA POPRAWKA LOGIKI GET vs POST ---
         if method.upper() == 'GET':
             payload_str = urlencode(sorted(params.items())) if params else ""
-            # Ręcznie budujemy pełny URL z parametrami
             full_url = f"{self.base_url}{endpoint}?{payload_str}" if payload_str else f"{self.base_url}{endpoint}"
-            # Zerujemy params, aby `requests` nie próbowało ich ponownie kodować
             params = None 
         else: # POST
             payload_str = json.dumps(payload, separators=(',', ':')) if payload else ""
@@ -88,11 +84,9 @@ class BybitExecutor:
         except RequestException as e:
             error_content = e.response.text if e.response else "No response content"
             logger.error(f"Błąd sieciowy podczas komunikacji z Bybit: {e}. Odpowiedź serwera: {error_content}")
-            # Rzucamy ponownie ten sam wyjątek, aby mógł być obsłużony wyżej
             raise e
         except BybitAPIError as e:
             logger.error(f"Błąd API Bybit: {e}", extra={"json_fields": {"ret_code": e.ret_code, "ret_msg": e.ret_msg}})
-            # Rzucamy ponownie ten sam wyjątek
             raise e
 
     def get_instrument_info(self, symbol: str) -> Optional[Dict[str, Any]]:
@@ -123,7 +117,6 @@ class BybitExecutor:
             logger.error(f"[{symbol}] Nie udało się pobrać informacji o instrumencie dla {api_symbol}: {e}")
             return None
 
-    # --- POPRAWIONE WCIĘCIE ---
     def get_position_info(self, symbol: str) -> Optional[Dict[str, Any]]:
         """Pobiera informacje o pozycji dla danego symbolu."""
         logger.info(f"[{symbol}] Pobieranie informacji o pozycji z Bybit.")
