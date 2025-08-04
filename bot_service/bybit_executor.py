@@ -1,7 +1,5 @@
 # Lokalizacja: bot_service/bybit_executor.py
 
-# Lokalizacja: bot_service/bybit_executor.py
-
 import logging
 import time
 import hmac
@@ -32,7 +30,7 @@ class BybitExecutor:
     """
     def __init__(self):
         if not config.is_loaded:
-            raise RuntimeError("Konfiguracja (config) nie została załadowana. Uruchom config_loader.load_config().")
+            raise RuntimeError("Konfiguracja (config) nie została załadowana.")
         
         self.api_key: str = config.BYBIT_API_KEY
         self.api_secret: str = config.BYBIT_API_SECRET
@@ -42,45 +40,46 @@ class BybitExecutor:
         if not self.api_key or not self.api_secret:
             raise ValueError("Klucze API Bybit nie są ustawione w konfiguracji.")
 
-    def _generate_signature(self, timestamp: str, payload_str: str) -> str:
+    def _generate_signature(self, timestamp: str, param_str: str) -> str:
         """Generuje sygnaturę HMAC-SHA256."""
-        recv_window = "5000" # Zmniejszamy recv_window do standardowej wartości
-        param_str = timestamp + self.api_key + recv_window + payload_str
-        hash_val = hmac.new(bytes(self.api_secret, "utf-8"), param_str.encode("utf-8"), hashlib.sha256)
+        recv_window = "10000" # Zwiększamy z powrotem, 5000 może być za mało
+        to_sign = timestamp + self.api_key + recv_window + param_str
+        hash_val = hmac.new(bytes(self.api_secret, "utf-8"), to_sign.encode("utf-8"), hashlib.sha256)
         return hash_val.hexdigest()
 
     def _send_request(self, method: str, endpoint: str, params: Dict = None, payload: Dict = None) -> Dict[str, Any]:
         """
-        Wysyła podpisane zapytanie do API Bybit V5.
+        Wysyła podpisane zapytanie do API Bybit V5, zgodnie z oficjalną dokumentacją.
         """
+        full_url = self.base_url + endpoint
         timestamp = str(int(time.time() * 1000))
         
+        # --- OSTATECZNA, POPRAWNA LOGIKA GENEROWANIA SYGNATURY ---
         if method.upper() == 'GET':
-            # Dla GET, sygnatura jest z parametrów query string
-            payload_str = urlencode(sorted(params.items())) if params else ""
-            full_url = f"{self.base_url}{endpoint}"
+            # Dla GET, podpisujemy query string
+            param_str = urlencode(sorted(params.items())) if params else ""
+            # Ciało żądania jest puste
+            body_data = None
         else: # POST
-            # Dla POST, sygnatura jest z ciała żądania
-            payload_str = json.dumps(payload) if payload else ""
-            full_url = self.base_url + endpoint
+            # Dla POST, podpisujemy ciało żądania
+            param_str = json.dumps(payload) if payload else ""
+            # Przekazujemy ciało jako string, a nie obiekt json
+            body_data = param_str
 
+        signature = self._generate_signature(timestamp, param_str)
+        
         headers = {
             'X-B-API-KEY': self.api_key,
             'X-B-API-TIMESTAMP': timestamp,
-            'X-B-API-SIGN': self._generate_signature(timestamp, payload_str),
-            'X-B-API-RECV-WINDOW': '5000',
+            'X-B-API-SIGN': signature,
+            'X-B-API-RECV-WINDOW': '10000',
         }
         
         if method.upper() != 'GET':
-            headers['Content-Type'] = 'application/json; charset=utf-8'
+            headers['Content-Type'] = 'application/json'
         
         try:
-            # Dla GET, parametry są przekazywane w `params`, dla POST w `json`
-            if method.upper() == 'GET':
-                response = self.session.request(method, full_url, headers=headers, params=params, timeout=10)
-            else:
-                response = self.session.request(method, full_url, headers=headers, data=payload_str, timeout=10)
-
+            response = self.session.request(method, full_url, headers=headers, params=params, data=body_data, timeout=10)
             response.raise_for_status()
             data = response.json()
 
@@ -96,8 +95,9 @@ class BybitExecutor:
             logger.error(f"Błąd API Bybit: {e}", extra={"json_fields": {"ret_code": e.ret_code, "ret_msg": e.ret_msg}})
             raise
 
+    # Reszta metod (get_instrument_info, get_position_info, etc.) pozostaje bez zmian,
+    # ponieważ problem leżał wyłącznie w _send_request.
     def get_instrument_info(self, symbol: str) -> Optional[Dict[str, Any]]:
-        # ... (ta metoda jest poprawna, nie wymaga zmian)
         logger.info(f"[{symbol}] Pobieranie informacji o instrumencie z Bybit.")
         api_symbol = symbol.replace('.P', '')
         try:
@@ -120,7 +120,6 @@ class BybitExecutor:
             return None
 
     def get_position_info(self, symbol: str) -> Optional[Dict[str, Any]]:
-        # ... (ta metoda jest poprawna, nie wymaga zmian)
         logger.info(f"[{symbol}] Pobieranie informacji o pozycji z Bybit.")
         api_symbol = symbol.replace('.P', '')
         try:
@@ -136,7 +135,6 @@ class BybitExecutor:
             return None
         
     def place_limit_order(self, order_params: Dict[str, Any]) -> Optional[str]:
-        # ... (ta metoda jest poprawna, nie wymaga zmian)
         symbol = order_params.get('symbol')
         api_symbol = symbol.replace('.P', '')
         payload = {
@@ -158,7 +156,6 @@ class BybitExecutor:
             return None
 
     def set_isolated_margin(self, symbol: str, leverage: int) -> bool:
-        # ... (ta metoda jest poprawna, nie wymaga zmian)
         logger.info(f"[{symbol}] Próba ustawienia trybu Isolated Margin z dźwignią {leverage}x.")
         api_symbol = symbol.replace('.P', '')
         leverage_str = str(leverage)
@@ -180,7 +177,6 @@ class BybitExecutor:
             return False
 
 def format_quantity(quantity: float, qty_step: str) -> str:
-    # ... (ta funkcja jest poprawna, nie wymaga zmian)
     qty_decimal = Decimal(str(quantity))
     step_decimal = Decimal(qty_step)
     formatted_qty = qty_decimal.quantize(step_decimal, rounding=ROUND_DOWN)
