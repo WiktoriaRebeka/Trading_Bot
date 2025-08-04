@@ -3,7 +3,8 @@
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
+
 
 # Importy bibliotek zewnętrznych
 from google.cloud import firestore
@@ -371,8 +372,13 @@ def _handle_post_mortem_analysis(analyzed_trades: List[DocumentSnapshot], klines
         except Exception as e: 
             logger.error(f"[ANALIZA DUCHA][{trade_id}] Błąd: {e}", exc_info=True)
 
-def initialize_trading_services() -> (bool, Optional[BybitExecutor]):
-    """Inicjalizuje usługi tradingowe, takie jak BybitExecutor."""
+
+
+def initialize_trading_services() -> Tuple[bool, Optional[BybitExecutor]]:
+    """
+    Inicjalizuje usługi tradingowe, takie jak BybitExecutor.
+    Zwraca krotkę (status_sukcesu: bool, instancja_BybitExecutor: Optional[BybitExecutor]).
+    """
     global bybit_executor
     logger.info("Inicjalizacja usług tradingowych...")
     try:
