@@ -1,6 +1,11 @@
+# Lokalizacja: bot_service/app_setup.py
+
+# Lokalizacja: bot_service/app_setup.py
+
 import logging
 import uuid
 from flask import Flask, jsonify
+from typing import Optional, Tuple
 
 # Importy z bibliotek współdzielonych
 from shared_lib.config_loader import load_config
@@ -8,13 +13,29 @@ from shared_lib.firebase_client import initialize_firebase, get_symbols_to_watch
 
 # Importy z bieżącego serwisu (bot_service)
 from bot_service.bigquery_logger import initialize_bigquery
-from bot_service.bot_logic import initialize_trading_services, process_new_alerts, run_trading_logic
+# POPRAWIONY IMPORT: importujemy tylko to, co potrzebne z bot_logic
+import bot_service.bot_logic as bot_logic_module
 from bot_service.fetch_from_firestore import fetch_new_alerts_since, load_last_processed_timestamp, save_last_processed_timestamp
 from bot_service.bybit_executor import BybitExecutor
 
 logger = logging.getLogger(__name__)
 
-# Przenosimy funkcję konfiguracyjną tutaj, ale nie będziemy jej wywoływać na starcie
+# --- FUNKCJE POMOCNICZE SĄ ZDEFINIOWANE NA GÓRZE, PRZED ICH UŻYCIEM ---
+
+def initialize_trading_services() -> Tuple[bool, Optional[BybitExecutor]]:
+    """
+    Inicjalizuje BybitExecutor.
+    Zwraca krotkę (status_sukcesu, instancja_BybitExecutor).
+    """
+    logger.info("Inicjalizacja usług tradingowych...")
+    try:
+        executor_instance = BybitExecutor()
+        logger.info("BybitExecutor pomyślnie zainicjalizowany.")
+        return True, executor_instance
+    except (RuntimeError, ValueError) as e:
+        logger.critical(f"Nie można zainicjalizować BybitExecutor: {e}. Funkcjonalność handlowa będzie wyłączona.")
+        return False, None
+
 def configure_bybit_account(executor: BybitExecutor) -> bool:
     """
     Upewnia się, że wszystkie handlowane symbole są w trybie Isolated Margin.
@@ -33,25 +54,24 @@ def configure_bybit_account(executor: BybitExecutor) -> bool:
         try:
             position_info = executor.get_position_info(symbol)
             
-            if not position_info or float(position_info.get('size', '0')) == 0:
-                # Brak aktywnej pozycji, możemy próbować konfigurować
-                logger.info(f"[{symbol}] Brak aktywnej pozycji. Sprawdzanie/ustawianie trybu Isolated.")
+            is_cross_mode = position_info and position_info.get('tradeMode') == 0
+            is_position_active = position_info and float(position_info.get('size', '0')) > 0
+
+            if is_cross_mode and is_position_active:
+                logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD: Wykryto aktywną pozycję w trybie Cross. Nie można automatycznie przełączyć. Wymagana ręczna interwencja!")
+                all_successful = False
+                continue
+
+            if not position_info or position_info.get('tradeMode') == 0:
+                logger.info(f"[{symbol}] Symbol jest w trybie Cross lub nie ma informacji. Próba ustawienia trybu Isolated.")
                 if not executor.set_isolated_margin(symbol, default_leverage):
-                    # Sprawdzamy, czy błąd to nie "już ustawione"
-                    position_after_fail = executor.get_position_info(symbol)
-                    if position_after_fail and position_after_fail.get('tradeMode') == 1:
-                        logger.info(f"[{symbol}] set_isolated_margin nie powiodło się, ale tryb jest już Isolated. Uznaję za sukces.")
-                        continue
-                    
                     logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się ustawić trybu Isolated. Sprawdź uprawnienia klucza API i stan konta.")
                     all_successful = False
-            else:
-                # Pozycja istnieje, sprawdzamy tylko tryb
-                if position_info.get('tradeMode') == 1:
-                    logger.info(f"[{symbol}] jest już w trybie Isolated. OK.")
                 else:
-                    logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD: Wykryto aktywną pozycję w trybie Cross. Nie można automatycznie przełączyć. Wymagana ręczna interwencja!")
-                    all_successful = False
+                    logger.info(f"[{symbol}] SUKCES: Pomyślnie ustawiono tryb Isolated i dźwignię {default_leverage}x.")
+            else: # tradeMode == 1 (Isolated)
+                logger.info(f"[{symbol}] jest już w trybie Isolated. OK.")
+
         except Exception as e:
             logger.critical(f"[{symbol}] Nieoczekiwany błąd podczas konfiguracji: {e}", exc_info=True)
             all_successful = False
@@ -62,6 +82,8 @@ def configure_bybit_account(executor: BybitExecutor) -> bool:
         logger.critical("--- KONFIGURACJA KONTRAKTÓW NA BYBIT ZAKOŃCZONA BŁĘDAMI ---")
         
     return all_successful
+
+# --- GŁÓWNE FUNKCJE APLIKACJI ---
 
 def register_endpoints(app: Flask):
     """Rejestruje wszystkie endpointy aplikacji."""
@@ -84,10 +106,9 @@ def register_endpoints(app: Flask):
 
         if not app.config.get('INITIALIZATION_SUCCESS', False):
              reason = app.config.get('INITIALIZATION_FAILURE_REASON', 'Unknown initialization error.')
-             logger.error(f"Zatrzymano cykl, ponieważ aplikacja nie została poprawnie zainicjalizowana. Powód: {reason}", extra={"json_fields": {"cycle_id": cycle_id}})
+             logger.error(f"Zatrzymano cykl, aplikacja nie zainicjalizowana. Powód: {reason}", extra={"json_fields": {"cycle_id": cycle_id}})
              return jsonify({"status": "error", "message": f"Service is unhealthy: {reason}"}), 503
         
-        # --- NOWA LOGIKA KONFIGURACJI "ON-DEMAND" ---
         if not app.config.get('BYBIT_CONFIG_COMPLETE', False):
             logger.info("Pierwsze uruchomienie cyklu. Uruchamiam konfigurację konta Bybit.")
             executor = app.config.get('BYBIT_EXECUTOR')
@@ -100,20 +121,19 @@ def register_endpoints(app: Flask):
                 app.config['BYBIT_CONFIG_COMPLETE'] = True
                 logger.info("Konfiguracja konta Bybit zakończona sukcesem.")
             else:
-                logger.error("Konfiguracja konta Bybit nie powiodła się. Cykl zostanie przerwany. Sprawdź logi startowe.")
-                return jsonify({"status": "error", "message": "Bybit account configuration failed. Manual intervention required."}), 503
-        # --- KONIEC NOWEJ LOGIKI ---
+                logger.error("Konfiguracja konta Bybit nie powiodła się. Cykl przerwany.")
+                return jsonify({"status": "error", "message": "Bybit account configuration failed."}), 503
 
         try:
             last_ts = load_last_processed_timestamp()
             new_alerts, new_ts = fetch_new_alerts_since(last_ts)
             if new_alerts:
                 logger.info(f"Przetwarzam {len(new_alerts)} nowych alertów.", extra={"json_fields": {"cycle_id": cycle_id}})
-                process_new_alerts(new_alerts)
+                bot_logic_module.process_new_alerts(new_alerts)
                 if new_ts and new_ts > last_ts:
                     save_last_processed_timestamp(new_ts)
             
-            run_trading_logic()
+            bot_logic_module.run_trading_logic()
 
             logger.info("--- ZAKOŃCZENIE CYKLU BOTA ---", extra={"json_fields": {"cycle_id": cycle_id, "status": "success"}})
             return jsonify({"status": "success", "cycle_id": cycle_id}), 200
@@ -131,12 +151,11 @@ def initialize_app_services(app: Flask):
         bigquery_ok = initialize_bigquery()
         trading_services_ok, executor = initialize_trading_services()
 
-        # Przechowujemy instancję egzekutora w konfiguracji aplikacji do późniejszego użycia
         if executor:
             app.config['BYBIT_EXECUTOR'] = executor
+            # CZYSTY I BEZPIECZNY SPOSÓB USTAWIANIA ZMIENNEJ W INNYM MODULE
+            bot_logic_module.bybit_executor = executor
 
-        # Inicjalizacja jest teraz "udana", jeśli podstawowe klienty zostały utworzone.
-        # Konfiguracja konta Bybit została przeniesiona do pierwszego cyklu.
         if firebase_ok and bigquery_ok and trading_services_ok:
             app.config['INITIALIZATION_SUCCESS'] = True
             logger.info("Podstawowe usługi zainicjalizowane. Aplikacja gotowa do startu.")
