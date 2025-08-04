@@ -148,13 +148,11 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
             sl_price = setup.alert_data.sl
             tp_price = setup.alert_data.tp
 
-            # --- NOWY, KLUCZOWY LOG DIAGNOSTYCZNY ---
             logger.info(
                 f"[{symbol}] DIAGNOSTYKA WEJŚCIA: Kierunek={direction}, "
                 f"Cena Wejścia (z alertu)={entry_level}, "
                 f"Świeca Low={latest_kline.low}, Świeca High={latest_kline.high}"
             )
-            # --- KONIEC NOWEGO LOGU ---
 
             if setup.is_reset_needed_after_loss:
                 if (direction == 'LONG' and latest_kline.high > entry_level) or \
@@ -196,7 +194,7 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
                     except Exception as ex:
                         logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD TRANSAKCJI NATYCHMIASTOWEGO ZAMKNIĘCIA: {ex}", exc_info=True)
                 else:
-                    # --- POCZĄTEK POPRAWIONEJ LOGIKI ---
+                    # --- POCZĄTEK POPRAWIONEJ LOGIKI (USUNIĘTO set_isolated_margin) ---
                     if not bybit_executor:
                         logger.error(f"[{symbol}] Pomijam próbę otwarcia pozycji, ponieważ BybitExecutor nie jest dostępny (błąd inicjalizacji).")
                         continue
@@ -221,10 +219,12 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
                         final_leverage = min(required_leverage, max_leverage)
                         logger.info(f"[{symbol}] Dźwignia: Wymagana={required_leverage}x, Max giełdy={max_leverage}x. Wybrano: {final_leverage}x.")
 
-                        margin_set_successfully = bybit_executor.set_isolated_margin(symbol, final_leverage)
-                        if not margin_set_successfully:
-                            logger.error(f"[{symbol}] Nie udało się ustawić trybu Isolated Margin. Przerywam otwieranie pozycji.")
-                            continue
+                        # --- USUNIĘTO TEN BLOK: set_isolated_margin() ---
+                        # margin_set_successfully = bybit_executor.set_isolated_margin(symbol, final_leverage)
+                        # if not margin_set_successfully:
+                        #     logger.error(f"[{symbol}] Nie udało się ustawić trybu Isolated Margin. Przerywam otwieranie pozycji.")
+                        #     continue
+                        # --- KONIEC USUNIĘTEGO BLOKU ---
                    
                         position_value = 10.0 * final_leverage
                         raw_qty = position_value / entry_level
@@ -262,7 +262,7 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
             logger.error(f"Błąd walidacji danych setupu dla {symbol}: {e}")
         except Exception as e:
             logger.error(f"Błąd podczas sprawdzania wejścia dla {symbol}: {e}", exc_info=True)
-
+            
 def _handle_manage_open_trades(klines_data: Dict[str, Kline], open_trades: List[DocumentSnapshot]):
     """Zarządza otwartymi pozycjami, sprawdza warunki zamknięcia i inicjuje proces finalizacji."""
     if not open_trades: return
