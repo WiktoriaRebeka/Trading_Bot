@@ -24,10 +24,6 @@ class BybitAPIError(Exception):
         super().__init__(f"Bybit API Error: [Code: {ret_code}] {ret_msg}")
 
 class BybitExecutor:
-    """
-    Klasa odpowiedzialna za komunikację z API Bybit V5.
-    Hermetyzuje logikę autoryzacji, składania zleceń i obsługi błędów.
-    """
     def __init__(self):
         if not config.is_loaded:
             raise RuntimeError("Konfiguracja (config) nie została załadowana.")
@@ -37,9 +33,21 @@ class BybitExecutor:
         self.base_url: str = constants.BYBIT_API_URL_V5
         self.session = requests.Session()
         
+        # --- POCZĄTEK BLOKU DIAGNOSTYCZNEGO ---
+        if self.api_key and len(self.api_key) > 8:
+            logger.info(f"DIAGNOSTYKA: Używany API Key (fragment): {self.api_key[:4]}...{self.api_key[-4:]}")
+        else:
+            logger.error("DIAGNOSTYKA: API Key jest nieprawidłowy lub zbyt krótki!")
+
+        if self.api_secret and len(self.api_secret) > 8:
+            logger.info(f"DIAGNOSTYKA: Używany API Secret (fragment): {self.api_secret[:4]}...{self.api_secret[-4:]}")
+        else:
+            logger.error("DIAGNOSTYKA: API Secret jest nieprawidłowy lub zbyt krótki!")
+        # --- KONIEC BLOKU DIAGNOSTYCZNEGO ---
+
         if not self.api_key or not self.api_secret:
             raise ValueError("Klucze API Bybit nie są ustawione w konfiguracji.")
-
+            
     def _generate_signature(self, timestamp: str, param_str: str) -> str:
         """Generuje sygnaturę HMAC-SHA256."""
         recv_window = "10000" # Zwiększamy z powrotem, 5000 może być za mało
