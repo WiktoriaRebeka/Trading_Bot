@@ -60,48 +60,58 @@ class BybitExecutor:
         return hash_val.hexdigest()
 
 
-
     def _send_request(self, method: str, endpoint: str, params: Dict = None, payload: Dict = None) -> Dict[str, Any]:
         """
-        Wysyła podpisane zapytanie do API Bybit V5, z poprawną obsługą metod GET i POST.
+        Wysyła podpisane zapytanie do API Bybit V5, z poprawną obsługą autoryzacji dla metod GET i POST.
         """
+        if params is None: params = {}
+        if payload is None: payload = {}
+        
         full_url = self.base_url + endpoint
         timestamp = str(int(time.time() * 1000))
+        recv_window = '10000'
         
-        # Krok 1: Przygotuj dane do podpisu zgodnie z metodą
         if method.upper() == 'GET':
-            # Dla GET, podpisujemy query string
-            param_str = urlencode(sorted(params.items())) if params else ""
-        else:  # POST
-            # Dla POST, podpisujemy ciało żądania (request body)
-            param_str = json.dumps(payload) if payload else ""
+            # Dla GET, wszystkie parametry, włącznie z autoryzacją, idą do query string.
+            params.update({
+                'api_key': self.api_key,
+                'timestamp': timestamp,
+                'recv_window': recv_window
+            })
+            # Sortujemy wszystkie parametry alfabetycznie PRZED wygenerowaniem query string
+            sorted_params = sorted(params.items())
+            param_str = urlencode(sorted_params)
+            
+            # Sygnatura jest generowana z tego samego stringu
+            to_sign = timestamp + self.api_key + recv_window + param_str
+            signature = hmac.new(bytes(self.api_secret, "utf-8"), to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
+            
+            # Finalny URL zawiera wszystko, łącznie z sygnaturą
+            final_url = f"{full_url}?{param_str}&sign={signature}"
+            
+            headers = {'Content-Type': 'application/json'}
+            request_args = {'headers': headers, 'timeout': 10}
+            
+            response = self.session.request(method, final_url, **request_args)
 
-        # Krok 2: Wygeneruj sygnaturę
-        signature = self._generate_signature(timestamp, param_str)
-        
-        # Krok 3: Przygotuj nagłówki
-        headers = {
-            'X-B-API-KEY': self.api_key,
-            'X-B-API-TIMESTAMP': timestamp,
-            'X-B-API-SIGN': signature,
-            'X-B-API-RECV-WINDOW': '10000',
-        }
-        
-        # Krok 4: Przygotuj argumenty dla biblioteki `requests`
-        request_args = {
-            'headers': headers,
-            'timeout': 10
-        }
-        if method.upper() == 'GET':
-            request_args['params'] = params
         else: # POST
-            # Używamy argumentu 'json', który automatycznie konwertuje słownik
-            # na JSON i ustawia poprawny nagłówek 'Content-Type'.
-            request_args['json'] = payload
+            # Dla POST, autoryzacja idzie w nagłówkach, a ciało jest podpisane.
+            param_str = json.dumps(payload)
+            to_sign = timestamp + self.api_key + recv_window + param_str
+            signature = hmac.new(bytes(self.api_secret, "utf-8"), to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
+
+            headers = {
+                'X-B-API-KEY': self.api_key,
+                'X-B-API-TIMESTAMP': timestamp,
+                'X-B-API-SIGN': signature,
+                'X-B-API-RECV-WINDOW': recv_window,
+                'Content-Type': 'application/json'
+            }
+            
+            request_args = {'headers': headers, 'json': payload, 'timeout': 10}
+            response = self.session.request(method, full_url, **request_args)
 
         try:
-            # Krok 5: Wyślij żądanie z poprawnie przygotowanymi argumentami
-            response = self.session.request(method, full_url, **request_args)
             response.raise_for_status()
             data = response.json()
 
