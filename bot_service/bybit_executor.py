@@ -52,66 +52,63 @@ class BybitExecutor:
         if not self.api_key or not self.api_secret:
             raise ValueError("Klucze API Bybit nie są ustawione w konfiguracji.")
 
-    def _generate_signature(self, timestamp: str, param_str: str) -> str:
-        """Generuje sygnaturę HMAC-SHA256."""
-        recv_window = "10000" # Zwiększamy z powrotem, 5000 może być za mało
-        to_sign = timestamp + self.api_key + recv_window + param_str
-        hash_val = hmac.new(bytes(self.api_secret, "utf-8"), to_sign.encode("utf-8"), hashlib.sha256)
-        return hash_val.hexdigest()
-
 
     def _send_request(self, method: str, endpoint: str, params: Dict = None, payload: Dict = None) -> Dict[str, Any]:
         """
-        Wysyła podpisane zapytanie do API Bybit V5, z poprawną obsługą autoryzacji dla metod GET i POST.
+        Wysyła podpisane zapytanie do API Bybit V5, z poprawną, rozdzieloną logiką
+        autoryzacji dla metod GET i POST, zgodnie z oficjalną dokumentacją.
         """
         if params is None: params = {}
         if payload is None: payload = {}
         
         full_url = self.base_url + endpoint
         timestamp = str(int(time.time() * 1000))
-        recv_window = '10000'
-        
-        if method.upper() == 'GET':
-            # Dla GET, wszystkie parametry, włącznie z autoryzacją, idą do query string.
-            params.update({
-                'api_key': self.api_key,
-                'timestamp': timestamp,
-                'recv_window': recv_window
-            })
-            # Sortujemy wszystkie parametry alfabetycznie PRZED wygenerowaniem query string
-            sorted_params = sorted(params.items())
-            param_str = urlencode(sorted_params)
-            
-            # Sygnatura jest generowana z tego samego stringu
-            to_sign = timestamp + self.api_key + recv_window + param_str
-            signature = hmac.new(bytes(self.api_secret, "utf-8"), to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
-            
-            # Finalny URL zawiera wszystko, łącznie z sygnaturą
-            final_url = f"{full_url}?{param_str}&sign={signature}"
-            
-            headers = {'Content-Type': 'application/json'}
-            request_args = {'headers': headers, 'timeout': 10}
-            
-            response = self.session.request(method, final_url, **request_args)
-
-        else: # POST
-            # Dla POST, autoryzacja idzie w nagłówkach, a ciało jest podpisane.
-            param_str = json.dumps(payload)
-            to_sign = timestamp + self.api_key + recv_window + param_str
-            signature = hmac.new(bytes(self.api_secret, "utf-8"), to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
-
-            headers = {
-                'X-B-API-KEY': self.api_key,
-                'X-B-API-TIMESTAMP': timestamp,
-                'X-B-API-SIGN': signature,
-                'X-B-API-RECV-WINDOW': recv_window,
-                'Content-Type': 'application/json'
-            }
-            
-            request_args = {'headers': headers, 'json': payload, 'timeout': 10}
-            response = self.session.request(method, full_url, **request_args)
+        recv_window = '5000'
 
         try:
+            if method.upper() == 'GET':
+                # --- LOGIKA DLA GET ---
+                # 1. Przygotuj query string do podpisu
+                query_string = urlencode(sorted(params.items()))
+                
+                # 2. Przygotuj string do sygnatury
+                string_to_sign = timestamp + self.api_key + recv_window + query_string
+                signature = hmac.new(bytes(self.api_secret, "utf-8"), string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
+
+                # 3. Przygotuj nagłówki (zgodnie z dokumentacją dla GET)
+                headers = {
+                    'X-B-API-KEY': self.api_key,
+                    'X-B-API-TIMESTAMP': timestamp,
+                    'X-B-API-SIGN': signature,
+                    'X-B-API-RECV-WINDOW': recv_window,
+                    'Content-Type': 'application/json'
+                }
+                
+                # 4. Wyślij żądanie
+                response = self.session.get(full_url, headers=headers, params=params, timeout=10)
+
+            else: # POST
+                # --- LOGIKA DLA POST ---
+                # 1. Przygotuj ciało żądania do podpisu
+                request_body = json.dumps(payload)
+                
+                # 2. Przygotuj string do sygnatury
+                string_to_sign = timestamp + self.api_key + recv_window + request_body
+                signature = hmac.new(bytes(self.api_secret, "utf-8"), string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
+
+                # 3. Przygotuj nagłówki (zgodnie z dokumentacją dla POST)
+                headers = {
+                    'X-B-API-KEY': self.api_key,
+                    'X-B-API-TIMESTAMP': timestamp,
+                    'X-B-API-SIGN': signature,
+                    'X-B-API-RECV-WINDOW': recv_window,
+                    'Content-Type': 'application/json'
+                }
+                
+                # 4. Wyślij żądanie
+                response = self.session.post(full_url, headers=headers, data=request_body, timeout=10)
+
+            # --- WSPÓLNA OBSŁUGA ODPOWIEDZI ---
             response.raise_for_status()
             data = response.json()
 
@@ -119,6 +116,7 @@ class BybitExecutor:
                 raise BybitAPIError(ret_code=data.get("retCode"), ret_msg=data.get("retMsg"))
             
             return data.get("result", {})
+            
         except RequestException as e:
             error_content = e.response.text if e.response else "No response content"
             logger.error(f"Błąd sieciowy podczas komunikacji z Bybit: {e}. Odpowiedź serwera: {error_content}")
@@ -126,7 +124,6 @@ class BybitExecutor:
         except BybitAPIError as e:
             logger.error(f"Błąd API Bybit: {e}", extra={"json_fields": {"ret_code": e.ret_code, "ret_msg": e.ret_msg}})
             raise
-
     def get_instrument_info(self, symbol: str) -> Optional[Dict[str, Any]]:
         logger.info(f"[{symbol}] Pobieranie informacji o instrumencie z Bybit.")
         api_symbol = symbol.replace('.P', '')
