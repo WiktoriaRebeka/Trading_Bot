@@ -53,6 +53,10 @@ class BybitExecutor:
             raise ValueError("Klucze API Bybit nie są ustawione w konfiguracji.")
 
 
+   # Lokalizacja: bot_service/bybit_executor.py
+
+    # UWAGA: Funkcja _generate_signature() powinna zostać usunięta.
+
     def _send_request(self, method: str, endpoint: str, params: Dict = None, payload: Dict = None) -> Dict[str, Any]:
         """
         Wysyła podpisane zapytanie do API Bybit V5, z poprawną, rozdzieloną logiką
