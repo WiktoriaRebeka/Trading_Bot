@@ -36,6 +36,18 @@ class BybitExecutor:
         self.api_secret: str = config.BYBIT_API_SECRET
         self.base_url: str = constants.BYBIT_API_URL_V5
         self.session = requests.Session()
+
+        # --- POCZĄTEK BLOKU DIAGNOSTYCZNEGO ---
+        if self.api_key and len(self.api_key) > 8:
+            logger.info(f"DIAGNOSTYKA: Używany API Key (długość: {len(self.api_key)}, fragment): {self.api_key[:4]}...{self.api_key[-4:]}")
+        else:
+            logger.error(f"DIAGNOSTYKA: API Key jest nieprawidłowy, pusty lub zbyt krótki! Wartość: '{self.api_key}'")
+
+        if self.api_secret and len(self.api_secret) > 8:
+            logger.info(f"DIAGNOSTYKA: Używany API Secret (długość: {len(self.api_secret)}, fragment): {self.api_secret[:4]}...{self.api_secret[-4:]}")
+        else:
+            logger.error(f"DIAGNOSTYKA: API Secret jest nieprawidłowy, pusty lub zbyt krótki!")
+        # --- KONIEC BLOKU DIAGNOSTYCZNEGO ---
         
         if not self.api_key or not self.api_secret:
             raise ValueError("Klucze API Bybit nie są ustawione w konfiguracji.")
@@ -47,27 +59,27 @@ class BybitExecutor:
         hash_val = hmac.new(bytes(self.api_secret, "utf-8"), to_sign.encode("utf-8"), hashlib.sha256)
         return hash_val.hexdigest()
 
+
+
     def _send_request(self, method: str, endpoint: str, params: Dict = None, payload: Dict = None) -> Dict[str, Any]:
         """
-        Wysyła podpisane zapytanie do API Bybit V5, zgodnie z oficjalną dokumentacją.
+        Wysyła podpisane zapytanie do API Bybit V5, z poprawną obsługą metod GET i POST.
         """
         full_url = self.base_url + endpoint
         timestamp = str(int(time.time() * 1000))
         
-        # --- OSTATECZNA, POPRAWNA LOGIKA GENEROWANIA SYGNATURY ---
+        # Krok 1: Przygotuj dane do podpisu zgodnie z metodą
         if method.upper() == 'GET':
             # Dla GET, podpisujemy query string
             param_str = urlencode(sorted(params.items())) if params else ""
-            # Ciało żądania jest puste
-            body_data = None
-        else: # POST
-            # Dla POST, podpisujemy ciało żądania
+        else:  # POST
+            # Dla POST, podpisujemy ciało żądania (request body)
             param_str = json.dumps(payload) if payload else ""
-            # Przekazujemy ciało jako string, a nie obiekt json
-            body_data = param_str
 
+        # Krok 2: Wygeneruj sygnaturę
         signature = self._generate_signature(timestamp, param_str)
         
+        # Krok 3: Przygotuj nagłówki
         headers = {
             'X-B-API-KEY': self.api_key,
             'X-B-API-TIMESTAMP': timestamp,
@@ -75,11 +87,21 @@ class BybitExecutor:
             'X-B-API-RECV-WINDOW': '10000',
         }
         
-        if method.upper() != 'GET':
-            headers['Content-Type'] = 'application/json'
-        
+        # Krok 4: Przygotuj argumenty dla biblioteki `requests`
+        request_args = {
+            'headers': headers,
+            'timeout': 10
+        }
+        if method.upper() == 'GET':
+            request_args['params'] = params
+        else: # POST
+            # Używamy argumentu 'json', który automatycznie konwertuje słownik
+            # na JSON i ustawia poprawny nagłówek 'Content-Type'.
+            request_args['json'] = payload
+
         try:
-            response = self.session.request(method, full_url, headers=headers, params=params, data=body_data, timeout=10)
+            # Krok 5: Wyślij żądanie z poprawnie przygotowanymi argumentami
+            response = self.session.request(method, full_url, **request_args)
             response.raise_for_status()
             data = response.json()
 
@@ -95,8 +117,6 @@ class BybitExecutor:
             logger.error(f"Błąd API Bybit: {e}", extra={"json_fields": {"ret_code": e.ret_code, "ret_msg": e.ret_msg}})
             raise
 
-    # Reszta metod (get_instrument_info, get_position_info, etc.) pozostaje bez zmian,
-    # ponieważ problem leżał wyłącznie w _send_request.
     def get_instrument_info(self, symbol: str) -> Optional[Dict[str, Any]]:
         logger.info(f"[{symbol}] Pobieranie informacji o instrumencie z Bybit.")
         api_symbol = symbol.replace('.P', '')

@@ -164,61 +164,84 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
                     except Exception as ex:
                         logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD TRANSAKCJI: {ex}", exc_info=True)
                 else:
+                    # --- POCZĄTEK NOWEJ LOGIKI HANDLOWEJ ---
                     if not bybit_executor:
                         logger.error(f"[{symbol}] Pomijam próbę otwarcia pozycji, BybitExecutor nie jest dostępny.")
                         continue
 
-                    logger.info(f"--- [DECYZJA: WEJŚCIE {ob_type}] --- [{symbol}] | Cena: {entry_level} | Składanie zlecenia.")
+                    logger.info(f"--- [DECYZJA: WEJŚCIE {ob_type}] --- [{symbol}] | Cena: {entry_level} | Rozpoczynam sekwencję otwarcia pozycji.")
                     
                     try:
+                        # 1. Obliczenie wymaganej dźwigni
                         leverage_calcs = get_all_calculations_for_alert(setup.alert_data)
                         required_leverage = leverage_calcs.get('required_leverage')
 
                         if not required_leverage or required_leverage < 1:
-                            logger.warning(f"[{symbol}] Zlecenie odrzucone. Nieprawidłowa dźwignia ({required_leverage}).")
+                            logger.warning(f"[{symbol}] Zlecenie odrzucone. Obliczona dźwignia ({required_leverage}) jest nieprawidłowa. Setup może być zbyt ryzykowny.")
                             continue
 
+                        # 2. Weryfikacja maksymalnej dźwigni na giełdzie
                         instrument_info = bybit_executor.get_instrument_info(symbol)
                         if not instrument_info:
-                            logger.error(f"[{symbol}] Nie udało się pobrać informacji o instrumencie.")
+                            logger.error(f"[{symbol}] Nie udało się pobrać informacji o instrumencie z Bybit. Przerywam próbę otwarcia pozycji.")
                             continue
                         
-                        max_leverage = instrument_info['max_leverage']
+                        max_leverage_from_exchange = instrument_info['max_leverage']
                         qty_step = instrument_info['qty_step']
-                        final_leverage = min(required_leverage, max_leverage)
-                        logger.info(f"[{symbol}] Dźwignia: Wymagana={required_leverage}x, Max giełdy={max_leverage}x. Wybrano: {final_leverage}x.")
+                        
+                        # Wybór niższej wartości dźwigni
+                        final_leverage = min(required_leverage, max_leverage_from_exchange)
+                        logger.info(f"[{symbol}] Dźwignia: Wymagana={required_leverage}x, Max giełdy={max_leverage_from_exchange}x. Wybrano finalną: {final_leverage}x.")
                    
-                        position_value = 10.0 * final_leverage
-                        raw_qty = position_value / entry_level
+                        # 3. Obliczenie wielkości zlecenia (qty)
+                        position_size_in_usd = 10.0
+                        raw_qty = position_size_in_usd / entry_level
                         formatted_qty = format_quantity(raw_qty, qty_step)
-                        logger.info(f"[{symbol}] Obliczenia pozycji: Margin=10.00 USD, Wartość={position_value:.2f} USD, Qty={formatted_qty}")
+                        
+                        logger.info(f"[{symbol}] Obliczenia pozycji: Margin={position_size_in_usd:.2f} USD, Qty={formatted_qty}")
                                                 
                         if float(formatted_qty) <= 0:
-                            logger.error(f"[{symbol}] Obliczona wielkość zlecenia ({formatted_qty}) jest zerowa. Przerywam.")
+                            logger.error(f"[{symbol}] Obliczona wielkość zlecenia ({formatted_qty}) jest zerowa lub ujemna. Przerywam.")
                             continue
 
+                        # 4. Złożenie zlecenia Limit Order
                         order_params = {
-                            "symbol": symbol, "side": direction, "price": entry_level,
-                            "qty": formatted_qty, "leverage": final_leverage,
-                            "takeProfit": setup.alert_data.tp_2_0, "stopLoss": sl_price
+                            "symbol": symbol,
+                            "side": "Buy" if direction == 'LONG' else "Sell",
+                            "orderType": "Limit",
+                            "price": str(entry_level),
+                            "qty": formatted_qty,
+                            "leverage": str(final_leverage),
+                            "takeProfit": str(setup.alert_data.tp_2_0),
+                            "stopLoss": str(sl_price)
                         }
+                        
+                        logger.info(f"[{symbol}] Przygotowano parametry zlecenia: {order_params}")
                         order_id = bybit_executor.place_limit_order(order_params)
 
+                        # 5. Utworzenie dokumentu w open_trades TYLKO po sukcesie
                         if order_id:
                             trade_id = str(uuid.uuid4())
-                            logger.info(f"[{symbol}] Zlecenie wysłane. Tworzę dokument w open_trades z trade_id: {trade_id} i bybit_order_id: {order_id}")
+                            logger.info(f"[{symbol}] SUKCES. Zlecenie wysłane na Bybit. Order ID: {order_id}. Tworzę dokument w open_trades z trade_id: {trade_id}")
                             state_manager.create_open_trade(
-                                trade_id=trade_id, symbol=symbol, direction=direction, ob_type=ob_type,
-                                entry_price=entry_level, sl_price=sl_price, tp_price=tp_price,
-                                alert_data=setup.alert_data, bybit_order_id=order_id
+                                trade_id=trade_id,
+                                symbol=symbol,
+                                direction=direction,
+                                ob_type=ob_type,
+                                entry_price=entry_level,
+                                sl_price=sl_price,
+                                tp_price=tp_price, # Używamy głównego tp z alertu do śledzenia w systemie
+                                alert_data=setup.alert_data,
+                                bybit_order_id=order_id
                             )
                         else:
-                            logger.error(f"[{symbol}] Nie uzyskano ID zlecenia od Bybit.")
+                            logger.error(f"[{symbol}] Nie uzyskano ID zlecenia od Bybit, mimo że nie wystąpił wyjątek. Pozycja NIE została otwarta w systemie.")
 
                     except (BybitAPIError, RequestException) as e:
-                        logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD API Bybit: {e}")
+                        logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD API Bybit podczas próby otwarcia pozycji: {e}. Operacja przerwana.")
                     except Exception as e:
-                        logger.critical(f"[{symbol}] Nieoczekiwany błąd w logice otwierania pozycji: {e}", exc_info=True)
+                        logger.critical(f"[{symbol}] Nieoczekiwany, krytyczny błąd w logice otwierania pozycji: {e}", exc_info=True)
+                    # --- KONIEC NOWEJ LOGIKI HANDLOWEJ ---
         except ValidationError as e:
             logger.error(f"Błąd walidacji danych setupu dla {symbol}: {e}")
         except Exception as e:
