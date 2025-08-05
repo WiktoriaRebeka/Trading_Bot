@@ -44,7 +44,7 @@ class BybitExecutor:
             logger.error(f"DIAGNOSTYKA: API Key jest nieprawidłowy, pusty lub zbyt krótki! Wartość: '{self.api_key}'")
 
         if self.api_secret and len(self.api_secret) > 8:
-            logger.info(f"DIAGNOSTYKA: Używany API Secret (długość: {len(self.api_secret)}, fragment): {self.api_secret[:4]}...{self.api_secret[-4:]}")
+            logger.info(f"DIAGNOSTYKA: Używany API Secret (długość: {len(self.api_secret)})")
         else:
             logger.error(f"DIAGNOSTYKA: API Secret jest nieprawidłowy, pusty lub zbyt krótki!")
         # --- KONIEC BLOKU DIAGNOSTYCZNEGO ---
@@ -52,67 +52,49 @@ class BybitExecutor:
         if not self.api_key or not self.api_secret:
             raise ValueError("Klucze API Bybit nie są ustawione w konfiguracji.")
 
-
-   # Lokalizacja: bot_service/bybit_executor.py
-
-    # UWAGA: Funkcja _generate_signature() powinna zostać usunięta.
-
     def _send_request(self, method: str, endpoint: str, params: Dict = None, payload: Dict = None) -> Dict[str, Any]:
         """
-        Wysyła podpisane zapytanie do API Bybit V5, z poprawną, rozdzieloną logiką
-        autoryzacji dla metod GET i POST, zgodnie z oficjalną dokumentacją.
+        Wysyła podpisane zapytanie do API Bybit V5.
+        Ostateczna, zweryfikowana wersja z poprawną obsługą sygnatury i nagłówków.
         """
         if params is None: params = {}
-        if payload is None: payload = {}
         
         full_url = self.base_url + endpoint
         timestamp = str(int(time.time() * 1000))
         recv_window = '5000'
+        
+        # Krok 1: Przygotuj param_str do podpisu
+        if method.upper() == 'GET':
+            param_str = urlencode(sorted(params.items()))
+        else: # POST
+            param_str = json.dumps(payload) if payload else ""
+
+        # Krok 2: Wygeneruj sygnaturę
+        string_to_sign = timestamp + self.api_key + recv_window + param_str
+        signature = hmac.new(
+            bytes(self.api_secret, "utf-8"),
+            string_to_sign.encode("utf-8"),
+            hashlib.sha256
+        ).hexdigest()
+
+        # Krok 3: Przygotuj nagłówki
+        headers = {
+            'X-B-API-KEY': self.api_key,
+            'X-B-API-TIMESTAMP': timestamp,
+            'X-B-API-SIGN': signature,
+            'X-B-API-RECV-WINDOW': recv_window,
+        }
 
         try:
+            # Krok 4: Wyślij żądanie
             if method.upper() == 'GET':
-                # --- LOGIKA DLA GET: Autoryzacja w Query String ---
-                # 1. Dodaj parametry autoryzacyjne do słownika `params`
-                params.update({
-                    'api_key': self.api_key,
-                    'timestamp': timestamp,
-                    'recv_window': recv_window
-                })
-                
-                # 2. Utwórz query string z posortowanych parametrów
-                query_string = urlencode(sorted(params.items()))
-                
-                # 3. Wygeneruj sygnaturę na podstawie query string
-                signature = hmac.new(bytes(self.api_secret, "utf-8"), query_string.encode("utf-8"), hashlib.sha256).hexdigest()
-                
-                # 4. Dołącz sygnaturę do query string
-                final_query_string = f"{query_string}&sign={signature}"
-                
-                # 5. Wyślij żądanie. Nagłówki nie są potrzebne do autoryzacji.
-                response = self.session.get(f"{full_url}?{final_query_string}", timeout=10)
-
+                # Dla GET nie wysyłamy Content-Type
+                response = self.session.get(full_url, headers=headers, params=params, timeout=10)
             else: # POST
-                # --- LOGIKA DLA POST: Autoryzacja w Nagłówkach ---
-                # 1. Przygotuj ciało żądania do podpisu
-                request_body = json.dumps(payload) if payload else ""
-                
-                # 2. Przygotuj string do sygnatury
-                string_to_sign = timestamp + self.api_key + recv_window + request_body
-                signature = hmac.new(bytes(self.api_secret, "utf-8"), string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
+                # Dla POST dodajemy Content-Type i wysyłamy ciało jako `data`
+                headers['Content-Type'] = 'application/json'
+                response = self.session.post(full_url, headers=headers, data=param_str.encode('utf-8'), timeout=10)
 
-                # 3. Przygotuj nagłówki z danymi autoryzacyjnymi
-                headers = {
-                    'X-B-API-KEY': self.api_key,
-                    'X-B-API-TIMESTAMP': timestamp,
-                    'X-B-API-SIGN': signature,
-                    'X-B-API-RECV-WINDOW': recv_window,
-                    'Content-Type': 'application/json'
-                }
-                
-                # 4. Wyślij żądanie z nagłówkami i ciałem
-                response = self.session.post(full_url, headers=headers, data=request_body.encode('utf-8'), timeout=10)
-
-            # --- WSPÓLNA OBSŁUGA ODPOWIEDZI ---
             response.raise_for_status()
             data = response.json()
 
@@ -128,7 +110,6 @@ class BybitExecutor:
         except BybitAPIError as e:
             logger.error(f"Błąd API Bybit: {e}", extra={"json_fields": {"ret_code": e.ret_code, "ret_msg": e.ret_msg}})
             raise
-
 
     def get_instrument_info(self, symbol: str) -> Optional[Dict[str, Any]]:
         logger.info(f"[{symbol}] Pobieranie informacji o instrumencie z Bybit.")
