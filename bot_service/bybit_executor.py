@@ -39,59 +39,54 @@ class BybitExecutor:
     def _send_request(self, method: str, endpoint: str, params: Dict = None, payload: Dict = None) -> Dict[str, Any]:
         """
         Wysyła podpisane zapytanie do API Bybit V5.
-        Ostateczna, zweryfikowana wersja z ujednoliconą autoryzacją w nagłówkach.
+        Uproszczona i zweryfikowana wersja.
         """
-        if params is None: params = {}
-        
         full_url = self.base_url + endpoint
         timestamp = str(int(time.time() * 1000))
-        recv_window = '5000'
-        
-        # Krok 1: Przygotuj param_str do podpisu
+        recv_window = "10000" # Użyjmy bezpieczniejszego, dłuższego okna
+
+        # Dla GET, podpisujemy query string. Dla POST, podpisujemy ciało JSON.
         if method.upper() == 'GET':
-            param_str = urlencode(sorted(params.items()))
+            param_str = urlencode(sorted(params.items())) if params else ""
+            body_data = None
         else: # POST
             param_str = json.dumps(payload) if payload else ""
+            body_data = param_str # Przekazujemy ciało jako string
 
-        # Krok 2: Wygeneruj sygnaturę
-        string_to_sign = timestamp + self.api_key + recv_window + param_str
-        signature = hmac.new(
-            bytes(self.api_secret, "utf-8"),
-            string_to_sign.encode("utf-8"),
-            hashlib.sha256
-        ).hexdigest()
-
-        # Krok 3: Przygotuj nagłówki
+        # Generowanie sygnatury
+        to_sign = timestamp + self.api_key + recv_window + param_str
+        signature = hmac.new(bytes(self.api_secret, "utf-8"), to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
+        
         headers = {
             'X-B-API-KEY': self.api_key,
             'X-B-API-TIMESTAMP': timestamp,
             'X-B-API-SIGN': signature,
             'X-B-API-RECV-WINDOW': recv_window,
         }
-        if method.upper() == 'POST':
+        
+        if method.upper() != 'GET':
             headers['Content-Type'] = 'application/json'
-
+        
         try:
-            # Krok 4: Wyślij żądanie
-            if method.upper() == 'GET':
-                response = self.session.get(full_url, headers=headers, params=params, timeout=10)
-            else: # POST
-                response = self.session.post(full_url, headers=headers, data=param_str.encode('utf-8'), timeout=10)
-
+            # Użycie requests.request jest bardziej elastyczne
+            response = self.session.request(method, full_url, headers=headers, params=params, data=body_data, timeout=10)
             response.raise_for_status()
             data = response.json()
 
             if data.get("retCode") != 0:
+                # Teraz to zadziała, bo BybitAPIError ma poprawny __init__
                 raise BybitAPIError(ret_code=data.get("retCode"), ret_msg=data.get("retMsg"))
             
             return data.get("result", {})
-            
         except RequestException as e:
             error_content = e.response.text if e.response else "No response content"
             logger.error(f"Błąd sieciowy podczas komunikacji z Bybit: {e}. Odpowiedź serwera: {error_content}")
             raise
         except BybitAPIError as e:
             logger.error(f"Błąd API Bybit: {e}", extra={"json_fields": {"ret_code": e.ret_code, "ret_msg": e.ret_msg}})
+            raise
+        except Exception as e:
+            logger.critical(f"Nieoczekiwany błąd w _send_request: {e}", exc_info=True)
             raise
 
     def get_instrument_info(self, symbol: str) -> Optional[Dict[str, Any]]:
