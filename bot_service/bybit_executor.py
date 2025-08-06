@@ -24,10 +24,6 @@ class BybitAPIError(Exception):
         super().__init__(f"Bybit API Error: [Code: {ret_code}] {ret_msg}")
 
 class BybitExecutor:
-    """
-    Klasa odpowiedzialna za komunikację z API Bybit V5.
-    Hermetyzuje logikę autoryzacji, składania zleceń i obsługi błędów.
-    """
     def __init__(self):
         if not config.is_loaded:
             raise RuntimeError("Konfiguracja (config) nie została załadowana.")
@@ -43,21 +39,23 @@ class BybitExecutor:
     def _send_request(self, method: str, endpoint: str, params: Dict = None, payload: Dict = None) -> Dict[str, Any]:
         """
         Wysyła podpisane zapytanie do API Bybit V5.
-        Ostateczna, zweryfikowana wersja z ujednoliconą autoryzacją w nagłówkach.
+        Ostateczna wersja oparta na bezpośredniej adaptacji oficjalnych przykładów Bybit.
         """
         if params is None: params = {}
         
         full_url = self.base_url + endpoint
         timestamp = str(int(time.time() * 1000))
-        recv_window = '5000'
+        recv_window = '20000'  # Zwiększamy zgodnie z oficjalnymi przykładami
         
         # Krok 1: Przygotuj param_str do podpisu
         if method.upper() == 'GET':
+            # Dla GET, podpisujemy posortowany i zakodowany query string
             param_str = urlencode(sorted(params.items()))
         else: # POST
-            param_str = json.dumps(payload) if payload else ""
+            # Dla POST, podpisujemy surowe ciało JSON z posortowanymi kluczami
+            param_str = json.dumps(payload, sort_keys=True, separators=(',', ':')) if payload else ""
 
-        # Krok 2: Wygeneruj sygnaturę (UJEDNOLICONA I POPRAWIONA LOGIKA)
+        # Krok 2: Wygeneruj sygnaturę
         string_to_sign = timestamp + self.api_key + recv_window + param_str
         signature = hmac.new(
             bytes(self.api_secret, "utf-8"),
@@ -65,12 +63,13 @@ class BybitExecutor:
             hashlib.sha256
         ).hexdigest()
 
-        # Krok 3: Przygotuj nagłówki (zawsze te same)
+        # Krok 3: Przygotuj nagłówki - ZAWSZE z Content-Type
         headers = {
             'X-B-API-KEY': self.api_key,
             'X-B-API-TIMESTAMP': timestamp,
             'X-B-API-SIGN': signature,
             'X-B-API-RECV-WINDOW': recv_window,
+            'Content-Type': 'application/json'
         }
 
         try:
@@ -78,7 +77,6 @@ class BybitExecutor:
             if method.upper() == 'GET':
                 response = self.session.get(full_url, headers=headers, params=params, timeout=10)
             else: # POST
-                headers['Content-Type'] = 'application/json'
                 response = self.session.post(full_url, headers=headers, data=param_str.encode('utf-8'), timeout=10)
 
             response.raise_for_status()
