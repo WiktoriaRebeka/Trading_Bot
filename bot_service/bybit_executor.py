@@ -43,7 +43,7 @@ class BybitExecutor:
     def _send_request(self, method: str, endpoint: str, params: Dict = None, payload: Dict = None) -> Dict[str, Any]:
         """
         Wysyła podpisane zapytanie do API Bybit V5.
-        Ostateczna, zweryfikowana wersja z poprawną, ujednoliconą logiką autoryzacji.
+        Ostateczna, zweryfikowana wersja z ujednoliconą autoryzacją w nagłówkach.
         """
         if params is None: params = {}
         
@@ -57,7 +57,7 @@ class BybitExecutor:
         else: # POST
             param_str = json.dumps(payload) if payload else ""
 
-        # Krok 2: Wygeneruj sygnaturę
+        # Krok 2: Wygeneruj sygnaturę (UJEDNOLICONA I POPRAWIONA LOGIKA)
         string_to_sign = timestamp + self.api_key + recv_window + param_str
         signature = hmac.new(
             bytes(self.api_secret, "utf-8"),
@@ -65,7 +65,7 @@ class BybitExecutor:
             hashlib.sha256
         ).hexdigest()
 
-        # Krok 3: Przygotuj nagłówki
+        # Krok 3: Przygotuj nagłówki (zawsze te same)
         headers = {
             'X-B-API-KEY': self.api_key,
             'X-B-API-TIMESTAMP': timestamp,
