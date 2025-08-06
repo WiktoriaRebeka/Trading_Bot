@@ -37,25 +37,13 @@ class BybitExecutor:
         self.base_url: str = constants.BYBIT_API_URL_V5
         self.session = requests.Session()
 
-        # --- POCZĄTEK BLOKU DIAGNOSTYCZNEGO ---
-        if self.api_key and len(self.api_key) > 8:
-            logger.info(f"DIAGNOSTYKA: Używany API Key (długość: {len(self.api_key)}, fragment): {self.api_key[:4]}...{self.api_key[-4:]}")
-        else:
-            logger.error(f"DIAGNOSTYKA: API Key jest nieprawidłowy, pusty lub zbyt krótki! Wartość: '{self.api_key}'")
-
-        if self.api_secret and len(self.api_secret) > 8:
-            logger.info(f"DIAGNOSTYKA: Używany API Secret (długość: {len(self.api_secret)})")
-        else:
-            logger.error(f"DIAGNOSTYKA: API Secret jest nieprawidłowy, pusty lub zbyt krótki!")
-        # --- KONIEC BLOKU DIAGNOSTYCZNEGO ---
-        
         if not self.api_key or not self.api_secret:
             raise ValueError("Klucze API Bybit nie są ustawione w konfiguracji.")
 
     def _send_request(self, method: str, endpoint: str, params: Dict = None, payload: Dict = None) -> Dict[str, Any]:
         """
         Wysyła podpisane zapytanie do API Bybit V5.
-        Ostateczna, zweryfikowana wersja z poprawną obsługą sygnatury i nagłówków.
+        Ostateczna, zweryfikowana wersja z poprawną, ujednoliconą logiką autoryzacji.
         """
         if params is None: params = {}
         
@@ -88,10 +76,8 @@ class BybitExecutor:
         try:
             # Krok 4: Wyślij żądanie
             if method.upper() == 'GET':
-                # Dla GET nie wysyłamy Content-Type
                 response = self.session.get(full_url, headers=headers, params=params, timeout=10)
             else: # POST
-                # Dla POST dodajemy Content-Type i wysyłamy ciało jako `data`
                 headers['Content-Type'] = 'application/json'
                 response = self.session.post(full_url, headers=headers, data=param_str.encode('utf-8'), timeout=10)
 
