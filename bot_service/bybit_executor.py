@@ -39,21 +39,19 @@ class BybitExecutor:
     def _send_request(self, method: str, endpoint: str, params: Dict = None, payload: Dict = None) -> Dict[str, Any]:
         """
         Wysyła podpisane zapytanie do API Bybit V5.
-        Ostateczna wersja oparta na bezpośredniej adaptacji oficjalnych przykładów Bybit.
+        Ostateczna, zweryfikowana wersja z ujednoliconą autoryzacją w nagłówkach.
         """
         if params is None: params = {}
         
         full_url = self.base_url + endpoint
         timestamp = str(int(time.time() * 1000))
-        recv_window = '20000'  # Zwiększamy zgodnie z oficjalnymi przykładami
+        recv_window = '5000'
         
         # Krok 1: Przygotuj param_str do podpisu
         if method.upper() == 'GET':
-            # Dla GET, podpisujemy posortowany i zakodowany query string
             param_str = urlencode(sorted(params.items()))
         else: # POST
-            # Dla POST, podpisujemy surowe ciało JSON z posortowanymi kluczami
-            param_str = json.dumps(payload, sort_keys=True, separators=(',', ':')) if payload else ""
+            param_str = json.dumps(payload) if payload else ""
 
         # Krok 2: Wygeneruj sygnaturę
         string_to_sign = timestamp + self.api_key + recv_window + param_str
@@ -63,14 +61,15 @@ class BybitExecutor:
             hashlib.sha256
         ).hexdigest()
 
-        # Krok 3: Przygotuj nagłówki - ZAWSZE z Content-Type
+        # Krok 3: Przygotuj nagłówki
         headers = {
             'X-B-API-KEY': self.api_key,
             'X-B-API-TIMESTAMP': timestamp,
             'X-B-API-SIGN': signature,
             'X-B-API-RECV-WINDOW': recv_window,
-            'Content-Type': 'application/json'
         }
+        if method.upper() == 'POST':
+            headers['Content-Type'] = 'application/json'
 
         try:
             # Krok 4: Wyślij żądanie
