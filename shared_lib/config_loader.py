@@ -42,38 +42,39 @@ def load_config():
     logger.info("Obiekt konfiguracyjny został zaktualizowany.")
 
 def _load_from_secret_manager():
-    """Pobiera konfigurację z GCP Secret Manager i wymusza awarię w razie niepowodzenia."""
+    """
+    Pobiera dedykowane sekrety ('bybit-api-key', 'bybit-api-secret') z GCP Secret Manager
+    i ustawia je jako zmienne środowiskowe.
+    """
     project_id = _get_project_id_from_metadata() or constants.GCP_PROJECT_ID
-    secret_id = "trading-bot-secrets"
-    payload = None  # Inicjalizujemy jako None
+    
+    # Lista sekretów, których ta aplikacja potrzebuje do działania.
+    secrets_to_load = [
+        "bybit-api-key",
+        "bybit-api-secret"
+    ]
 
     try:
         client = secretmanager.SecretManagerServiceClient()
-        name = f"projects/{project_id}/secrets/{secret_id}/versions/latest"
-        logger.info(f"Próba dostępu do sekretu: {name}")
-        response = client.access_secret_version(request={"name": name})
-        payload = response.payload.data.decode("UTF-8")
         
-        if not payload or not payload.strip():
-            # Jeśli payload jest pusty, logujemy i przygotowujemy się do awarii
-            logger.critical("Pobrano pustą zawartość z Secret Manager!")
-            payload = None # Upewniamy się, że jest None
-        else:
-            logger.info("Pomyślnie pobrano zawartość z Secret Manager.")
-            fake_file = StringIO(payload)
-            load_dotenv(stream=fake_file, override=True)
-            logger.info(f"Pomyślnie załadowano zmienne środowiskowe z sekretu: {secret_id}")
+        for secret_id in secrets_to_load:
+            # Używamy 'latest', ponieważ dla tych sekretów nie ma problemu ze zniszczoną wersją.
+            name = f"projects/{project_id}/secrets/{secret_id}/versions/latest"
+            logger.info(f"Próba dostępu do sekretu: {name}")
+            
+            response = client.access_secret_version(request={"name": name})
+            secret_value = response.payload.data.decode("UTF-8").strip()
+            
+            # Konwertuj nazwę sekretu (np. 'bybit-api-key') na nazwę zmiennej środowiskowej (np. 'BYBIT_API_KEY')
+            env_var_name = secret_id.upper().replace("-", "_")
+            
+            # Ustaw zmienną środowiskową
+            os.environ[env_var_name] = secret_value
+            
+            logger.info(f"Pomyślnie załadowano i ustawiono zmienną środowiskową dla '{env_var_name}'.")
 
     except Exception as e:
-        # Logujemy błąd, który wystąpił podczas próby dostępu
         logger.critical(f"KRYTYCZNY BŁĄD podczas dostępu do Secret Manager: {e}", exc_info=True)
-        # Ustawiamy payload na None, aby wywołać poniższy błąd
-        payload = None
-    
-    # --- KRYTYCZNA WALIDACJA ---
-    # Jeśli na tym etapie payload jest wciąż None, oznacza to, że cały proces zawiódł.
-    # Rzucamy wyjątkiem, aby spowodować awarię kontenera i uzyskać jasny log.
-    if payload is None:
         raise RuntimeError("Nie udało się załadować konfiguracji z Secret Manager. Aplikacja nie może wystartować.")
 
 def _load_from_dotenv():
