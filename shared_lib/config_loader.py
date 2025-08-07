@@ -52,6 +52,11 @@ def _load_from_secret_manager():
         response = client.access_secret_version(request={"name": name})
         
         payload = response.payload.data.decode("UTF-8")
+
+        # --- SONDA DIAGNOSTYCZNA ---
+        # Logujemy surową zawartość pobraną z sekretu, aby zweryfikować, co dokładnie otrzymuje aplikacja.
+        logger.info(f"DIAGNOSTYKA: Surowa zawartość pobrana z Secret Manager: \n---\n{payload}\n---")
+        
         fake_file = StringIO(payload)
         load_dotenv(stream=fake_file, override=True)
         
