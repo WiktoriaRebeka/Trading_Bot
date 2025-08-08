@@ -31,7 +31,6 @@ class BybitExecutor:
         self.api_secret: str = api_secret
         self.base_url: str = constants.BYBIT_API_URL_V5
         self.session = requests.Session()
-        
 
     def _send_request(self, method: str, endpoint: str, params: Dict = None, payload: Dict = None) -> Dict[str, Any]:
         """
