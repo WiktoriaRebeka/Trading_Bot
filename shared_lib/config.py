@@ -9,7 +9,7 @@ class AppConfig:
     Klasa przechowująca dynamicznie ładowaną konfigurację, np. sekrety.
     """
     def __init__(self):
-        # Wartości domyślne ustawione na None
+        
         self.BYBIT_API_KEY: str | None = None
         self.BYBIT_API_SECRET: str | None = None
         self.is_loaded = False
@@ -24,14 +24,14 @@ class AppConfig:
 
         if raw_api_key:
             self.BYBIT_API_KEY = raw_api_key.strip().strip('"\'')
-            # Logowanie diagnostyczne - NIE UŻYWAĆ W PRODUKCJI Z PEŁNYM KLUCZEM
+           
             logger.info(f"Załadowano BYBIT_API_KEY (długość: {len(self.BYBIT_API_KEY)}, końcówka: '...{self.BYBIT_API_KEY[-4:]}')")
         else:
             logger.warning("Zmienna środowiskowa BYBIT_API_KEY nie została znaleziona.")
 
         if raw_api_secret:
             self.BYBIT_API_SECRET = raw_api_secret.strip().strip('"\'')
-            # Logowanie diagnostyczne
+            
             logger.info(f"Załadowano BYBIT_API_SECRET (długość: {len(self.BYBIT_API_SECRET)})")
         else:
             logger.warning("Zmienna środowiskowa BYBIT_API_SECRET nie została znaleziona.")

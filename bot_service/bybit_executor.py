@@ -43,17 +43,16 @@ class BybitExecutor:
         """
         full_url = self.base_url + endpoint
         timestamp = str(int(time.time() * 1000))
-        recv_window = "10000" # Użyjmy bezpieczniejszego, dłuższego okna
-
-        # Dla GET, podpisujemy query string. Dla POST, podpisujemy ciało JSON.
+        recv_window = "10000" 
+        
         if method.upper() == 'GET':
             param_str = urlencode(sorted(params.items())) if params else ""
             body_data = None
-        else: # POST
+        else: 
             param_str = json.dumps(payload) if payload else ""
-            body_data = param_str # Przekazujemy ciało jako string
+            body_data = param_str 
 
-        # Generowanie sygnatury
+       
         to_sign = timestamp + self.api_key + recv_window + param_str
         signature = hmac.new(bytes(self.api_secret, "utf-8"), to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
         

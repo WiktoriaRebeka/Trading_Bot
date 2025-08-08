@@ -5,10 +5,9 @@ import hmac
 import hashlib
 from google.cloud import firestore
 
-# Konfiguracja logowania
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - WEBHOOK - %(levelname)s - %(message)s')
 
-# Inicjalizacja zmiennych globalnych
 PROJECT_ID = os.environ.get('GCP_PROJECT', 'trading-bot-463318')
 DATABASE_NAME = "trading-bot-data"
 WEBHOOK_SECRET = os.environ.get('WEBHOOK_SECRET_TOKEN')

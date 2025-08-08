@@ -8,7 +8,7 @@ from shared_lib.models import AlertData
 
 logger = logging.getLogger(__name__)
 
-# --- STAŁE KONFIGURACYJNE ---
+
 RISK_PER_TRADE_PERCENT = 2.5
 POSITION_SIZE_PERCENT = 10.0
 TOTAL_CAPITAL = 100.0
@@ -60,11 +60,9 @@ def calculate_required_leverage(real_sl_percentage: float) -> Optional[int]: # Z
 
     leverage = risk_in_usd / loss_on_margin_in_usd
     
-    # --- KLUCZOWA ZMIANA: ZAOKRĄGLANIE W DÓŁ ---
-    # Używamy math.floor do obcięcia części dziesiętnej i rzutujemy na int.
     safe_leverage = math.floor(leverage)
     
-    # Dodatkowe zabezpieczenie: dźwignia nie może być mniejsza niż 1.
+    
     if safe_leverage < 1:
         logger.warning(
             f"Obliczona dźwignia ({leverage:.2f}x) jest mniejsza niż 1. "
@@ -74,7 +72,7 @@ def calculate_required_leverage(real_sl_percentage: float) -> Optional[int]: # Z
 
     return int(safe_leverage)
 
-# --- GŁÓWNA FUNKCJA POMOCNICZA (zaktualizowany typ) ---
+
 def get_all_calculations_for_alert(alert: AlertData) -> Dict[str, Optional[float | int]]:
     """
     Kompleksowa funkcja, która dla danego alertu oblicza wszystkie parametry ryzyka i dźwigni.

@@ -123,11 +123,8 @@ def update_analyzed_trade_in_bigquery(trade_id: str, updates: Dict[str, Any]):
         logger.info(f"[BQ_UPDATER][{trade_id}] Wykonuję zapytanie: {query}")
         query_job = client.query(query, job_config=job_config)
         
-        # Czekamy na zakończenie zadania i sprawdzamy wynik
         query_job.result() 
         
-        # --- NOWY LOG DIAGNOSTYCZNY ---
-        # Sprawdzamy, ile wierszy zostało zmodyfikowanych przez zapytanie UPDATE
         rows_updated = query_job.num_dml_affected_rows
         if rows_updated > 0:
             logger.info(f"[BQ_UPDATER][{trade_id}] SUKCES! Pomyślnie zaktualizowano {rows_updated} wiersz(y).")

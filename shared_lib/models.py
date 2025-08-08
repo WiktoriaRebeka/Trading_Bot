@@ -79,7 +79,6 @@ class AnalyzedTradeData(BaseModel):
     last_analysis_timestamp_ms: int
     achieved_tps: List[str] = []
 
-# --- NOWY MODEL (na tym samym poziomie co inne klasy) ---
 
 class OrderData(BaseModel):
     """
@@ -92,10 +91,10 @@ class OrderData(BaseModel):
     sl_price: float
     tp_price: float
     
-    # Wartość marginu w USDC, którą chcemy zaangażować w pozycję.
+  
     margin_value_usdc: float
     
-    # Obliczona, docelowa dźwignia do ustawienia na giełdzie.
+  
     leverage: int
 
     @validator('direction')

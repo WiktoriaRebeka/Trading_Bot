@@ -5,13 +5,13 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-# Importy bibliotek zewnętrznych
+
 from google.cloud import firestore
 from google.cloud.firestore_v1.document import DocumentSnapshot
 from pydantic import ValidationError
 from requests.exceptions import RequestException
 
-# Importy z własnego projektu (shared_lib)
+
 from shared_lib import constants
 from shared_lib.firebase_client import get_db
 from shared_lib.leverage_calculator import get_all_calculations_for_alert
@@ -23,7 +23,7 @@ from shared_lib.models import (
     SetupData,
 )
 
-# Importy z własnego projektu (bot_service)
+
 from bot_service import state_manager
 from bot_service.bigquery_logger import log_trade_to_bigquery
 from bot_service.bybit_executor import (
@@ -34,11 +34,10 @@ from bot_service.bybit_executor import (
 
 logger = logging.getLogger(__name__)
 
-# Ta zmienna jest teraz ustawiana z zewnątrz przez app_setup.py
+
 bybit_executor: Optional[BybitExecutor] = None
 
-# --- FUNKCJA initialize_trading_services() ZOSTAŁA STĄD CAŁKOWICIE USUNIĘTA ---
-# --- JEJ MIEJSCE JEST TERAZ W app_setup.py ---
+
 
 def _calculate_rr_analytics(entry_price: float, sl_price: float, extreme_price: float, direction: str) -> Dict[str, Any]:
     risk_diff = abs(entry_price - sl_price)
@@ -164,7 +163,7 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
                     except Exception as ex:
                         logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD TRANSAKCJI: {ex}", exc_info=True)
                 else:
-                    # --- POCZĄTEK NOWEJ LOGIKI HANDLOWEJ ---
+                    
                     if not bybit_executor:
                         logger.error(f"[{symbol}] Pomijam próbę otwarcia pozycji, BybitExecutor nie jest dostępny.")
                         continue
@@ -172,7 +171,7 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
                     logger.info(f"--- [DECYZJA: WEJŚCIE {ob_type}] --- [{symbol}] | Cena: {entry_level} | Rozpoczynam sekwencję otwarcia pozycji.")
                     
                     try:
-                        # 1. Obliczenie wymaganej dźwigni
+                     
                         leverage_calcs = get_all_calculations_for_alert(setup.alert_data)
                         required_leverage = leverage_calcs.get('required_leverage')
 
@@ -180,7 +179,7 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
                             logger.warning(f"[{symbol}] Zlecenie odrzucone. Obliczona dźwignia ({required_leverage}) jest nieprawidłowa. Setup może być zbyt ryzykowny.")
                             continue
 
-                        # 2. Weryfikacja maksymalnej dźwigni na giełdzie
+                      
                         instrument_info = bybit_executor.get_instrument_info(symbol)
                         if not instrument_info:
                             logger.error(f"[{symbol}] Nie udało się pobrać informacji o instrumencie z Bybit. Przerywam próbę otwarcia pozycji.")
@@ -189,11 +188,11 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
                         max_leverage_from_exchange = instrument_info['max_leverage']
                         qty_step = instrument_info['qty_step']
                         
-                        # Wybór niższej wartości dźwigni
+                       
                         final_leverage = min(required_leverage, max_leverage_from_exchange)
                         logger.info(f"[{symbol}] Dźwignia: Wymagana={required_leverage}x, Max giełdy={max_leverage_from_exchange}x. Wybrano finalną: {final_leverage}x.")
                    
-                        # 3. Obliczenie wielkości zlecenia (qty)
+                       
                         position_size_in_usd = 10.0
                         raw_qty = position_size_in_usd / entry_level
                         formatted_qty = format_quantity(raw_qty, qty_step)
@@ -204,7 +203,7 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
                             logger.error(f"[{symbol}] Obliczona wielkość zlecenia ({formatted_qty}) jest zerowa lub ujemna. Przerywam.")
                             continue
 
-                        # 4. Złożenie zlecenia Limit Order
+                        
                         order_params = {
                             "symbol": symbol,
                             "side": "Buy" if direction == 'LONG' else "Sell",
@@ -219,7 +218,7 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
                         logger.info(f"[{symbol}] Przygotowano parametry zlecenia: {order_params}")
                         order_id = bybit_executor.place_limit_order(order_params)
 
-                        # 5. Utworzenie dokumentu w open_trades TYLKO po sukcesie
+                        
                         if order_id:
                             trade_id = str(uuid.uuid4())
                             logger.info(f"[{symbol}] SUKCES. Zlecenie wysłane na Bybit. Order ID: {order_id}. Tworzę dokument w open_trades z trade_id: {trade_id}")
@@ -230,7 +229,7 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
                                 ob_type=ob_type,
                                 entry_price=entry_level,
                                 sl_price=sl_price,
-                                tp_price=tp_price, # Używamy głównego tp z alertu do śledzenia w systemie
+                                tp_price=tp_price, 
                                 alert_data=setup.alert_data,
                                 bybit_order_id=order_id
                             )
@@ -241,7 +240,7 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
                         logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD API Bybit podczas próby otwarcia pozycji: {e}. Operacja przerwana.")
                     except Exception as e:
                         logger.critical(f"[{symbol}] Nieoczekiwany, krytyczny błąd w logice otwierania pozycji: {e}", exc_info=True)
-                    # --- KONIEC NOWEJ LOGIKI HANDLOWEJ ---
+                 
         except ValidationError as e:
             logger.error(f"Błąd walidacji danych setupu dla {symbol}: {e}")
         except Exception as e:
@@ -316,7 +315,7 @@ def _handle_post_mortem_analysis(analyzed_trades: List[DocumentSnapshot], klines
             if analysis_trade.direction == 'LONG':
                 if latest_kline.low <= analysis_trade.original_sl: is_analysis_finished, reason = True, "osiągnięto SL"
                 elif analysis_trade.original_tp_5_0 and latest_kline.high >= analysis_trade.original_tp_5_0: is_analysis_finished, reason = True, "osiągnięto TP5"
-            else: # SHORT
+            else: 
                 if latest_kline.high >= analysis_trade.original_sl: is_analysis_finished, reason = True, "osiągnięto SL"
                 elif analysis_trade.original_tp_5_0 and latest_kline.low <= analysis_trade.original_tp_5_0: is_analysis_finished, reason = True, "osiągnięto TP5"
 

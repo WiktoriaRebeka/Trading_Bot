@@ -5,7 +5,7 @@ import uuid
 import asyncio
 from flask import Flask, jsonify
 
-# Importy
+
 from shared_lib.config_loader import load_config
 from shared_lib.firebase_client import initialize_firebase
 from collector_service.data_collector import run_data_collection_cycle

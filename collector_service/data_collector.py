@@ -33,7 +33,7 @@ async def _fetch_kline_for_symbol(session: aiohttp.ClientSession, symbol: str, c
                         "high": float(target_kline[2]), 
                         "low": float(target_kline[3]), 
                         "close": float(target_kline[4]), 
-                        "timestamp": int(target_kline[0]) # <-- POPRAWIONA NAZWA POLA
+                        "timestamp": int(target_kline[0]) # 
                     }
                 else:
                     logger.warning(f"API Bybit zwróciło błąd: {data.get('retMsg', 'Brak wiadomości')}", extra=log_extra)

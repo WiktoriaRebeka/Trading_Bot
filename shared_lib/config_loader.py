@@ -25,7 +25,7 @@ def load_config():
 def _load_from_dotenv():
     """Ładuje konfigurację z lokalnego pliku .env."""
     try:
-        # Bardziej odporny sposób na znalezienie roota projektu
+      
         current_dir = os.path.dirname(os.path.abspath(__file__))
         project_root = os.path.dirname(current_dir)
         dotenv_path = os.path.join(project_root, '.env')

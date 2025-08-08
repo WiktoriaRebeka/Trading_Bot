@@ -1,26 +1,24 @@
 # Lokalizacja: bot_service/app_setup.py
 
-# Lokalizacja: bot_service/app_setup.py
 
 import logging
 import uuid
 from flask import Flask, jsonify
 from typing import Optional, Tuple
 
-# Importy z bibliotek współdzielonych
 from shared_lib.config_loader import load_config
 from shared_lib.firebase_client import initialize_firebase, get_symbols_to_watch_from_config
 
-# Importy z bieżącego serwisu (bot_service)
+
 from bot_service.bigquery_logger import initialize_bigquery
-# POPRAWIONY IMPORT: importujemy tylko to, co potrzebne z bot_logic
+
 import bot_service.bot_logic as bot_logic_module
 from bot_service.fetch_from_firestore import fetch_new_alerts_since, load_last_processed_timestamp, save_last_processed_timestamp
 from bot_service.bybit_executor import BybitExecutor
 
 logger = logging.getLogger(__name__)
 
-# --- FUNKCJE POMOCNICZE SĄ ZDEFINIOWANE NA GÓRZE, PRZED ICH UŻYCIEM ---
+
 
 def initialize_trading_services() -> Tuple[bool, Optional[BybitExecutor]]:
     """
@@ -54,7 +52,7 @@ def configure_bybit_account(executor: BybitExecutor) -> bool:
         try:
             position_info = executor.get_position_info(symbol)
             
-            # Jeśli get_position_info zawiedzie, position_info będzie None
+            
             if position_info is None:
                 logger.warning(f"[{symbol}] Nie udało się pobrać informacji o pozycji. Próba ustawienia trybu Isolated 'na ślepo'.")
                 if not executor.set_isolated_margin(symbol, default_leverage):
@@ -76,11 +74,11 @@ def configure_bybit_account(executor: BybitExecutor) -> bool:
                         all_successful = False
                     else:
                         logger.info(f"[{symbol}] SUKCES: Pomyślnie ustawiono tryb Isolated.")
-            else: # tradeMode == 1 (Isolated)
+            else: 
                 logger.info(f"[{symbol}] jest już w trybie Isolated. OK.")
 
         except Exception as e:
-            # Ten blok łapie teraz tylko nieoczekiwane błędy, a nie te z API
+            
             logger.critical(f"[{symbol}] Nieoczekiwany, krytyczny błąd podczas konfiguracji: {e}", exc_info=True)
             all_successful = False
     
@@ -91,7 +89,7 @@ def configure_bybit_account(executor: BybitExecutor) -> bool:
         
     return all_successful
 
-# --- GŁÓWNE FUNKCJE APLIKACJI ---
+
 
 def register_endpoints(app: Flask):
     """Rejestruje wszystkie endpointy aplikacji."""
@@ -161,7 +159,7 @@ def initialize_app_services(app: Flask):
 
         if executor:
             app.config['BYBIT_EXECUTOR'] = executor
-            # CZYSTY I BEZPIECZNY SPOSÓB USTAWIANIA ZMIENNEJ W INNYM MODULE
+            
             bot_logic_module.bybit_executor = executor
 
         if firebase_ok and bigquery_ok and trading_services_ok:

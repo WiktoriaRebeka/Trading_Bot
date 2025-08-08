@@ -3,10 +3,10 @@ import os
 import logging
 from flask import Flask
 
-# Import logiki setupu
+
 from bot_service.app_setup import initialize_app_services, register_endpoints
 
-# Inicjalizacja podstawowego logowania
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -23,7 +23,7 @@ def create_app():
 
     return app
 
-# Gunicorn szuka tej zmiennej
+
 app = create_app()
 
 if __name__ == '__main__':

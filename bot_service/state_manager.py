@@ -26,18 +26,18 @@ def update_setup_after_price_reset(symbol: str):
 def get_all_open_trades() -> Iterable[DocumentSnapshot]:
     return _get_db().collection(constants.TRADE_COLLECTION).stream()
 
-# Zmień sygnaturę funkcji, dodając na końcu bybit_order_id
+
 def create_open_trade(trade_id: str, symbol: str, direction: str, ob_type: str, entry_price: float, sl_price: float, tp_price: float, alert_data: AlertData, bybit_order_id: str):
     db = _get_db()
     transaction = db.transaction()
     
     @firestore.transactional
-    # Zmień również sygnaturę wewnętrznej funkcji transakcyjnej
+  
     def _create_trade_in_transaction(transaction, trade_id, symbol, direction, ob_type, entry_price, sl_price, tp_price, alert_data, bybit_order_id):
         trade_doc_ref = db.collection(constants.TRADE_COLLECTION).document(trade_id)
         setup_doc_ref = db.collection(constants.SETUP_COLLECTION).document(symbol)
         
-        # Sprawdzenie warunków wewnątrz transakcji pozostaje bez zmian
+        
         setup_snapshot = setup_doc_ref.get(transaction=transaction)
         if not setup_snapshot.exists:
             raise RuntimeError(f"Setup dla {symbol} już nie istnieje.")
@@ -46,7 +46,7 @@ def create_open_trade(trade_id: str, symbol: str, direction: str, ob_type: str, 
             
         timestamp_utc = datetime.now(timezone.utc)
         
-        # Zaktualizuj tworzenie obiektu OpenTradeData o nowe pole
+       
         new_trade = OpenTradeData(
             trade_id=trade_id, 
             symbol=symbol, 
@@ -58,12 +58,12 @@ def create_open_trade(trade_id: str, symbol: str, direction: str, ob_type: str, 
             opened_at_ms=int(timestamp_utc.timestamp() * 1000),
             opened_at_iso=timestamp_utc.isoformat(),
             alert_data_snapshot=alert_data.model_dump(by_alias=True),
-            bybit_order_id=bybit_order_id  # <-- DODANA NOWA, KLUCZOWA LINIA
+            bybit_order_id=bybit_order_id  
         )
         
         transaction.set(trade_doc_ref, new_trade.model_dump())
         
-        # Aktualizacja setupu pozostaje bez zmian
+        
         update_data = {
             "is_position_open_on_this_setup": True,
             "entry_attempts": firestore.Increment(1)
@@ -72,7 +72,7 @@ def create_open_trade(trade_id: str, symbol: str, direction: str, ob_type: str, 
         logger.info(f"[{symbol}][{trade_id}] Transakcja przygotowana: utworzenie pozycji (z Bybit ID: {bybit_order_id}) i aktualizacja setupu.")
 
     try:
-        # Zaktualizuj wywołanie, przekazując nowy argument
+       
         _create_trade_in_transaction(transaction, trade_id, symbol, direction, ob_type, entry_price, sl_price, tp_price, alert_data, bybit_order_id)
         logger.info(f"[{symbol}][{trade_id}] SUKCES. Transakcja atomowa zakończona.")
     except Exception as e:
@@ -197,21 +197,17 @@ def close_trade_transactional(transaction, trade_id: str, symbol: str, is_loss: 
     logger.info(f"[{trade_id}][{symbol}] Transakcja przygotowana: usunięcie pozycji i reset setupu.")
 
 
-# Lokalizacja: bot_service/state_manager.py (DODAJ TĘ FUNKCJĘ)
-
 def get_historical_klines(symbol: str, start_time_ms: int, end_time_ms: int) -> List[Dict[str, Any]]:
     """
     Pobiera historyczne świece 1-minutowe z API Bybit.
     UWAGA: Ta funkcja wykonuje zapytanie sieciowe i nie korzysta z cache'u.
     """
-    import requests # Lokalny import, aby uniknąć zależności w całym module
+    import requests 
     
     logger.info(f"[{symbol}] Pobieranie historii świec od {start_time_ms} do {end_time_ms}")
     klines = []
     api_symbol = symbol.replace('.P', '')
     
-    # API Bybit pozwala na pobranie max 1000 świec na raz.
-    # Dla bezpieczeństwa, zakładamy, że nie będziemy potrzebować więcej.
     params = {
         "category": "linear",
         "symbol": api_symbol,
@@ -228,7 +224,7 @@ def get_historical_klines(symbol: str, start_time_ms: int, end_time_ms: int) -> 
         response.raise_for_status()
         data = response.json()
         if data.get("retCode") == 0 and data.get("result") and data["result"].get("list"):
-            # API zwraca świece od najnowszej do najstarszej, odwracamy kolejność
+           
             kline_list = reversed(data["result"]["list"])
             for k in kline_list:
                 klines.append({
