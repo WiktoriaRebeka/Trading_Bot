@@ -18,10 +18,6 @@ from bot_service.bybit_executor import BybitExecutor
 logger = logging.getLogger(__name__)
 
 def initialize_trading_services() -> Tuple[bool, Optional[BybitExecutor]]:
-    """
-    Inicjalizuje BybitExecutor.
-    Zwraca krotkę (status_sukcesu, instancja_BybitExecutor).
-    """
     logger.info("Inicjalizacja usług tradingowych...")
     try:
         if not config.BYBIT_API_KEY or not config.BYBIT_API_SECRET:
@@ -38,10 +34,6 @@ def initialize_trading_services() -> Tuple[bool, Optional[BybitExecutor]]:
         return False, None
 
 def configure_bybit_account(executor: BybitExecutor) -> bool:
-    """
-    Upewnia się, że wszystkie handlowane symbole są w trybie Isolated Margin.
-    Zwraca True, jeśli wszystkie symbole są poprawnie skonfigurowane.
-    """
     logger.info("--- ROZPOCZĘCIE KONFIGURACJI KONTRAKTÓW NA BYBIT ---")
     symbols_to_configure = get_symbols_to_watch_from_config()
     if not symbols_to_configure:
@@ -56,23 +48,20 @@ def configure_bybit_account(executor: BybitExecutor) -> bool:
             position_info = executor.get_position_info(symbol)
             
             if position_info is None:
-                logger.warning(f"[{symbol}] Nie udało się pobrać informacji o pozycji. Próba ustawienia trybu Isolated 'na ślepo'.")
-                if not executor.set_isolated_margin(symbol, default_leverage):
-                    logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD: 'Ślepa' próba ustawienia trybu Isolated nie powiodła się.")
-                    all_successful = False
+                logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się pobrać informacji o pozycji (błąd API lub sieci).")
+                all_successful = False
                 continue
 
             is_cross_mode = position_info.get('tradeMode') == 0
-            is_position_active = float(position_info.get('size', '0')) > 0
-
+            
             if is_cross_mode:
+                is_position_active = float(position_info.get('size', '0')) > 0
                 if is_position_active:
                     logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD: Wykryto aktywną pozycję w trybie Cross. Wymagana ręczna interwencja!")
                     all_successful = False
                 else:
                     logger.info(f"[{symbol}] Symbol jest w trybie Cross. Próba przełączenia na Isolated.")
                     if not executor.set_isolated_margin(symbol, default_leverage):
-                        logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się przełączyć na tryb Isolated.")
                         all_successful = False
                     else:
                         logger.info(f"[{symbol}] SUKCES: Pomyślnie ustawiono tryb Isolated.")
@@ -91,7 +80,6 @@ def configure_bybit_account(executor: BybitExecutor) -> bool:
     return all_successful
 
 def register_endpoints(app: Flask):
-    """Rejestruje wszystkie endpointy aplikacji."""
     @app.route('/')
     def health_check():
         return "Trading Bot Service is running.", 200
@@ -131,7 +119,6 @@ def register_endpoints(app: Flask):
             return jsonify({"status": "error", "message": str(e), "cycle_id": cycle_id}), 500
 
 def initialize_app_services(app: Flask):
-    """Wykonuje szybką, nieblokującą inicjalizację w kontekście aplikacji."""
     with app.app_context():
         logger.info("Rozpoczynam szybką inicjalizację aplikacji `bot_service`.")
         
