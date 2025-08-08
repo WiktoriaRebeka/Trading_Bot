@@ -1,20 +1,16 @@
 # Lokalizacja: bot_service/bybit_executor.py
 
 import logging
-import time
-import hmac
-import hashlib
-import json
-from typing import Optional, Dict, Any
-from decimal import Decimal, ROUND_DOWN
-from urllib.parse import urlencode
-
-import requests
-from requests.exceptions import RequestException
+from typing import Dict, Any, Optional, Set
+from google.cloud import bigquery
+from google.api_core.exceptions import GoogleAPICallError
 
 from shared_lib import constants
 
 logger = logging.getLogger(__name__)
+
+bigquery_client: Optional[bigquery.Client] = None
+TABLE_REF: Optional[str] = None
 
 class BybitAPIError(Exception):
     def __init__(self, ret_code: int, ret_msg: str):
