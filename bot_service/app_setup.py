@@ -114,22 +114,6 @@ def register_endpoints(app: Flask):
              reason = app.config.get('INITIALIZATION_FAILURE_REASON', 'Unknown initialization error.')
              logger.error(f"Zatrzymano cykl, aplikacja nie zainicjalizowana. Powód: {reason}", extra={"json_fields": {"cycle_id": cycle_id}})
              return jsonify({"status": "error", "message": f"Service is unhealthy: {reason}"}), 503
-        
-        if not app.config.get('BYBIT_CONFIG_COMPLETE', False):
-            logger.info("Pierwsze uruchomienie cyklu. Uruchamiam konfigurację konta Bybit.")
-            executor = app.config.get('BYBIT_EXECUTOR')
-            if not executor:
-                logger.critical("Brak instancji BybitExecutor w konfiguracji aplikacji!")
-                return jsonify({"status": "error", "message": "Critical: BybitExecutor not found."}), 500
-
-            config_ok = configure_bybit_account(executor)
-            if config_ok:
-                app.config['BYBIT_CONFIG_COMPLETE'] = True
-                logger.info("Konfiguracja konta Bybit zakończona sukcesem.")
-            else:
-                logger.error("Konfiguracja konta Bybit nie powiodła się. Cykl przerwany.")
-                return jsonify({"status": "error", "message": "Bybit account configuration failed."}), 503
-
         try:
             last_ts = load_last_processed_timestamp()
             new_alerts, new_ts = fetch_new_alerts_since(last_ts)
@@ -156,21 +140,36 @@ def initialize_app_services(app: Flask):
         firebase_ok = initialize_firebase()
         bigquery_ok = initialize_bigquery()
         trading_services_ok, executor = initialize_trading_services()
+        
+       
+        bybit_config_ok = False 
+       
 
         if executor:
             app.config['BYBIT_EXECUTOR'] = executor
-            
             bot_logic_module.bybit_executor = executor
+            
+            
+            logger.info("Uruchamiam jednorazową konfigurację konta Bybit podczas startu aplikacji.")
+            bybit_config_ok = configure_bybit_account(executor)
+            if not bybit_config_ok:
+                logger.critical("Konfiguracja konta Bybit nie powiodła się. Aplikacja będzie w stanie 'unhealthy'.")
+            else:
+                logger.info("Konfiguracja konta Bybit zakończona sukcesem.")
+           
 
-        if firebase_ok and bigquery_ok and trading_services_ok:
+      
+        if firebase_ok and bigquery_ok and trading_services_ok and bybit_config_ok:
             app.config['INITIALIZATION_SUCCESS'] = True
-            logger.info("Podstawowe usługi zainicjalizowane. Aplikacja gotowa do startu.")
+            logger.info("Wszystkie usługi, w tym konfiguracja Bybit, zainicjalizowane. Aplikacja gotowa do startu.")
         else:
             app.config['INITIALIZATION_SUCCESS'] = False
             reasons = []
             if not firebase_ok: reasons.append("Firebase failed")
             if not bigquery_ok: reasons.append("BigQuery failed")
             if not trading_services_ok: reasons.append("BybitExecutor failed")
+            if not bybit_config_ok: reasons.append("Bybit account configuration failed") # Nowy powód
             final_reason = ", ".join(reasons)
             app.config['INITIALIZATION_FAILURE_REASON'] = final_reason
-            logger.critical(f"Krytyczny błąd podczas inicjalizacji podstawowych usług. Powód: {final_reason}")
+            logger.critical(f"Krytyczny błąd podczas inicjalizacji. Powód: {final_reason}")
+   
