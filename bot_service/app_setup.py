@@ -6,8 +6,10 @@ import uuid
 from flask import Flask, jsonify
 from typing import Optional, Tuple
 
+
 from shared_lib.config_loader import load_config
 from shared_lib.firebase_client import initialize_firebase, get_symbols_to_watch_from_config
+from shared_lib.config import config 
 
 
 from bot_service.bigquery_logger import initialize_bigquery
@@ -27,7 +29,14 @@ def initialize_trading_services() -> Tuple[bool, Optional[BybitExecutor]]:
     """
     logger.info("Inicjalizacja usług tradingowych...")
     try:
-        executor_instance = BybitExecutor()
+        # ZMIANA: Jawnie przekazujemy klucze z załadowanej konfiguracji
+        if not config.BYBIT_API_KEY or not config.BYBIT_API_SECRET:
+            raise ValueError("Klucze API Bybit nie są ustawione w konfiguracji.")
+        
+        executor_instance = BybitExecutor(
+            api_key=config.BYBIT_API_KEY,
+            api_secret=config.BYBIT_API_SECRET
+        )
         logger.info("BybitExecutor pomyślnie zainicjalizowany.")
         return True, executor_instance
     except (RuntimeError, ValueError) as e:

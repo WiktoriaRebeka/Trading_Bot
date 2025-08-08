@@ -12,7 +12,6 @@ from urllib.parse import urlencode
 import requests
 from requests.exceptions import RequestException
 
-from shared_lib.config import config
 from shared_lib import constants
 
 logger = logging.getLogger(__name__)
@@ -24,20 +23,16 @@ class BybitAPIError(Exception):
         super().__init__(f"Bybit API Error: [Code: {ret_code}] {ret_msg}")
 
 class BybitExecutor:
-    def __init__(self):
-        if not config.is_loaded:
-            raise RuntimeError("Konfiguracja (config) nie została załadowana.")
+    def __init__(self, api_key: str, api_secret: str):
+        if not api_key or not api_secret:
+            raise ValueError("Klucze API Bybit nie mogą być puste.")
         
-        self.api_key: str = config.BYBIT_API_KEY
-        self.api_secret: str = config.BYBIT_API_SECRET
+        self.api_key: str = api_key
+        self.api_secret: str = api_secret
         self.base_url: str = constants.BYBIT_API_URL_V5
         self.session = requests.Session()
+        
 
-        if not self.api_key or not self.api_secret:
-            raise ValueError("Klucze API Bybit nie są ustawione w konfiguracji.")
-
-    # === POCZĄTEK POPRAWKI SKŁADNIOWEJ ===
-    # Ta funkcja musi być na tym samym poziomie wcięcia co __init__
     def _send_request(self, method: str, endpoint: str, params: Dict = None, payload: Dict = None) -> Dict[str, Any]:
         """
         Wysyła podpisane zapytanie do API Bybit V5.
@@ -94,7 +89,6 @@ class BybitExecutor:
         except Exception as e:
             logger.critical(f"Nieoczekiwany błąd w _send_request: {e}", exc_info=True)
             raise
-    # === KONIEC POPRAWKI SKŁADNIOWEJ ===
 
     def get_instrument_info(self, symbol: str) -> Optional[Dict[str, Any]]:
         logger.info(f"[{symbol}] Pobieranie informacji o instrumencie z Bybit.")
