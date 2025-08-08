@@ -36,6 +36,8 @@ class BybitExecutor:
         if not self.api_key or not self.api_secret:
             raise ValueError("Klucze API Bybit nie są ustawione w konfiguracji.")
 
+    # === POCZĄTEK POPRAWKI SKŁADNIOWEJ ===
+    # Ta funkcja musi być na tym samym poziomie wcięcia co __init__
     def _send_request(self, method: str, endpoint: str, params: Dict = None, payload: Dict = None) -> Dict[str, Any]:
         """
         Wysyła podpisane zapytanie do API Bybit V5.
@@ -52,7 +54,6 @@ class BybitExecutor:
             param_str = json.dumps(payload) if payload else ""
             body_data = param_str 
 
-       
         to_sign = timestamp + self.api_key + recv_window + param_str
         signature = hmac.new(bytes(self.api_secret, "utf-8"), to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
         
@@ -67,26 +68,33 @@ class BybitExecutor:
             headers['Content-Type'] = 'application/json'
         
         try:
-            # Użycie requests.request jest bardziej elastyczne
             response = self.session.request(method, full_url, headers=headers, params=params, data=body_data, timeout=10)
             response.raise_for_status()
             data = response.json()
 
             if data.get("retCode") != 0:
-                # Teraz to zadziała, bo BybitAPIError ma poprawny __init__
+                logger.error(
+                    f"Bybit API zwróciło błąd. Endpoint: {endpoint}, "
+                    f"retCode: {data.get('retCode')}, retMsg: '{data.get('retMsg')}', "
+                    f"Pełna odpowiedź: {data}"
+                )
                 raise BybitAPIError(ret_code=data.get("retCode"), ret_msg=data.get("retMsg"))
             
             return data.get("result", {})
         except RequestException as e:
-            error_content = e.response.text if e.response else "No response content"
-            logger.error(f"Błąd sieciowy podczas komunikacji z Bybit: {e}. Odpowiedź serwera: {error_content}")
+            error_content = e.response.text if e.response else "Brak odpowiedzi od serwera (prawdopodobnie timeout)."
+            logger.error(
+                f"Błąd sieciowy podczas komunikacji z Bybit. Endpoint: {endpoint}, "
+                f"Typ błędu: {type(e).__name__}, Błąd: {e}. "
+                f"Odpowiedź serwera: {error_content}"
+            )
             raise
         except BybitAPIError as e:
-            logger.error(f"Błąd API Bybit: {e}", extra={"json_fields": {"ret_code": e.ret_code, "ret_msg": e.ret_msg}})
             raise
         except Exception as e:
             logger.critical(f"Nieoczekiwany błąd w _send_request: {e}", exc_info=True)
             raise
+    # === KONIEC POPRAWKI SKŁADNIOWEJ ===
 
     def get_instrument_info(self, symbol: str) -> Optional[Dict[str, Any]]:
         logger.info(f"[{symbol}] Pobieranie informacji o instrumencie z Bybit.")
