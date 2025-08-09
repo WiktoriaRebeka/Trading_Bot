@@ -12,28 +12,22 @@ def create_app():
     """Tworzy i konfiguruje aplikację Flask."""
     app = Flask(__name__)
     
-    # === POCZĄTEK ZMIAN ===
-    # Rejestrujemy funkcję inicjalizującą, ale jej nie wywołujemy od razu.
-    # Flask wykona ją automatycznie przed obsłużeniem pierwszego żądania.
-    @app.before_first_request
-    def setup_services():
-        try:
-            initialize_app_services(app)
-        except Exception as e:
-            logger.critical(f"FATAL: Błąd podczas inicjalizacji usług: {e}", exc_info=True)
-            # Ustawiamy flagę błędu, aby endpointy wiedziały, że coś poszło nie tak
-            app.config['INITIALIZATION_SUCCESS'] = False
-            app.config['INITIALIZATION_FAILURE_REASON'] = str(e)
-
-    # Rejestracja endpointów odbywa się od razu.
-    register_endpoints(app)
-    # === KONIEC ZMIAN ===
-
+    try:
+        # Wywołujemy inicjalizację bezpośrednio, tak jak na początku,
+        # ale teraz, gdy inne błędy importu są naprawione, to powinno zadziałać.
+        initialize_app_services(app)
+        register_endpoints(app)
+    except Exception as e:
+        logger.critical(f"FATAL: Błąd podczas tworzenia aplikacji Flask: {e}", exc_info=True)
+        # Jeśli inicjalizacja zawiedzie, flaga błędu zostanie ustawiona wewnątrz
+        # initialize_app_services, a aplikacja i tak wystartuje w stanie "unhealthy".
+        
     return app
 
+# Ta linia jest kluczowa dla Gunicorna. Wywołuje create_app() i tworzy instancję 'app'.
 app = create_app()
 
-# Ten blok jest potrzebny tylko do lokalnego uruchamiania, zostawiamy go bez zmian.
+# Ten blok jest używany tylko do lokalnego uruchamiania.
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port, debug=False)
