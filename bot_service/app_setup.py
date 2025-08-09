@@ -5,7 +5,6 @@ import uuid
 from flask import Flask, jsonify
 from typing import Optional, Tuple
 
-# Importy niezbędne na poziomie modułu
 from shared_lib.config_loader import load_config
 from shared_lib.firebase_client import initialize_firebase
 from shared_lib.config import config 
@@ -13,7 +12,6 @@ from shared_lib.config import config
 logger = logging.getLogger(__name__)
 
 def initialize_trading_services() -> Tuple[bool, Optional['BybitExecutor']]:
-    # Import wewnątrz funkcji, aby uniknąć problemów z kolejnością ładowania
     from bot_service.bybit_executor import BybitExecutor
 
     logger.info("Inicjalizacja usług tradingowych...")
@@ -32,7 +30,6 @@ def initialize_trading_services() -> Tuple[bool, Optional['BybitExecutor']]:
         return False, None
 
 def configure_bybit_account(executor: 'BybitExecutor') -> bool:
-    # Import wewnątrz funkcji
     from shared_lib.firebase_client import get_symbols_to_watch_from_config
 
     logger.info("--- ROZPOCZĘCIE KONFIGURACJI KONTRAKTÓW NA BYBIT ---")
@@ -95,7 +92,6 @@ def register_endpoints(app: Flask):
 
     @app.route('/run-bot-cycle', methods=['POST'])
     def run_bot_cycle_endpoint():
-        # Importy wewnątrz funkcji
         import bot_service.bot_logic as bot_logic_module
         from bot_service.fetch_from_firestore import fetch_new_alerts_since, load_last_processed_timestamp, save_last_processed_timestamp
 
@@ -125,7 +121,6 @@ def register_endpoints(app: Flask):
 
 def initialize_app_services(app: Flask):
     with app.app_context():
-        # Importy wewnątrz funkcji
         from bot_service.bigquery_logger import initialize_bigquery
         import bot_service.bot_logic as bot_logic_module
 
