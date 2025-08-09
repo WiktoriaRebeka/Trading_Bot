@@ -10,4 +10,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY shared_lib/ /app/shared_lib/
 COPY bot_service/ /app/bot_service/
 
-CMD exec gunicorn --bind :$PORT --workers 1 --threads 8 --timeout 300 "bot_service.main:create_app()"
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "1", "--threads", "8", "--timeout", "300", "bot_service.main:create_app()"]
