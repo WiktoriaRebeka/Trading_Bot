@@ -33,49 +33,67 @@ def configure_bybit_account(executor: 'BybitExecutor') -> bool:
     from shared_lib.firebase_client import get_symbols_to_watch_from_config
 
     logger.info("--- ROZPOCZĘCIE KONFIGURACJI KONTRAKTÓW NA BYBIT ---")
-    symbols_to_configure = get_symbols_to_watch_from_config()
-    if not symbols_to_configure:
-        logger.warning("Brak symboli do skonfigurowania w Firestore. Pomijam ten krok.")
-        return True
+    try:
+        symbols_to_configure = get_symbols_to_watch_from_config()
+        
+        # === LOG DIAGNOSTYCZNY 1 ===
+        logger.info(f"[DIAGNOSTYKA] Symbole pobrane z Firestore: {symbols_to_configure}")
 
-    all_successful = True
-    default_leverage = 10
+        if not symbols_to_configure:
+            logger.warning("Brak symboli do skonfigurowania w Firestore. Pomijam ten krok.")
+            return True
 
-    for symbol in symbols_to_configure:
-        try:
-            position_info = executor.get_position_info(symbol)
-            
-            if position_info is None:
-                logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się pobrać informacji o pozycji (błąd API lub sieci).")
+        all_successful = True
+        default_leverage = 10
+
+        for symbol in symbols_to_configure:
+            # === LOG DIAGNOSTYCZNY 2 ===
+            logger.info(f"[DIAGNOSTYKA] Przetwarzam symbol: '{symbol}' (typ: {type(symbol)})")
+
+            # Dodatkowe zabezpieczenie przed nieprawidłowymi danymi
+            if not isinstance(symbol, str) or not symbol:
+                logger.error(f"[DIAGNOSTYKA] Pomijam nieprawidłowy symbol: {symbol}")
                 all_successful = False
                 continue
 
-            is_cross_mode = position_info.get('tradeMode') == 0
-            
-            if is_cross_mode:
-                is_position_active = float(position_info.get('size', '0')) > 0
-                if is_position_active:
-                    logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD: Wykryto aktywną pozycję w trybie Cross. Wymagana ręczna interwencja!")
+            try:
+                position_info = executor.get_position_info(symbol)
+                
+                if position_info is None:
+                    logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się pobrać informacji o pozycji (błąd API lub sieci).")
                     all_successful = False
-                else:
-                    logger.info(f"[{symbol}] Symbol jest w trybie Cross. Próba przełączenia na Isolated.")
-                    if not executor.set_isolated_margin(symbol, default_leverage):
+                    continue
+
+                is_cross_mode = position_info.get('tradeMode') == 0
+                
+                if is_cross_mode:
+                    is_position_active = float(position_info.get('size', '0')) > 0
+                    if is_position_active:
+                        logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD: Wykryto aktywną pozycję w trybie Cross. Wymagana ręczna interwencja!")
                         all_successful = False
                     else:
-                        logger.info(f"[{symbol}] SUKCES: Pomyślnie ustawiono tryb Isolated.")
-            else: 
-                logger.info(f"[{symbol}] jest już w trybie Isolated. OK.")
+                        logger.info(f"[{symbol}] Symbol jest w trybie Cross. Próba przełączenia na Isolated.")
+                        if not executor.set_isolated_margin(symbol, default_leverage):
+                            all_successful = False
+                        else:
+                            logger.info(f"[{symbol}] SUKCES: Pomyślnie ustawiono tryb Isolated.")
+                else: 
+                    logger.info(f"[{symbol}] jest już w trybie Isolated. OK.")
 
-        except Exception as e:
-            logger.critical(f"[{symbol}] Nieoczekiwany, krytyczny błąd podczas konfiguracji: {e}", exc_info=True)
-            all_successful = False
-    
-    if all_successful:
-        logger.info("--- ZAKOŃCZONO SUKCESEM KONFIGURACJĘ KONTRAKTÓW NA BYBIT ---")
-    else:
-        logger.critical("--- KONFIGURACJA KONTRAKTÓW NA BYBIT ZAKOŃCZONA BŁĘDAMI ---")
+            except Exception as e:
+                logger.critical(f"[{symbol}] Nieoczekiwany, krytyczny błąd podczas konfiguracji: {e}", exc_info=True)
+                all_successful = False
         
-    return all_successful
+        if all_successful:
+            logger.info("--- ZAKOŃCZONO SUKCESEM KONFIGURACJĘ KONTRAKTÓW NA BYBIT ---")
+        else:
+            logger.critical("--- KONFIGURACJA KONTRAKTÓW NA BYBIT ZAKOŃCZONA BŁĘDAMI ---")
+            
+        return all_successful
+    except Exception as e:
+        # === LOG DIAGNOSTYCZNY 3 ===
+        logger.critical(f"[DIAGNOSTYKA] Błąd na poziomie całej funkcji configure_bybit_account: {e}", exc_info=True)
+        return False
 
 def register_endpoints(app: Flask):
     @app.route('/')
