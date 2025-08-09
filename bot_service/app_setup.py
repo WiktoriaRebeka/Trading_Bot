@@ -5,17 +5,15 @@ import uuid
 from flask import Flask, jsonify
 from typing import Optional, Tuple
 
-# === ZMIANY W IMPORTACH ===
-# Zostawiamy tylko te importy, które są absolutnie niezbędne na poziomie modułu
+# Importy niezbędne na poziomie modułu
 from shared_lib.config_loader import load_config
 from shared_lib.firebase_client import initialize_firebase
 from shared_lib.config import config 
-# Resztę przenosimy do funkcji
 
 logger = logging.getLogger(__name__)
 
-def initialize_trading_services() -> Tuple[bool, Optional[BybitExecutor]]:
-    # Import wewnątrz funkcji
+def initialize_trading_services() -> Tuple[bool, Optional['BybitExecutor']]:
+    # Import wewnątrz funkcji, aby uniknąć problemów z kolejnością ładowania
     from bot_service.bybit_executor import BybitExecutor
 
     logger.info("Inicjalizacja usług tradingowych...")
@@ -33,7 +31,8 @@ def initialize_trading_services() -> Tuple[bool, Optional[BybitExecutor]]:
         logger.critical(f"Nie można zainicjalizować BybitExecutor: {e}. Funkcjonalność handlowa będzie wyłączona.")
         return False, None
 
-def configure_bybit_account(executor: "BybitExecutor") -> bool: # Używamy stringa, by uniknąć importu
+def configure_bybit_account(executor: 'BybitExecutor') -> bool:
+    # Import wewnątrz funkcji
     from shared_lib.firebase_client import get_symbols_to_watch_from_config
 
     logger.info("--- ROZPOCZĘCIE KONFIGURACJI KONTRAKTÓW NA BYBIT ---")

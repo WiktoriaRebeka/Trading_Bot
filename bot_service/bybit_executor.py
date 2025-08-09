@@ -85,6 +85,28 @@ class BybitExecutor:
             logger.critical(f"Nieoczekiwany błąd w _send_request: {e}", exc_info=True)
             raise
 
+    def get_instrument_info(self, symbol: str) -> Optional[Dict[str, Any]]:
+        logger.info(f"[{symbol}] Pobieranie informacji o instrumencie z Bybit.")
+        api_symbol = symbol.replace('.P', '')
+        try:
+            result = self._send_request(
+                "GET",
+                "/v5/market/instruments-info",
+                params={"category": "linear", "symbol": api_symbol}
+            )
+            if result and result.get('list'):
+                instrument_data = result['list'][0]
+                leverage_filter = instrument_data.get('leverageFilter', {})
+                lot_size_filter = instrument_data.get('lotSizeFilter', {})
+                info = {
+                    "max_leverage": int(float(leverage_filter.get('maxLeverage', '1'))),
+                    "qty_step": lot_size_filter.get('qtyStep', '0.001')
+                }
+                return info
+            return None
+        except (RequestException, BybitAPIError):
+            return None
+
     def get_position_info(self, symbol: str) -> Optional[Dict[str, Any]]:
         logger.info(f"[{symbol}] Pobieranie informacji o pozycji z Bybit.")
         api_symbol = symbol.replace('.P', '')
@@ -96,11 +118,52 @@ class BybitExecutor:
             )
             if result and result.get('list') and len(result['list']) > 0:
                 return result['list'][0]
-            # Zwracamy pusty słownik, jeśli lista jest pusta, ale zapytanie się udało
             return {}
         except (RequestException, BybitAPIError):
             return None
         
+    def place_limit_order(self, order_params: Dict[str, Any]) -> Optional[str]:
+        symbol = order_params.get('symbol')
+        if not symbol:
+            logger.error("Brak 'symbol' w parametrach zlecenia.")
+            return None
+
+        api_symbol = symbol.replace('.P', '')
+        
+        side_map = {"LONG": "Buy", "SHORT": "Sell"}
+        side_value = str(order_params.get('side', '')).upper()
+        
+        if side_value not in side_map:
+            logger.error(f"[{symbol}] Nieprawidłowa wartość 'side': {order_params.get('side')}. Oczekiwano 'LONG' lub 'SHORT'.")
+            return None
+
+        payload = {
+            "category": "linear",
+            "symbol": api_symbol,
+            "side": side_map[side_value],
+            "orderType": "Limit",
+            "qty": str(order_params['qty']),
+            "price": str(order_params['price']),
+            "leverage": str(order_params['leverage']),
+            "takeProfit": str(order_params['takeProfit']),
+            "stopLoss": str(order_params['stopLoss']),
+            "timeInForce": "GTC"
+        }
+        
+        logger.info(f"[{symbol}] Wysyłanie zlecenia do Bybit z parametrami: {payload}")
+        try:
+            result = self._send_request("POST", "/v5/order/create", payload=payload)
+            order_id = result.get("orderId")
+            if order_id:
+                logger.info(f"[{symbol}] Zlecenie pomyślnie złożone. Order ID: {order_id}")
+                return order_id
+            else:
+                logger.error(f"[{symbol}] API Bybit nie zwróciło orderId, chociaż nie było wyjątku. Odpowiedź: {result}")
+                return None
+        except (RequestException, BybitAPIError) as e:
+            logger.error(f"[{symbol}] Nie udało się złożyć zlecenia z powodu błędu API: {e}")
+            return None
+
     def set_isolated_margin(self, symbol: str, leverage: int) -> bool:
         logger.info(f"[{symbol}] Próba ustawienia trybu Isolated Margin z dźwignią {leverage}x.")
         api_symbol = symbol.replace('.P', '')
@@ -121,8 +184,6 @@ class BybitExecutor:
                 return True
             logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się ustawić trybu Isolated Margin: {e}")
             return False
-    
-   
 
 def format_quantity(quantity: float, qty_step: str) -> str:
     qty_decimal = Decimal(str(quantity))
