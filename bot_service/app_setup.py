@@ -102,16 +102,25 @@ def register_endpoints(app: Flask):
              reason = app.config.get('INITIALIZATION_FAILURE_REASON', 'Unknown initialization error.')
              logger.error(f"Zatrzymano cykl, aplikacja nie zainicjalizowana. Powód: {reason}", extra={"json_fields": {"cycle_id": cycle_id}})
              return jsonify({"status": "error", "message": f"Service is unhealthy: {reason}"}), 503
+        
+        # === ZMIANA TUTAJ: Pobieramy executor z konfiguracji aplikacji ===
+        bybit_executor = app.config.get('BYBIT_EXECUTOR')
+        if not bybit_executor:
+            logger.error("Krytyczny błąd: BybitExecutor nie jest dostępny w konfiguracji aplikacji.", extra={"json_fields": {"cycle_id": cycle_id, "status": "error"}})
+            return jsonify({"status": "error", "message": "BybitExecutor not initialized"}), 500
+
         try:
             last_ts = load_last_processed_timestamp()
             new_alerts, new_ts = fetch_new_alerts_since(last_ts)
             if new_alerts:
                 logger.info(f"Przetwarzam {len(new_alerts)} nowych alertów.", extra={"json_fields": {"cycle_id": cycle_id}})
+                # Ta funkcja nie wymaga executora, więc jej wywołanie pozostaje bez zmian
                 bot_logic_module.process_new_alerts(new_alerts)
                 if new_ts and new_ts > last_ts:
                     save_last_processed_timestamp(new_ts)
             
-            bot_logic_module.run_trading_logic()
+            # === ZMIANA TUTAJ: Przekazujemy executor jako argument do głównej logiki ===
+            bot_logic_module.run_trading_logic(bybit_executor)
 
             logger.info("--- ZAKOŃCZENIE CYKLU BOTA ---", extra={"json_fields": {"cycle_id": cycle_id, "status": "success"}})
             return jsonify({"status": "success", "cycle_id": cycle_id}), 200
@@ -122,7 +131,7 @@ def register_endpoints(app: Flask):
 def initialize_app_services(app: Flask):
     with app.app_context():
         from bot_service.bigquery_logger import initialize_bigquery
-        import bot_service.bot_logic as bot_logic_module
+        # === ZMIANA TUTAJ: Usunięto import bot_logic, który powodował cykliczną zależność ===
 
         logger.info("Rozpoczynam szybką inicjalizację aplikacji `bot_service`.")
         
@@ -134,8 +143,8 @@ def initialize_app_services(app: Flask):
         bybit_config_ok = False 
        
         if executor:
+            # === ZMIANA TUTAJ: Zapisujemy executor w konfiguracji aplikacji, aby był dostępny w endpointach ===
             app.config['BYBIT_EXECUTOR'] = executor
-            bot_logic_module.bybit_executor = executor
             
             logger.info("Uruchamiam jednorazową konfigurację konta Bybit podczas startu aplikacji.")
             bybit_config_ok = configure_bybit_account(executor)

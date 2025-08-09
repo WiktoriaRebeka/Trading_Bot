@@ -30,7 +30,7 @@ from bot_service.bybit_executor import (
 
 logger = logging.getLogger(__name__)
 
-bybit_executor: Optional[BybitExecutor] = None
+
 
 def _calculate_rr_analytics(entry_price: float, sl_price: float, extreme_price: float, direction: str) -> Dict[str, Any]:
     risk_diff = abs(entry_price - sl_price)
@@ -160,7 +160,7 @@ def _execute_trade_entry_sequence(symbol: str, setup: SetupData, executor: Bybit
         logger.critical(f"[{symbol}] Nieoczekiwany, krytyczny błąd w sekwencji otwierania pozycji: {e}", exc_info=True)
         return None
 
-def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSnapshot]):
+def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSnapshot], bybit_executor: BybitExecutor):
     if not active_setups: return
     logger.info(f"Sprawdzam {len(active_setups)} aktywnych setupów.")
     for setup_doc in active_setups:
@@ -216,10 +216,9 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
                     except Exception as ex:
                         logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD TRANSAKCJI: {ex}", exc_info=True)
                 else:
-                    if not bybit_executor:
-                        logger.error(f"[{symbol}] Pomijam próbę otwarcia pozycji, BybitExecutor nie jest dostępny.")
-                        continue
-
+                    # === ZMIANA TUTAJ ===
+                    # Nie ma już potrzeby sprawdzania globalnej zmiennej.
+                    # Executor jest przekazywany jako argument i zawsze będzie dostępny w tym miejscu.
                     logger.info(f"--- [DECYZJA: WEJŚCIE {ob_type}] --- [{symbol}] | Cena: {entry_level} | Deleguję do sekwencji wykonawczej.")
                     
                     order_id = _execute_trade_entry_sequence(symbol, setup, bybit_executor)
@@ -349,7 +348,7 @@ def _handle_post_mortem_analysis(analyzed_trades: List[DocumentSnapshot], klines
         except Exception as e: 
             logger.error(f"[ANALIZA DUCHA][{trade_id}] Błąd: {e}", exc_info=True)
 
-def run_trading_logic():
+def run_trading_logic(bybit_executor: BybitExecutor):
     logger.info("Rozpoczynam główną pętlę logiki tradingowej.")
     symbols_to_watch = set(get_symbols_to_watch_from_config())
     open_trades_docs = list(state_manager.get_all_open_trades())
@@ -371,6 +370,6 @@ def run_trading_logic():
     }
     active_setups_docs = list(state_manager.get_all_active_setups())
     _handle_post_mortem_analysis(analyzed_trades_docs, klines_data)
-    _handle_setups(klines_data, active_setups_docs)
+    _handle_setups(klines_data, active_setups_docs, bybit_executor)
     _handle_manage_open_trades(klines_data, open_trades_docs)
     logger.info("Zakończono główną pętlę logiki tradingowej.")
