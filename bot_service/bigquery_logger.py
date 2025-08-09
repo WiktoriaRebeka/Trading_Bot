@@ -1,4 +1,4 @@
-# Lokalizacja: bot_service/bybit_executor.py
+# Lokalizacja: bot_service/bigquery_logger.py
 
 import logging
 from typing import Dict, Any, Optional, Set
@@ -12,177 +12,129 @@ logger = logging.getLogger(__name__)
 bigquery_client: Optional[bigquery.Client] = None
 TABLE_REF: Optional[str] = None
 
-class BybitAPIError(Exception):
-    def __init__(self, ret_code: int, ret_msg: str):
-        self.ret_code = ret_code
-        self.ret_msg = ret_msg
-        super().__init__(f"Bybit API Error: [Code: {ret_code}] {ret_msg}")
+EXPECTED_SCHEMA = {
+    "trade_id": str, "timestamp_entry": str, "timestamp_close": str, "symbol": str,
+    "direction": str, "main_result": str, "ob_type": str, "rr_achieved": float,
+    "rr_1_0_achieved": bool, "rr_1_5_achieved": bool, "rr_2_0_achieved": bool,
+    "rr_3_0_achieved": bool, "rr_4_0_achieved": bool, "rr_5_0_achieved": bool,
+}
 
-class BybitExecutor:
-    def __init__(self, api_key: str, api_secret: str):
-        if not api_key or not api_secret:
-            raise ValueError("Klucze API Bybit nie mogą być puste.")
-        
-        self.api_key: str = api_key
-        self.api_secret: str = api_secret
-        self.base_url: str = constants.BYBIT_API_URL_V5
-        self.session = requests.Session()
+UPDATABLE_COLUMNS: Set[str] = {
+    "rr_achieved", "rr_1_0_achieved", "rr_1_5_achieved", "rr_2_0_achieved",
+    "rr_3_0_achieved", "rr_4_0_achieved", "rr_5_0_achieved", "timestamp_close", "main_result"
+}
 
-    def _send_request(self, method: str, endpoint: str, params: Dict = None, payload: Dict = None) -> Dict[str, Any]:
-        full_url = self.base_url + endpoint
-        timestamp = str(int(time.time() * 1000))
-        recv_window = "10000" 
-        
-        if method.upper() == 'GET':
-            param_str = urlencode(sorted(params.items())) if params else ""
-            body_data = None
-        else: 
-            param_str = json.dumps(payload) if payload else ""
-            body_data = param_str 
+def initialize_bigquery() -> bool:
+    global bigquery_client, TABLE_REF
+    if bigquery_client is not None:
+        logger.info("[BQ_INIT] Klient BigQuery jest już zainicjalizowany.")
+        return True
+    try:
+        logger.info("[BQ_INIT] Próba inicjalizacji klienta BigQuery...")
+        client = bigquery.Client()
+        table_ref_str = f"{constants.BIGQUERY_PROJECT_ID}.{constants.BIGQUERY_DATASET_ID}.{constants.BIGQUERY_TABLE_ID}"
+        client.get_table(table_ref_str)
+        bigquery_client = client
+        TABLE_REF = table_ref_str
+        logger.info(f"[BQ_INIT] Klient BigQuery pomyślnie zainicjalizowany. Tabela: {TABLE_REF}")
+        return True
+    except Exception as e:
+        logger.critical(f"[BQ_INIT] KRYTYCZNY BŁĄD: Inicjalizacja klienta BigQuery nie powiodła się: {e}", exc_info=True)
+        bigquery_client, TABLE_REF = None, None
+        return False
 
-        to_sign = timestamp + self.api_key + recv_window + param_str
-        signature = hmac.new(bytes(self.api_secret, "utf-8"), to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
-        
-        headers = {
-            'X-B-API-KEY': self.api_key,
-            'X-B-API-TIMESTAMP': timestamp,
-            'X-B-API-SIGN': signature,
-            'X-B-API-RECV-WINDOW': recv_window,
-        }
-        
-        if method.upper() != 'GET':
-            headers['Content-Type'] = 'application/json'
-        
-        try:
-            response = self.session.request(method, full_url, headers=headers, params=params, data=body_data, timeout=15)
-            response.raise_for_status()
-            data = response.json()
+def get_bigquery_client() -> bigquery.Client:
+    if bigquery_client is None:
+        logger.error("[BQ_CLIENT] Próba użycia niezainicjalizowanego klienta BigQuery.")
+        raise RuntimeError("Klient BigQuery nie został pomyślnie zainicjalizowany.")
+    return bigquery_client
 
-            if data.get("retCode") != 0:
-                logger.error(
-                    f"Bybit API zwróciło błąd. Endpoint: {endpoint}, "
-                    f"retCode: {data.get('retCode')}, retMsg: '{data.get('retMsg')}', "
-                    f"Pełna odpowiedź: {data}"
-                )
-                raise BybitAPIError(ret_code=data.get("retCode"), ret_msg=data.get("retMsg"))
-            
-            return data.get("result", {})
-        except RequestException as e:
-            error_content = e.response.text if e.response else "Brak odpowiedzi od serwera (prawdopodobnie timeout)."
-            logger.error(
-                f"Błąd sieciowy podczas komunikacji z Bybit. Endpoint: {endpoint}, "
-                f"Typ błędu: {type(e).__name__}, Błąd: {e}. "
-                f"Odpowiedź serwera: {error_content}"
-            )
-            raise
-        except BybitAPIError:
-            raise
-        except Exception as e:
-            logger.critical(f"Nieoczekiwany błąd w _send_request: {e}", exc_info=True)
-            raise
-
-    def get_instrument_info(self, symbol: str) -> Optional[Dict[str, Any]]:
-        logger.info(f"[{symbol}] Pobieranie informacji o instrumencie z Bybit.")
-        api_symbol = symbol.replace('.P', '')
-        try:
-            result = self._send_request(
-                "GET",
-                "/v5/market/instruments-info",
-                params={"category": "linear", "symbol": api_symbol}
-            )
-            if result and result.get('list'):
-                instrument_data = result['list'][0]
-                leverage_filter = instrument_data.get('leverageFilter', {})
-                lot_size_filter = instrument_data.get('lotSizeFilter', {})
-                info = {
-                    "max_leverage": int(float(leverage_filter.get('maxLeverage', '1'))),
-                    "qty_step": lot_size_filter.get('qtyStep', '0.001')
-                }
-                return info
-            return None
-        except (RequestException, BybitAPIError):
-            return None
-
-    def get_position_info(self, symbol: str) -> Optional[Dict[str, Any]]:
-        logger.info(f"[{symbol}] Pobieranie informacji o pozycji z Bybit.")
-        api_symbol = symbol.replace('.P', '')
-        try:
-            result = self._send_request(
-                "GET",
-                "/v5/position/list",
-                params={"category": "linear", "symbol": api_symbol}
-            )
-            if result and result.get('list') and len(result['list']) > 0:
-                return result['list'][0]
-            return {}
-        except (RequestException, BybitAPIError):
-            return None
-        
-    def place_limit_order(self, order_params: Dict[str, Any]) -> Optional[str]:
-        symbol = order_params.get('symbol')
-        if not symbol:
-            logger.error("Brak 'symbol' w parametrach zlecenia.")
-            return None
-
-        api_symbol = symbol.replace('.P', '')
-        
-        side_map = {"LONG": "Buy", "SHORT": "Sell"}
-        side_value = str(order_params.get('side', '')).upper()
-        
-        if side_value not in side_map:
-            logger.error(f"[{symbol}] Nieprawidłowa wartość 'side': {order_params.get('side')}. Oczekiwano 'LONG' lub 'SHORT'.")
-            return None
-
-        payload = {
-            "category": "linear",
-            "symbol": api_symbol,
-            "side": side_map[side_value],
-            "orderType": "Limit",
-            "qty": str(order_params['qty']),
-            "price": str(order_params['price']),
-            "leverage": str(order_params['leverage']),
-            "takeProfit": str(order_params['takeProfit']),
-            "stopLoss": str(order_params['stopLoss']),
-            "timeInForce": "GTC"
-        }
-        
-        logger.info(f"[{symbol}] Wysyłanie zlecenia do Bybit z parametrami: {payload}")
-        try:
-            result = self._send_request("POST", "/v5/order/create", payload=payload)
-            order_id = result.get("orderId")
-            if order_id:
-                logger.info(f"[{symbol}] Zlecenie pomyślnie złożone. Order ID: {order_id}")
-                return order_id
-            else:
-                logger.error(f"[{symbol}] API Bybit nie zwróciło orderId, chociaż nie było wyjątku. Odpowiedź: {result}")
+def _validate_and_sanitize_data(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    sanitized = {}
+    missing_keys = []
+    for key, expected_type in EXPECTED_SCHEMA.items():
+        if key not in data or data[key] is None:
+            if expected_type is bool: sanitized[key] = False
+            elif key in ["trade_id", "symbol", "direction", "main_result"]: missing_keys.append(key)
+            else: sanitized[key] = None
+        else:
+            value = data[key]
+            try:
+                if expected_type is float and not isinstance(value, float): sanitized[key] = float(value)
+                elif expected_type is bool and not isinstance(value, bool): sanitized[key] = bool(value)
+                else: sanitized[key] = value
+            except (ValueError, TypeError):
+                logger.error(f"[BQ_VALIDATOR] Nie można przekonwertować wartości dla klucza '{key}'.")
                 return None
-        except (RequestException, BybitAPIError) as e:
-            logger.error(f"[{symbol}] Nie udało się złożyć zlecenia z powodu błędu API: {e}")
-            return None
+    if missing_keys:
+        logger.error(f"[BQ_VALIDATOR] Brakujące kluczowe pola w danych: {missing_keys}. Pomijam zapis.")
+        return None
+    return sanitized
 
-    def set_isolated_margin(self, symbol: str, leverage: int) -> bool:
-        logger.info(f"[{symbol}] Próba ustawienia trybu Isolated Margin z dźwignią {leverage}x.")
-        api_symbol = symbol.replace('.P', '')
-        leverage_str = str(leverage)
-        payload = {
-            "category": "linear",
-            "symbol": api_symbol,
-            "buyLeverage": leverage_str,
-            "sellLeverage": leverage_str,
-            "tradeMode": 1
-        }
-        try:
-            self._send_request("POST", "/v5/position/set-leverage", payload=payload)
-            return True
-        except (RequestException, BybitAPIError) as e:
-            if isinstance(e, BybitAPIError) and e.ret_code == 110043:
-                logger.warning(f"[{symbol}] Dźwignia i tryb margin są już poprawnie ustawione.")
-                return True
-            logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się ustawić trybu Isolated Margin: {e}")
-            return False
+def log_trade_to_bigquery(trade_data: Dict):
+    logger.info(f"[BQ_LOGGER][{trade_data.get('trade_id')}] Rozpoczynam proces zapisu do BigQuery.")
+    try:
+        client = get_bigquery_client()
+    except RuntimeError as e:
+        logger.error(f"[BQ_LOGGER][{trade_data.get('trade_id')}] Nie można zalogować transakcji: {e}")
+        return
+    
+    sanitized_data = _validate_and_sanitize_data(trade_data)
+    if not sanitized_data:
+        logger.error(f"[BQ_LOGGER][{trade_data.get('trade_id')}] Dane nie przeszły walidacji. Pomijam zapis.")
+        return
+    try:
+        rows_to_insert = [sanitized_data]
+        errors = client.insert_rows_json(TABLE_REF, rows_to_insert)
+        if not errors:
+            logger.info(f"[BQ_LOGGER][{sanitized_data.get('trade_id')}] SUKCES! Pomyślnie wstawiono wiersz.")
+        else:
+            logger.error(f"[BQ_LOGGER][{sanitized_data.get('trade_id')}] Błąd podczas wstawiania wierszy: {errors}")
+    except Exception as e:
+        logger.error(f"[BQ_LOGGER][{sanitized_data.get('trade_id')}] Krytyczny błąd podczas zapisu: {e}", exc_info=True)
 
-def format_quantity(quantity: float, qty_step: str) -> str:
-    qty_decimal = Decimal(str(quantity))
-    step_decimal = Decimal(qty_step)
-    formatted_qty = qty_decimal.quantize(step_decimal, rounding=ROUND_DOWN)
-    return str(formatted_qty)
+def _get_bq_type(value: Any) -> str:
+    if isinstance(value, bool): return "BOOL"
+    if isinstance(value, int): return "INT64"
+    if isinstance(value, float): return "FLOAT64"
+    return "STRING"
+
+def update_analyzed_trade_in_bigquery(trade_id: str, updates: Dict[str, Any]):
+    logger.info(f"[BQ_UPDATER][{trade_id}] Rozpoczynam proces aktualizacji w BigQuery z danymi: {updates}")
+    try:
+        client = get_bigquery_client()
+    except RuntimeError as e:
+        logger.error(f"[BQ_UPDATER][{trade_id}] Nie można zaktualizować transakcji: {e}")
+        return
+
+    valid_updates = {k: v for k, v in updates.items() if k in UPDATABLE_COLUMNS}
+    if not valid_updates:
+        logger.warning(f"[BQ_UPDATER][{trade_id}] Brak prawidłowych pól do aktualizacji. Pomijam.")
+        return
+
+    set_clauses = [f"{key} = @{key}" for key in valid_updates.keys()]
+    query = f"UPDATE `{TABLE_REF}` SET {', '.join(set_clauses)} WHERE trade_id = @trade_id"
+    
+    params = [bigquery.ScalarQueryParameter("trade_id", "STRING", trade_id)]
+    params.extend([bigquery.ScalarQueryParameter(key, _get_bq_type(value), value) for key, value in valid_updates.items()])
+    job_config = bigquery.QueryJobConfig(query_parameters=params)
+
+    try:
+        logger.info(f"[BQ_UPDATER][{trade_id}] Wykonuję zapytanie: {query}")
+        query_job = client.query(query, job_config=job_config)
+        
+        # Czekamy na zakończenie zadania i sprawdzamy wynik
+        query_job.result() 
+        
+        # --- NOWY LOG DIAGNOSTYCZNY ---
+        # Sprawdzamy, ile wierszy zostało zmodyfikowanych przez zapytanie UPDATE
+        rows_updated = query_job.num_dml_affected_rows
+        if rows_updated > 0:
+            logger.info(f"[BQ_UPDATER][{trade_id}] SUKCES! Pomyślnie zaktualizowano {rows_updated} wiersz(y).")
+        else:
+            logger.warning(f"[BQ_UPDATER][{trade_id}] Zapytanie UPDATE wykonane, ale nie zaktualizowano żadnego wiersza. Sprawdź, czy trade_id istnieje w tabeli.")
+
+    except GoogleAPICallError as e:
+        logger.error(f"[BQ_UPDATER][{trade_id}] Błąd API BigQuery podczas aktualizacji: {e}", exc_info=True)
+    except Exception as e:
+        logger.error(f"[BQ_UPDATER][{trade_id}] Nieoczekiwany błąd podczas aktualizacji: {e}", exc_info=True)
