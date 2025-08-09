@@ -20,12 +20,10 @@ def create_app():
         
     return app
 
-# === ZMIANA TUTAJ ===
-# Usunęliśmy linię 'app = create_app()'
-# Gunicorn sam wywoła tę funkcję.
+app = create_app()
 
-# Ten blok jest teraz TYLKO do lokalnego uruchamiania, jeśli go potrzebujesz.
+
 if __name__ == '__main__':
-    app = create_app()
+
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port, debug=False)
