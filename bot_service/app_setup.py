@@ -3,98 +3,40 @@
 import logging
 import uuid
 from flask import Flask, jsonify
-from typing import Optional, Tuple
 
+# Importujemy tylko to, co jest absolutnie konieczne
 from shared_lib.config_loader import load_config
 from shared_lib.firebase_client import initialize_firebase
-from shared_lib.config import config 
+from bot_service.bigquery_logger import initialize_bigquery
+from bot_service.bot_logic import process_new_alerts, run_trading_logic
+from bot_service.fetch_from_firestore import (
+    load_last_processed_timestamp, 
+    fetch_new_alerts_since, 
+    save_last_processed_timestamp
+)
 
 logger = logging.getLogger(__name__)
 
-def initialize_trading_services() -> Tuple[bool, Optional['BybitExecutor']]:
-    # Ta funkcja jest w porządku, zostawiamy bez zmian
-    from bot_service.bybit_executor import BybitExecutor
-
-    logger.info("Inicjalizacja usług tradingowych...")
-    try:
-        if not config.BYBIT_API_KEY or not config.BYBIT_API_SECRET:
-            raise ValueError("Klucze API Bybit nie są ustawione w konfiguracji.")
+def initialize_app_services(app: Flask):
+    """Prosta i niezawodna inicjalizacja podstawowych usług."""
+    with app.app_context():
+        logger.info("Rozpoczynam prostą inicjalizację aplikacji bot_service.")
+        load_config()
         
-        executor_instance = BybitExecutor(
-            api_key=config.BYBIT_API_KEY,
-            api_secret=config.BYBIT_API_SECRET
-        )
-        logger.info("BybitExecutor pomyślnie zainicjalizowany.")
-        return True, executor_instance
-    except (RuntimeError, ValueError) as e:
-        logger.critical(f"Nie można zainicjalizować BybitExecutor: {e}. Funkcjonalność handlowa będzie wyłączona.")
-        return False, None
+        firebase_ok = initialize_firebase()
+        bigquery_ok = initialize_bigquery()
 
-def configure_bybit_account(executor: 'BybitExecutor') -> bool:
-    # Ta funkcja jest w porządku, zostawiamy bez zmian (z logami diagnostycznymi na razie)
-    from shared_lib.firebase_client import get_symbols_to_watch_from_config
-
-    logger.info("--- ROZPOCZĘCIE KONFIGURACJI KONTRAKTÓW NA BYBIT ---")
-    try:
-        symbols_to_configure = get_symbols_to_watch_from_config()
-        
-        logger.info(f"[DIAGNOSTYKA] Symbole pobrane z Firestore: {symbols_to_configure}")
-
-        if not symbols_to_configure:
-            logger.warning("Brak symboli do skonfigurowania w Firestore. Pomijam ten krok.")
-            return True
-
-        all_successful = True
-        default_leverage = 10
-
-        for symbol in symbols_to_configure:
-            logger.info(f"[DIAGNOSTYKA] Przetwarzam symbol: '{symbol}' (typ: {type(symbol)})")
-
-            if not isinstance(symbol, str) or not symbol:
-                logger.error(f"[DIAGNOSTYKA] Pomijam nieprawidłowy symbol: {symbol}")
-                all_successful = False
-                continue
-
-            try:
-                position_info = executor.get_position_info(symbol)
-                
-                if position_info is None:
-                    logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się pobrać informacji o pozycji (błąd API lub sieci).")
-                    all_successful = False
-                    continue
-
-                is_cross_mode = position_info.get('tradeMode') == 0
-                
-                if is_cross_mode:
-                    is_position_active = float(position_info.get('size', '0')) > 0
-                    if is_position_active:
-                        logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD: Wykryto aktywną pozycję w trybie Cross. Wymagana ręczna interwencja!")
-                        all_successful = False
-                    else:
-                        logger.info(f"[{symbol}] Symbol jest w trybie Cross. Próba przełączenia na Isolated.")
-                        if not executor.set_isolated_margin(symbol, default_leverage):
-                            all_successful = False
-                        else:
-                            logger.info(f"[{symbol}] SUKCES: Pomyślnie ustawiono tryb Isolated.")
-                else: 
-                    logger.info(f"[{symbol}] jest już w trybie Isolated. OK.")
-
-            except Exception as e:
-                logger.critical(f"[{symbol}] Nieoczekiwany, krytyczny błąd podczas konfiguracji: {e}", exc_info=True)
-                all_successful = False
-        
-        if all_successful:
-            logger.info("--- ZAKOŃCZONO SUKCESEM KONFIGURACJĘ KONTRAKTÓW NA BYBIT ---")
+        if firebase_ok and bigquery_ok:
+            app.config['INITIALIZATION_SUCCESS'] = True
+            logger.info("Aplikacja Flask [bot_service] została pomyślnie skonfigurowana.")
         else:
-            logger.critical("--- KONFIGURACJA KONTRAKTÓW NA BYBIT ZAKOŃCZONA BŁĘDAMI ---")
-            
-        return all_successful
-    except Exception as e:
-        logger.critical(f"[DIAGNOSTYKA] Błąd na poziomie całej funkcji configure_bybit_account: {e}", exc_info=True)
-        return False
+            app.config['INITIALIZATION_SUCCESS'] = False
+            reason = "Failed to initialize Firebase or BigQuery."
+            app.config['INITIALIZATION_FAILURE_REASON'] = reason
+            logger.critical(f"Krytyczny błąd podczas inicjalizacji. Powód: {reason}")
 
 def register_endpoints(app: Flask):
-    # Ta funkcja jest w porządku, zostawiamy bez zmian
+    """Rejestruje wszystkie endpointy aplikacji."""
     @app.route('/')
     def health_check():
         return "Trading Bot Service is running.", 200
@@ -109,9 +51,6 @@ def register_endpoints(app: Flask):
 
     @app.route('/run-bot-cycle', methods=['POST'])
     def run_bot_cycle_endpoint():
-        import bot_service.bot_logic as bot_logic_module
-        from bot_service.fetch_from_firestore import fetch_new_alerts_since, load_last_processed_timestamp, save_last_processed_timestamp
-
         cycle_id = str(uuid.uuid4())
         logger.info("--- ROZPOCZĘCIE CYKLU BOTA ---", extra={"json_fields": {"cycle_id": cycle_id}})
 
@@ -119,76 +58,20 @@ def register_endpoints(app: Flask):
              reason = app.config.get('INITIALIZATION_FAILURE_REASON', 'Unknown initialization error.')
              logger.error(f"Zatrzymano cykl, aplikacja nie zainicjalizowana. Powód: {reason}", extra={"json_fields": {"cycle_id": cycle_id}})
              return jsonify({"status": "error", "message": f"Service is unhealthy: {reason}"}), 503
-        
-        bybit_executor = app.config.get('BYBIT_EXECUTOR')
-        if not bybit_executor:
-            logger.error("Krytyczny błąd: BybitExecutor nie jest dostępny w konfiguracji aplikacji.", extra={"json_fields": {"cycle_id": cycle_id, "status": "error"}})
-            return jsonify({"status": "error", "message": "BybitExecutor not initialized"}), 500
-
         try:
             last_ts = load_last_processed_timestamp()
             new_alerts, new_ts = fetch_new_alerts_since(last_ts)
             if new_alerts:
                 logger.info(f"Przetwarzam {len(new_alerts)} nowych alertów.", extra={"json_fields": {"cycle_id": cycle_id}})
-                bot_logic_module.process_new_alerts(new_alerts)
+                process_new_alerts(new_alerts)
                 if new_ts and new_ts > last_ts:
                     save_last_processed_timestamp(new_ts)
             
-            bot_logic_module.run_trading_logic(bybit_executor)
+            # UWAGA: Ta funkcja będzie działać w trybie symulacji, tak jak pierwotnie
+            run_trading_logic()
 
             logger.info("--- ZAKOŃCZENIE CYKLU BOTA ---", extra={"json_fields": {"cycle_id": cycle_id, "status": "success"}})
             return jsonify({"status": "success", "cycle_id": cycle_id}), 200
         except Exception as e:
             logger.error(f"Krytyczny błąd w głównym cyklu bota: {e}", exc_info=True, extra={"json_fields": {"cycle_id": cycle_id, "status": "error"}})
             return jsonify({"status": "error", "message": str(e), "cycle_id": cycle_id}), 500
-
-# === POPRAWIONA FUNKCJA JEST TUTAJ ===
-# Zostawiamy tylko tę jedną, poprawną wersję.
-def initialize_app_services(app: Flask):
-    with app.app_context():
-        from bot_service.bigquery_logger import initialize_bigquery
-
-        logger.info("Rozpoczynam szybką inicjalizację aplikacji `bot_service`.")
-        
-        # Krok 1: Załaduj konfigurację
-        load_config()
-        
-        # Krok 2: Zainicjalizuj Firebase - to jest krytyczne
-        firebase_ok = initialize_firebase()
-        if not firebase_ok:
-            app.config['INITIALIZATION_SUCCESS'] = False
-            reason = "Firebase failed to initialize."
-            app.config['INITIALIZATION_FAILURE_REASON'] = reason
-            logger.critical(f"Krytyczny błąd podczas inicjalizacji: {reason}. Zatrzymuję dalsze uruchamianie usług.")
-            return # Zakończ funkcję natychmiast
-
-        # Krok 3: Inicjalizuj pozostałe usługi
-        bigquery_ok = initialize_bigquery()
-        trading_services_ok, executor = initialize_trading_services()
-        
-        bybit_config_ok = False 
-       
-        if executor:
-            app.config['BYBIT_EXECUTOR'] = executor
-            
-            logger.info("Uruchamiam jednorazową konfigurację konta Bybit podczas startu aplikacji.")
-            bybit_config_ok = configure_bybit_account(executor)
-            if not bybit_config_ok:
-                logger.critical("Konfiguracja konta Bybit nie powiodła się. Aplikacja będzie w stanie 'unhealthy'.")
-            else:
-                logger.info("Konfiguracja konta Bybit zakończona sukcesem.")
-        
-        # Ostateczna weryfikacja
-        if firebase_ok and bigquery_ok and trading_services_ok and bybit_config_ok:
-            app.config['INITIALIZATION_SUCCESS'] = True
-            logger.info("Wszystkie usługi, w tym konfiguracja Bybit, zainicjalizowane. Aplikacja gotowa do startu.")
-        else:
-            app.config['INITIALIZATION_SUCCESS'] = False
-            reasons = []
-            # Nie musimy już sprawdzać firebase_ok, bo zatrzymaliśmy się wcześniej
-            if not bigquery_ok: reasons.append("BigQuery failed")
-            if not trading_services_ok: reasons.append("BybitExecutor failed")
-            if not bybit_config_ok: reasons.append("Bybit account configuration failed")
-            final_reason = ", ".join(reasons)
-            app.config['INITIALIZATION_FAILURE_REASON'] = final_reason
-            logger.critical(f"Krytyczny błąd podczas inicjalizacji. Powód: {final_reason}")
