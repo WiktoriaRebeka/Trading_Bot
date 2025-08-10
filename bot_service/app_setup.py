@@ -67,7 +67,6 @@ def register_endpoints(app: Flask):
                 if new_ts and new_ts > last_ts:
                     save_last_processed_timestamp(new_ts)
             
-            # UWAGA: Ta funkcja będzie działać w trybie symulacji, tak jak pierwotnie
             run_trading_logic()
 
             logger.info("--- ZAKOŃCZENIE CYKLU BOTA ---", extra={"json_fields": {"cycle_id": cycle_id, "status": "success"}})
