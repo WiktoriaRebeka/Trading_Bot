@@ -13,6 +13,7 @@ import requests
 from requests.exceptions import RequestException
 
 from shared_lib import constants
+from shared_lib.config import config
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,12 @@ class BybitAPIError(Exception):
         self.ret_msg = ret_msg
         super().__init__(f"Bybit API Error: [Code: {ret_code}] {ret_msg}")
 
+def format_quantity(quantity: float, qty_step: str) -> str:
+    qty_decimal = Decimal(str(quantity))
+    step_decimal = Decimal(qty_step)
+    formatted_qty = qty_decimal.quantize(step_decimal, rounding=ROUND_DOWN)
+    return str(formatted_qty)
+
 class BybitExecutor:
     def __init__(self, api_key: str, api_secret: str):
         if not api_key or not api_secret:
@@ -29,22 +36,20 @@ class BybitExecutor:
         
         self.api_key: str = api_key
         self.api_secret: str = api_secret
-        self.base_url: str = constants.BYBIT_API_URL_V5
+        self.base_url: str = "https://api.bybit.com"
         self.session = requests.Session()
 
-    def _send_request(self, method: str, endpoint: str, params: Dict = None, payload: Dict = None) -> Dict[str, Any]:
+    def _send_request(self, method: str, endpoint: str, params: Optional[Dict] = None, payload: Optional[Dict] = None) -> Dict[str, Any]:
+        """Prywatna metoda do wysyłania podpisanych żądań do API Bybit V5."""
         full_url = self.base_url + endpoint
         timestamp = str(int(time.time() * 1000))
-        recv_window = "10000" 
+        recv_window = "10000"
         
-        if method.upper() == 'GET':
-            param_str = urlencode(sorted(params.items())) if params else ""
-            body_data = None
-        else: 
-            param_str = json.dumps(payload) if payload else ""
-            body_data = param_str 
-
-        to_sign = timestamp + self.api_key + recv_window + param_str
+        # Poprawna konstrukcja stringów do sygnatury
+        query_string = urlencode(sorted(params.items())) if params else ""
+        payload_string = json.dumps(payload) if payload else ""
+        
+        to_sign = timestamp + self.api_key + recv_window + query_string + payload_string
         signature = hmac.new(bytes(self.api_secret, "utf-8"), to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
         
         headers = {
@@ -52,37 +57,23 @@ class BybitExecutor:
             'X-B-API-TIMESTAMP': timestamp,
             'X-B-API-SIGN': signature,
             'X-B-API-RECV-WINDOW': recv_window,
+            'Content-Type': 'application/json',
         }
         
-        if method.upper() != 'GET':
-            headers['Content-Type'] = 'application/json'
-        
         try:
-            response = self.session.request(method, full_url, headers=headers, params=params, data=body_data, timeout=15)
+            response = self.session.request(method, full_url, headers=headers, params=params, data=payload_string, timeout=15)
             response.raise_for_status()
             data = response.json()
 
             if data.get("retCode") != 0:
-                logger.error(
-                    f"Bybit API zwróciło błąd. Endpoint: {endpoint}, "
-                    f"retCode: {data.get('retCode')}, retMsg: '{data.get('retMsg')}', "
-                    f"Pełna odpowiedź: {data}"
-                )
                 raise BybitAPIError(ret_code=data.get("retCode"), ret_msg=data.get("retMsg"))
             
             return data.get("result", {})
         except RequestException as e:
-            error_content = e.response.text if e.response else "Brak odpowiedzi od serwera (prawdopodobnie timeout)."
-            logger.error(
-                f"Błąd sieciowy podczas komunikacji z Bybit. Endpoint: {endpoint}, "
-                f"Typ błędu: {type(e).__name__}, Błąd: {e}. "
-                f"Odpowiedź serwera: {error_content}"
-            )
+            logger.error(f"Błąd sieciowy podczas komunikacji z Bybit. Endpoint: {endpoint}, Błąd: {e}")
             raise
-        except BybitAPIError:
-            raise
-        except Exception as e:
-            logger.critical(f"Nieoczekiwany błąd w _send_request: {e}", exc_info=True)
+        except BybitAPIError as e:
+            logger.error(f"Błąd API Bybit. Endpoint: {endpoint}, Code: {e.ret_code}, Msg: '{e.ret_msg}'")
             raise
 
     def get_instrument_info(self, symbol: str) -> Optional[Dict[str, Any]]:
@@ -184,9 +175,3 @@ class BybitExecutor:
                 return True
             logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się ustawić trybu Isolated Margin: {e}")
             return False
-
-def format_quantity(quantity: float, qty_step: str) -> str:
-    qty_decimal = Decimal(str(quantity))
-    step_decimal = Decimal(qty_step)
-    formatted_qty = qty_decimal.quantize(step_decimal, rounding=ROUND_DOWN)
-    return str(formatted_qty)
