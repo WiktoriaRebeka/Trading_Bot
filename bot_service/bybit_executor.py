@@ -45,10 +45,12 @@ class BybitExecutor:
         timestamp = str(int(time.time() * 1000))
         recv_window = "10000"
         
-        # Poprawna konstrukcja stringów do sygnatury
+        # === POPRAWKA TUTAJ ===
+        # Zawsze tworzymy oba stringi, nawet jeśli są puste.
         query_string = urlencode(sorted(params.items())) if params else ""
         payload_string = json.dumps(payload) if payload else ""
         
+        # Sygnatura jest tworzona z połączenia obu stringów, zgodnie z dokumentacją.
         to_sign = timestamp + self.api_key + recv_window + query_string + payload_string
         signature = hmac.new(bytes(self.api_secret, "utf-8"), to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
         
