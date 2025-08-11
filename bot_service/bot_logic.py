@@ -5,13 +5,10 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 
-# Importy bibliotek zewnętrznych
-from google.cloud import firestore
 from google.cloud.firestore_v1.document import DocumentSnapshot
 from pydantic import ValidationError
 from requests.exceptions import RequestException
 
-# Importy z własnego projektu (shared_lib)
 from shared_lib import constants
 from shared_lib.firebase_client import get_db, get_symbols_to_watch_from_config
 from shared_lib.leverage_calculator import get_all_calculations_for_alert
@@ -23,7 +20,6 @@ from shared_lib.models import (
     SetupData,
 )
 
-# Importy z własnego projektu (bot_service)
 from bot_service import state_manager
 from bot_service.bigquery_logger import log_trade_to_bigquery
 from bot_service.bybit_executor import (
@@ -34,14 +30,8 @@ from bot_service.bybit_executor import (
 
 logger = logging.getLogger(__name__)
 
-
-
-try:
-    bybit_executor = BybitExecutor()
-except (RuntimeError, ValueError) as e:
-    logger.critical(f"Nie można zainicjalizować BybitExecutor: {e}. Funkcjonalność handlowa będzie wyłączona.")
-    bybit_executor = None
-
+# === USUNIĘTA GLOBALNA INSTANCJA bybit_executor ===
+# Obiekt będzie przekazywany jako argument do funkcji, które go potrzebują.
 
 def _calculate_rr_analytics(entry_price: float, sl_price: float, extreme_price: float, direction: str) -> Dict[str, Any]:
     risk_diff = abs(entry_price - sl_price)
@@ -77,34 +67,27 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]]):
             )
             doc_ref = db.collection(constants.SETUP_COLLECTION).document(alert_data.symbol)
             doc_ref.set(new_setup.model_dump(by_alias=True))
-            logger.info(f"[{alert_data.symbol}] Zarejestrowano/zaktualizowano aktywny setup (tryb analityczny).")
+            logger.info(f"[{alert_data.symbol}] Zarejestrowano/zaktualizowano aktywny setup.")
         except ValidationError as e:
             logger.error(f"Błąd walidacji danych alertu: {e}", extra={"json_fields": {"alert_id": alert_dict.get('id')}})
         except Exception as e:
             logger.error(f"Nieoczekiwany błąd podczas przetwarzania alertu: {e}", exc_info=True, extra={"json_fields": {"alert_id": alert_dict.get('id')}})
 
 def finalize_trade(trade: OpenTradeData, closed_result: str, close_price: float):
-    """
-    Finalizuje transakcję. Dla LOSE od razu zapisuje do BQ. Dla WIN tylko tworzy ducha.
-    """
-    logger.info(f"--- [FINALIZACJA] --- [{trade.symbol}] | ID: {trade.trade_id} | Wynik: {closed_result}")
+    from bot_service.bigquery_logger import log_trade_to_bigquery
 
-    # --- LOGIKA DLA POZYCJI LOSE ---
+    logger.info(f"--- [FINALIZACJA] --- [{trade.symbol}] | ID: {trade.trade_id} | Wynik: {closed_result}")
     if closed_result == "LOSE":
         logger.info(f"[{trade.trade_id}] Pozycja przegrana. Analiza historyczna i zapis do BigQuery.")
-        
         end_time_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         historical_klines = state_manager.get_historical_klines(trade.symbol, trade.opened_at_ms, end_time_ms)
-        
         extreme_price = trade.entry_price
         if historical_klines:
             if trade.direction == 'LONG':
                 extreme_price = max(k['high'] for k in historical_klines)
             elif trade.direction == 'SHORT':
                 extreme_price = min(k['low'] for k in historical_klines)
-        
         analytics_data = _calculate_rr_analytics(trade.entry_price, trade.sl_price, extreme_price, trade.direction)
-        
         bq_data = {
             "trade_id": trade.trade_id, 
             "timestamp_entry": trade.opened_at_iso,
@@ -116,15 +99,11 @@ def finalize_trade(trade: OpenTradeData, closed_result: str, close_price: float)
         }
         bq_data.update(analytics_data)
         log_trade_to_bigquery(bq_data)
-
-    # --- LOGIKA DLA POZYCJI WIN ---
     elif closed_result == "WIN":
-        logger.info(f"[{trade.trade_id}] Pozycja wygrana. Tworzę 'ducha' do dalszej analizy. Zapis do BQ nastąpi po jej zakończeniu.")
-        # NIE ROBIMY WSTĘPNEGO ZAPISU DO BQ!
+        logger.info(f"[{trade.trade_id}] Pozycja wygrana. Tworzę 'ducha' do dalszej analizy.")
         state_manager.create_analyzed_trade(trade)
 
-def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSnapshot]):
-    """Przetwarza aktywne setupy w poszukiwaniu wejść."""
+def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSnapshot], bybit_executor: BybitExecutor):
     if not active_setups: return
     logger.info(f"Sprawdzam {len(active_setups)} aktywnych setupów.")
     for setup_doc in active_setups:
@@ -149,6 +128,7 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
 
             entry_triggered = (direction == 'LONG' and latest_kline.low <= entry_level) or \
                               (direction == 'SHORT' and latest_kline.high >= entry_level)
+            
             if entry_triggered:
                 closed_result, close_price = None, None
                 if direction == 'LONG':
@@ -169,7 +149,7 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
                         entry_price=entry_level, sl_price=sl_price, tp_price=tp_price,
                         opened_at_ms=latest_kline.timestamp, opened_at_iso=entry_timestamp.isoformat(),
                         alert_data_snapshot=setup.alert_data.model_dump(by_alias=True),
-                        bybit_order_id="immediate_close_no_order" # Specjalny identyfikator dla tego przypadku
+                        bybit_order_id="immediate_close_no_order"
                     )
                     finalize_trade(fake_trade, closed_result, close_price)
                     try:
@@ -177,51 +157,34 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
                         transaction = db.transaction()
                         state_manager.update_setup_after_immediate_close_transactional(transaction, symbol, is_loss=(closed_result == "LOSE"))
                     except Exception as ex:
-                        logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD TRANSAKCJI NATYCHMIASTOWEGO ZAMKNIĘCIA: {ex}", exc_info=True)
+                        logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD TRANSAKCJI: {ex}", exc_info=True)
                 else:
-                    # --- POCZĄTEK NOWEJ LOGIKI WYKONAWCZEJ ---
-                    if not bybit_executor:
-                        logger.error(f"[{symbol}] Pomijam próbę otwarcia pozycji, ponieważ BybitExecutor nie jest dostępny.")
-                        continue
-
                     logger.info(f"--- [DECYZJA: WEJŚCIE {ob_type}] --- [{symbol}] | Cena: {entry_level} | Rozpoczynam proces składania zlecenia.")
                     
-                    # Krok 1: Obliczenie wymaganej dźwigni
                     leverage_calcs = get_all_calculations_for_alert(setup.alert_data)
                     required_leverage = leverage_calcs.get('required_leverage')
 
                     if not required_leverage or required_leverage < 1:
-                        logger.warning(f"[{symbol}] Zlecenie odrzucone. Wymagana dźwignia ({required_leverage}) jest nieprawidłowa lub ryzyko jest zbyt duże.")
+                        logger.warning(f"[{symbol}] Zlecenie odrzucone. Wymagana dźwignia ({required_leverage}) jest nieprawidłowa.")
                         continue
 
                     try:
-                        # Krok 2: Weryfikacja maksymalnej dźwigni i precyzji na giełdzie
                         instrument_info = bybit_executor.get_instrument_info(symbol)
                         if not instrument_info:
-                            logger.error(f"[{symbol}] Nie udało się pobrać informacji o instrumencie. Przerywam otwieranie pozycji.")
+                            logger.error(f"[{symbol}] Nie udało się pobrać informacji o instrumencie. Przerywam.")
                             continue
                         
                         max_leverage = instrument_info['max_leverage']
                         qty_step = instrument_info['qty_step']
-
-                        # Krok 3: Wybór ostatecznej dźwigni
                         final_leverage = min(required_leverage, max_leverage)
-                        logger.info(f"[{symbol}] Dźwignia: Wymagana={required_leverage}x, Max giełdy={max_leverage}x. Wybrano: {final_leverage}x.")
-
-                        # Krok 4: Obliczenie i sformatowanie wielkości zlecenia (10 USD / cena wejścia)
-                   
-                        position_value = 10.0 * final_leverage
-                        # Obliczamy wielkość (qty) na podstawie wartości pozycji i ceny wejścia
-                        raw_qty = position_value / entry_level
+                        
+                        raw_qty = 10.0 / entry_level
                         formatted_qty = format_quantity(raw_qty, qty_step)
 
-                        logger.info(f"[{symbol}] Obliczenia pozycji: Margin=10.00 USD, Wartość pozycji={position_value:.2f} USD, Qty={formatted_qty}")
-                                                
                         if float(formatted_qty) <= 0:
                             logger.error(f"[{symbol}] Obliczona wielkość zlecenia ({formatted_qty}) jest zerowa. Przerywam.")
                             continue
 
-                        # Krok 5: Złożenie zlecenia
                         order_params = {
                             "symbol": symbol, "side": direction, "price": entry_level,
                             "qty": formatted_qty, "leverage": final_leverage,
@@ -229,7 +192,6 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
                         }
                         order_id = bybit_executor.place_limit_order(order_params)
 
-                        # Krok 6: Zapis do Firestore TYLKO po pomyślnym złożeniu zlecenia
                         if order_id:
                             trade_id = str(uuid.uuid4())
                             logger.info(f"[{symbol}] Zlecenie pomyślnie wysłane. Tworzę dokument w open_trades z trade_id: {trade_id} i bybit_order_id: {order_id}")
@@ -239,20 +201,18 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
                                 alert_data=setup.alert_data, bybit_order_id=order_id
                             )
                         else:
-                            logger.error(f"[{symbol}] Nie udało się uzyskać ID zlecenia od Bybit. Pozycja nie zostanie utworzona w Firestore.")
+                            logger.error(f"[{symbol}] Nie udało się uzyskać ID zlecenia od Bybit.")
 
                     except (BybitAPIError, RequestException) as e:
-                        logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD podczas interakcji z API Bybit. Operacja otwarcia pozycji przerwana. Błąd: {e}")
+                        logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD podczas interakcji z API Bybit: {e}")
                     except Exception as e:
                         logger.critical(f"[{symbol}] Nieoczekiwany błąd w logice otwierania pozycji: {e}", exc_info=True)
-                    # --- KONIEC NOWEJ LOGIKI WYKONAWCZEJ ---
         except ValidationError as e:
             logger.error(f"Błąd walidacji danych setupu dla {symbol}: {e}")
         except Exception as e:
             logger.error(f"Błąd podczas sprawdzania wejścia dla {symbol}: {e}", exc_info=True)
 
 def _handle_manage_open_trades(klines_data: Dict[str, Kline], open_trades: List[DocumentSnapshot]):
-    """Zarządza otwartymi pozycjami, sprawdza warunki zamknięcia i inicjuje proces finalizacji."""
     if not open_trades: return
     logger.info(f"Zarządzam {len(open_trades)} otwartymi pozycjami.")
     for trade_doc in open_trades:
@@ -275,8 +235,6 @@ def _handle_manage_open_trades(klines_data: Dict[str, Kline], open_trades: List[
             if closed_result:
                 logger.info(f"--- [DECYZJA: ZAMKNIĘCIE] --- [{trade.symbol}] | ID: {trade_id} | Wynik: {closed_result}")
                 finalize_trade(trade, closed_result, close_price)
-                
-                # --- POPRAWIONE WYWOŁANIE TRANSAKCJI ---
                 try:
                     db = get_db()
                     transaction = db.transaction()
@@ -289,24 +247,16 @@ def _handle_manage_open_trades(klines_data: Dict[str, Kline], open_trades: List[
         except Exception as e:
             logger.error(f"Nieoczekiwany błąd podczas monitorowania pozycji {trade_id}: {e}", exc_info=True)
 
-
 def _handle_post_mortem_analysis(analyzed_trades: List[DocumentSnapshot], klines_data: Dict[str, Kline]):
-    """
-    Analizuje duchy. Po zakończeniu analizy, wstawia JEDEN, finalny rekord do BigQuery.
-    """
     if not analyzed_trades:
         return
-    
-    from bot_service.bigquery_logger import log_trade_to_bigquery # Zmieniamy na log_trade_to_bigquery
-    
+    from bot_service.bigquery_logger import log_trade_to_bigquery
     logger.info(f"[ANALIZA DUCHA] Rozpoczynam analizę dla {len(analyzed_trades)} 'duchów'.")
-    
     for trade_doc in analyzed_trades:
         trade_id = trade_doc.id
         try:
             analysis_trade = AnalyzedTradeData.model_validate(trade_doc.to_dict())
             symbol = analysis_trade.symbol
-            
             latest_kline = klines_data.get(symbol)
             if not latest_kline:
                 continue
@@ -326,21 +276,18 @@ def _handle_post_mortem_analysis(analyzed_trades: List[DocumentSnapshot], klines
             if analysis_trade.direction == 'LONG':
                 if latest_kline.low <= analysis_trade.original_sl: is_analysis_finished, reason = True, "osiągnięto SL"
                 elif analysis_trade.original_tp_5_0 and latest_kline.high >= analysis_trade.original_tp_5_0: is_analysis_finished, reason = True, "osiągnięto TP5"
-            else: # SHORT
+            else: 
                 if latest_kline.high >= analysis_trade.original_sl: is_analysis_finished, reason = True, "osiągnięto SL"
                 elif analysis_trade.original_tp_5_0 and latest_kline.low <= analysis_trade.original_tp_5_0: is_analysis_finished, reason = True, "osiągnięto TP5"
 
             if is_analysis_finished:
                 logger.info(f"[ANALIZA DUCHA][{trade_id}] ZAKOŃCZONO ANALIZĘ ({reason}). Zapisuję finalny rekord do BQ.")
-                
                 final_analytics = _calculate_rr_analytics(
                     analysis_trade.entry_price, 
                     analysis_trade.original_sl, 
                     analysis_trade.last_known_extreme_price, 
                     analysis_trade.direction
                 )
-                
-                # Tworzymy PEŁNY, finalny obiekt do zapisu
                 final_bq_data = {
                     "trade_id": trade_id,
                     "timestamp_entry": datetime.fromtimestamp(analysis_trade.opened_at_ms / 1000, tz=timezone.utc).isoformat(),
@@ -351,15 +298,12 @@ def _handle_post_mortem_analysis(analyzed_trades: List[DocumentSnapshot], klines
                     "ob_type": analysis_trade.ob_type 
                 }
                 final_bq_data.update(final_analytics)
-                
-                # Używamy INSERT (log_trade_to_bigquery) zamiast UPDATE
                 log_trade_to_bigquery(final_bq_data)
                 state_manager.remove_analyzed_trade(trade_id)
-
         except Exception as e: 
             logger.error(f"[ANALIZA DUCHA][{trade_id}] Błąd: {e}", exc_info=True)
 
-def run_trading_logic():
+def run_trading_logic(bybit_executor: BybitExecutor):
     logger.info("Rozpoczynam główną pętlę logiki tradingowej.")
     symbols_to_watch = set(get_symbols_to_watch_from_config())
     open_trades_docs = list(state_manager.get_all_open_trades())
@@ -381,6 +325,6 @@ def run_trading_logic():
     }
     active_setups_docs = list(state_manager.get_all_active_setups())
     _handle_post_mortem_analysis(analyzed_trades_docs, klines_data)
-    _handle_setups(klines_data, active_setups_docs)
+    _handle_setups(klines_data, active_setups_docs, bybit_executor)
     _handle_manage_open_trades(klines_data, open_trades_docs)
     logger.info("Zakończono główną pętlę logiki tradingowej.")

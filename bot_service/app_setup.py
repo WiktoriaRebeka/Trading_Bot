@@ -3,11 +3,13 @@
 import logging
 import uuid
 from flask import Flask, jsonify
+from typing import Optional, Tuple
 
-# Importujemy tylko to, co jest absolutnie konieczne
 from shared_lib.config_loader import load_config
 from shared_lib.firebase_client import initialize_firebase
+from shared_lib.config import config 
 from bot_service.bigquery_logger import initialize_bigquery
+# Zmieniamy importy, aby przekazywać executor jako argument
 from bot_service.bot_logic import process_new_alerts, run_trading_logic
 from bot_service.fetch_from_firestore import (
     load_last_processed_timestamp, 
@@ -17,26 +19,51 @@ from bot_service.fetch_from_firestore import (
 
 logger = logging.getLogger(__name__)
 
+def initialize_trading_services() -> Tuple[bool, Optional['BybitExecutor']]:
+    from bot_service.bybit_executor import BybitExecutor
+    logger.info("Inicjalizacja usług tradingowych...")
+    try:
+        # Używamy obiektu config, który został załadowany wcześniej
+        if not config.BYBIT_API_KEY or not config.BYBIT_API_SECRET:
+            raise ValueError("Klucze API Bybit nie są ustawione w konfiguracji.")
+        
+        executor_instance = BybitExecutor(
+            api_key=config.BYBIT_API_KEY,
+            api_secret=config.BYBIT_API_SECRET
+        )
+        logger.info("BybitExecutor pomyślnie zainicjalizowany.")
+        return True, executor_instance
+    except (RuntimeError, ValueError) as e:
+        logger.critical(f"Nie można zainicjalizować BybitExecutor: {e}")
+        return False, None
+
 def initialize_app_services(app: Flask):
-    """Prosta i niezawodna inicjalizacja podstawowych usług."""
+    """Inicjalizuje wszystkie usługi i przechowuje je w kontekście aplikacji."""
     with app.app_context():
-        logger.info("Rozpoczynam prostą inicjalizację aplikacji bot_service.")
+        logger.info("Rozpoczynam inicjalizację aplikacji bot_service.")
         load_config()
         
         firebase_ok = initialize_firebase()
         bigquery_ok = initialize_bigquery()
-
-        if firebase_ok and bigquery_ok:
+        trading_services_ok, executor = initialize_trading_services()
+        
+        if executor:
+            app.config['BYBIT_EXECUTOR'] = executor
+       
+        if firebase_ok and bigquery_ok and trading_services_ok:
             app.config['INITIALIZATION_SUCCESS'] = True
-            logger.info("Aplikacja Flask [bot_service] została pomyślnie skonfigurowana.")
+            logger.info("Wszystkie kluczowe usługi zainicjalizowane. Aplikacja gotowa do startu.")
         else:
             app.config['INITIALIZATION_SUCCESS'] = False
-            reason = "Failed to initialize Firebase or BigQuery."
-            app.config['INITIALIZATION_FAILURE_REASON'] = reason
-            logger.critical(f"Krytyczny błąd podczas inicjalizacji. Powód: {reason}")
+            reasons = []
+            if not firebase_ok: reasons.append("Firebase failed")
+            if not bigquery_ok: reasons.append("BigQuery failed")
+            if not trading_services_ok: reasons.append("BybitExecutor failed")
+            final_reason = ", ".join(reasons)
+            app.config['INITIALIZATION_FAILURE_REASON'] = final_reason
+            logger.critical(f"Krytyczny błąd podczas inicjalizacji. Powód: {final_reason}")
 
 def register_endpoints(app: Flask):
-    """Rejestruje wszystkie endpointy aplikacji."""
     @app.route('/')
     def health_check():
         return "Trading Bot Service is running.", 200
@@ -58,6 +85,12 @@ def register_endpoints(app: Flask):
              reason = app.config.get('INITIALIZATION_FAILURE_REASON', 'Unknown initialization error.')
              logger.error(f"Zatrzymano cykl, aplikacja nie zainicjalizowana. Powód: {reason}", extra={"json_fields": {"cycle_id": cycle_id}})
              return jsonify({"status": "error", "message": f"Service is unhealthy: {reason}"}), 503
+        
+        bybit_executor = app.config.get('BYBIT_EXECUTOR')
+        if not bybit_executor:
+            logger.error("Krytyczny błąd: BybitExecutor nie jest dostępny w konfiguracji aplikacji.")
+            return jsonify({"status": "error", "message": "BybitExecutor not initialized"}), 500
+
         try:
             last_ts = load_last_processed_timestamp()
             new_alerts, new_ts = fetch_new_alerts_since(last_ts)
@@ -67,7 +100,8 @@ def register_endpoints(app: Flask):
                 if new_ts and new_ts > last_ts:
                     save_last_processed_timestamp(new_ts)
             
-            run_trading_logic()
+            # Przekazujemy executor jako argument
+            run_trading_logic(bybit_executor)
 
             logger.info("--- ZAKOŃCZENIE CYKLU BOTA ---", extra={"json_fields": {"cycle_id": cycle_id, "status": "success"}})
             return jsonify({"status": "success", "cycle_id": cycle_id}), 200
