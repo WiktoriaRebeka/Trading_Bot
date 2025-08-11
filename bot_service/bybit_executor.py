@@ -5,10 +5,9 @@ import time
 import hmac
 import hashlib
 import json
-from typing import Optional, Dict, Any
-from decimal import Decimal, ROUND_DOWN
+from typing import Dict, Any, Optional
 from urllib.parse import urlencode
-
+from decimal import Decimal, ROUND_DOWN
 import requests
 from requests.exceptions import RequestException
 
@@ -39,18 +38,27 @@ class BybitExecutor:
         self.base_url: str = "https://api.bybit.com"
         self.session = requests.Session()
 
-    def _send_request(self, method: str, endpoint: str, params: Optional[Dict] = None, payload: Optional[Dict] = None) -> Dict[str, Any]:
-        """Prywatna metoda do wysyłania podpisanych żądań do API Bybit V5."""
-        full_url = self.base_url + endpoint
+    def _send_request(self, method: str, endpoint: str, params: Optional[Dict] = None) -> Dict[str, Any]:
+        """
+        Uproszczona i poprawiona metoda do wysyłania podpisanych żądań do API Bybit V5.
+        Teraz wszystkie parametry są przekazywane w `params`, a metoda sama decyduje,
+        czy umieścić je w URL (GET) czy w ciele (POST).
+        """
         timestamp = str(int(time.time() * 1000))
         recv_window = "10000"
         
-        # === POPRAWKA TUTAJ ===
-        # Zawsze tworzymy oba stringi, nawet jeśli są puste.
-        query_string = urlencode(sorted(params.items())) if params else ""
-        payload_string = json.dumps(payload) if payload else ""
+        # Przygotowujemy parametry do sygnatury i żądania
+        if params:
+            params = dict(sorted(params.items())) # Sortujemy alfabetycznie
         
-        # Sygnatura jest tworzona z połączenia obu stringów, zgodnie z dokumentacją.
+        # === OSTATECZNA POPRAWKA SYGNATURY ===
+        if method.upper() == 'GET':
+            query_string = urlencode(params) if params else ""
+            payload_string = ""
+        else: # POST
+            query_string = ""
+            payload_string = json.dumps(params) if params else ""
+
         to_sign = timestamp + self.api_key + recv_window + query_string + payload_string
         signature = hmac.new(bytes(self.api_secret, "utf-8"), to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
         
@@ -62,8 +70,14 @@ class BybitExecutor:
             'Content-Type': 'application/json',
         }
         
+        full_url = self.base_url + endpoint
+        
         try:
-            response = self.session.request(method, full_url, headers=headers, params=params, data=payload_string, timeout=15)
+            if method.upper() == 'GET':
+                response = self.session.get(full_url, headers=headers, params=params, timeout=15)
+            else: # POST
+                response = self.session.post(full_url, headers=headers, data=payload_string, timeout=15)
+            
             response.raise_for_status()
             data = response.json()
 
@@ -79,61 +93,31 @@ class BybitExecutor:
             raise
 
     def get_instrument_info(self, symbol: str) -> Optional[Dict[str, Any]]:
-        logger.info(f"[{symbol}] Pobieranie informacji o instrumencie z Bybit.")
         api_symbol = symbol.replace('.P', '')
+        params = {"category": "linear", "symbol": api_symbol}
         try:
-            result = self._send_request(
-                "GET",
-                "/v5/market/instruments-info",
-                params={"category": "linear", "symbol": api_symbol}
-            )
+            result = self._send_request("GET", "/v5/market/instruments-info", params=params)
             if result and result.get('list'):
                 instrument_data = result['list'][0]
                 leverage_filter = instrument_data.get('leverageFilter', {})
                 lot_size_filter = instrument_data.get('lotSizeFilter', {})
-                info = {
+                return {
                     "max_leverage": int(float(leverage_filter.get('maxLeverage', '1'))),
                     "qty_step": lot_size_filter.get('qtyStep', '0.001')
                 }
-                return info
             return None
-        except (RequestException, BybitAPIError):
-            return None
-
-    def get_position_info(self, symbol: str) -> Optional[Dict[str, Any]]:
-        logger.info(f"[{symbol}] Pobieranie informacji o pozycji z Bybit.")
-        api_symbol = symbol.replace('.P', '')
-        try:
-            result = self._send_request(
-                "GET",
-                "/v5/position/list",
-                params={"category": "linear", "symbol": api_symbol}
-            )
-            if result and result.get('list') and len(result['list']) > 0:
-                return result['list'][0]
-            return {}
         except (RequestException, BybitAPIError):
             return None
         
     def place_limit_order(self, order_params: Dict[str, Any]) -> Optional[str]:
         symbol = order_params.get('symbol')
-        if not symbol:
-            logger.error("Brak 'symbol' w parametrach zlecenia.")
-            return None
-
         api_symbol = symbol.replace('.P', '')
-        
         side_map = {"LONG": "Buy", "SHORT": "Sell"}
-        side_value = str(order_params.get('side', '')).upper()
         
-        if side_value not in side_map:
-            logger.error(f"[{symbol}] Nieprawidłowa wartość 'side': {order_params.get('side')}. Oczekiwano 'LONG' lub 'SHORT'.")
-            return None
-
         payload = {
             "category": "linear",
             "symbol": api_symbol,
-            "side": side_map[side_value],
+            "side": side_map[order_params['side']],
             "orderType": "Limit",
             "qty": str(order_params['qty']),
             "price": str(order_params['price']),
@@ -145,35 +129,12 @@ class BybitExecutor:
         
         logger.info(f"[{symbol}] Wysyłanie zlecenia do Bybit z parametrami: {payload}")
         try:
-            result = self._send_request("POST", "/v5/order/create", payload=payload)
+            result = self._send_request("POST", "/v5/order/create", params=payload)
             order_id = result.get("orderId")
             if order_id:
                 logger.info(f"[{symbol}] Zlecenie pomyślnie złożone. Order ID: {order_id}")
                 return order_id
-            else:
-                logger.error(f"[{symbol}] API Bybit nie zwróciło orderId, chociaż nie było wyjątku. Odpowiedź: {result}")
-                return None
-        except (RequestException, BybitAPIError) as e:
-            logger.error(f"[{symbol}] Nie udało się złożyć zlecenia z powodu błędu API: {e}")
+            logger.error(f"[{symbol}] API Bybit nie zwróciło orderId. Odpowiedź: {result}")
             return None
-
-    def set_isolated_margin(self, symbol: str, leverage: int) -> bool:
-        logger.info(f"[{symbol}] Próba ustawienia trybu Isolated Margin z dźwignią {leverage}x.")
-        api_symbol = symbol.replace('.P', '')
-        leverage_str = str(leverage)
-        payload = {
-            "category": "linear",
-            "symbol": api_symbol,
-            "buyLeverage": leverage_str,
-            "sellLeverage": leverage_str,
-            "tradeMode": 1
-        }
-        try:
-            self._send_request("POST", "/v5/position/set-leverage", payload=payload)
-            return True
-        except (RequestException, BybitAPIError) as e:
-            if isinstance(e, BybitAPIError) and e.ret_code == 110043:
-                logger.warning(f"[{symbol}] Dźwignia i tryb margin są już poprawnie ustawione.")
-                return True
-            logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się ustawić trybu Isolated Margin: {e}")
-            return False
+        except (RequestException, BybitAPIError):
+            return None
