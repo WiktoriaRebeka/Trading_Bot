@@ -47,11 +47,9 @@ class BybitExecutor:
         timestamp = str(int(time.time() * 1000))
         recv_window = "10000"
         
-        # Przygotowujemy parametry do sygnatury i żądania
         if params:
-            params = dict(sorted(params.items())) # Sortujemy alfabetycznie
+            params = dict(sorted(params.items()))
         
-        # === OSTATECZNA POPRAWKA SYGNATURY ===
         if method.upper() == 'GET':
             query_string = urlencode(params) if params else ""
             payload_string = ""
