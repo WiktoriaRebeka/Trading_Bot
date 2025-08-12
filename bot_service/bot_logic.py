@@ -103,7 +103,6 @@ def finalize_trade(trade: OpenTradeData, closed_result: str, close_price: float)
         logger.info(f"[{trade.trade_id}] Pozycja wygrana. Tworzę 'ducha' do dalszej analizy.")
         state_manager.create_analyzed_trade(trade)
 
-# W pliku bot_service/bot_logic.py
 def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSnapshot], bybit_executor: BybitExecutor):
     if not active_setups: return
     logger.info(f"Sprawdzam {len(active_setups)} aktywnych setupów.")
@@ -142,7 +141,23 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
                 ob_type = "Fresh OB" if setup.entry_attempts == 0 else "Used OB"
                 
                 if closed_result:
-                    # ... (logika dla natychmiastowego zamknięcia bez zmian)
+                    trade_id = str(uuid.uuid4())
+                    logger.info(f"--- [WEJŚCIE I ZAMKNIĘCIE W 1 MIN] --- [{symbol}] | Wynik: {closed_result} | ID: {trade_id}")
+                    entry_timestamp = datetime.fromtimestamp(latest_kline.timestamp / 1000, tz=timezone.utc)
+                    fake_trade = OpenTradeData(
+                        trade_id=trade_id, symbol=symbol, direction=direction, ob_type=ob_type,
+                        entry_price=entry_level, sl_price=sl_price, tp_price=tp_price,
+                        opened_at_ms=latest_kline.timestamp, opened_at_iso=entry_timestamp.isoformat(),
+                        alert_data_snapshot=setup.alert_data.model_dump(by_alias=True),
+                        bybit_order_id="immediate_close_no_order"
+                    )
+                    finalize_trade(fake_trade, closed_result, close_price)
+                    try:
+                        db = get_db()
+                        transaction = db.transaction()
+                        state_manager.update_setup_after_immediate_close_transactional(transaction, symbol, is_loss=(closed_result == "LOSE"))
+                    except Exception as ex:
+                        logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD TRANSAKCJI: {ex}", exc_info=True)
                 else:
                     logger.info(f"--- [DECYZJA: WEJŚCIE {ob_type}] --- [{symbol}] | Cena: {entry_level} | Rozpoczynam proces składania zlecenia.")
                     
@@ -161,31 +176,19 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
                         
                         max_leverage = instrument_info['max_leverage']
                         qty_step = instrument_info['qty_step']
-                        min_order_qty = instrument_info['min_order_qty']
                         final_leverage = min(required_leverage, max_leverage)
                         
-                        # === OSTATECZNA, POPRAWNA LOGIKA OBLICZANIA QTY ===
-                        # 1. Obliczamy docelową ilość dla pozycji o wartości 10 USDT
-                        target_qty = 10.0 / entry_level
-                        
-                        # 2. Sprawdzamy, czy nasza docelowa ilość jest większa niż minimum giełdowe
-                        if target_qty < min_order_qty:
-                            logger.warning(f"[{symbol}] Docelowa ilość ({target_qty:.6f}) jest mniejsza niż minimum giełdowe ({min_order_qty}). Używam minimalnej ilości.")
-                            final_qty = min_order_qty
-                        else:
-                            final_qty = target_qty
-                        
-                        # 3. Formatujemy ostateczną ilość zgodnie z krokiem
-                        formatted_qty = format_quantity(final_qty, qty_step)
+                        raw_qty = 10.0 / entry_level
+                        formatted_qty = format_quantity(raw_qty, qty_step)
 
                         if float(formatted_qty) <= 0:
-                            logger.error(f"[{symbol}] Obliczona wielkość zlecenia po sformatowaniu ({formatted_qty}) jest zerowa. Przerywam.")
+                            logger.error(f"[{symbol}] Obliczona wielkość zlecenia ({formatted_qty}) jest zerowa. Przerywam.")
                             continue
 
                         order_params = {
-                            "symbol": symbol, "side": direction, "price": str(entry_level),
-                            "qty": formatted_qty, "leverage": str(final_leverage),
-                            "takeProfit": str(setup.alert_data.tp_2_0), "stopLoss": str(sl_price)
+                            "symbol": symbol, "side": direction, "price": entry_level,
+                            "qty": formatted_qty, "leverage": final_leverage,
+                            "takeProfit": setup.alert_data.tp_2_0, "stopLoss": sl_price
                         }
                         order_id = bybit_executor.place_limit_order(order_params)
 
