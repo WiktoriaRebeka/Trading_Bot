@@ -35,14 +35,14 @@ class BybitExecutor:
         
         self.api_key: str = api_key
         self.api_secret: str = api_secret
+        # === POPRAWKA 1: Upewniamy się, że base_url jest poprawny ===
         self.base_url: str = "https://api.bybit.com"
         self.session = requests.Session()
 
     def _send_request(self, method: str, endpoint: str, params: Optional[Dict] = None) -> Dict[str, Any]:
         """
-        Uproszczona i poprawiona metoda do wysyłania podpisanych żądań do API Bybit V5.
-        Teraz wszystkie parametry są przekazywane w `params`, a metoda sama decyduje,
-        czy umieścić je w URL (GET) czy w ciele (POST).
+        OSTATECZNA POPRAWIONA WERSJA.
+        Używa `json=` dla zapytań POST dla większej niezawodności.
         """
         timestamp = str(int(time.time() * 1000))
         recv_window = "10000"
@@ -74,7 +74,8 @@ class BybitExecutor:
             if method.upper() == 'GET':
                 response = self.session.get(full_url, headers=headers, params=params, timeout=15)
             else: # POST
-                response = self.session.post(full_url, headers=headers, data=payload_string, timeout=15)
+                # === POPRAWKA 2: Używamy `json=params` zamiast `data=payload_string` ===
+                response = self.session.post(full_url, headers=headers, json=params, timeout=15)
             
             response.raise_for_status()
             data = response.json()
