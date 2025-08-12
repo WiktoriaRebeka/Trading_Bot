@@ -9,25 +9,22 @@ logger = logging.getLogger(__name__)
 
 def load_config():
     """
-    Ładuje konfigurację w zależności od środowiska.
-    W Cloud Run zmienne są już wstrzyknięte przez konfigurację YAML.
+    Ładuje konfigurację. W Cloud Run zmienne są już wstrzyknięte przez platformę.
     Lokalnie, ładuje je z pliku .env.
     """
     if 'K_SERVICE' not in os.environ:
-        logger.warning("Nie wykryto zmiennej K_SERVICE. Zakładam środowisko lokalne. Ładowanie konfiguracji z pliku .env.")
+        logger.info("Środowisko lokalne. Ładowanie konfiguracji z pliku .env.")
         _load_from_dotenv()
     else:
-        logger.info(f"Wykryto środowisko Cloud Run (K_SERVICE={os.environ['K_SERVICE']}). Zmienne środowiskowe są wstrzykiwane przez platformę.")
+        logger.info("Środowisko Cloud Run. Zmienne środowiskowe powinny być już dostępne.")
   
     config.load()
-    logger.info("Obiekt konfiguracyjny został zaktualizowany.")
 
 def _load_from_dotenv():
     """Ładuje konfigurację z lokalnego pliku .env."""
     try:
-      
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        project_root = os.path.dirname(current_dir)
+        # Znajduje plik .env w głównym katalogu projektu
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         dotenv_path = os.path.join(project_root, '.env')
         
         if os.path.exists(dotenv_path):
