@@ -1,10 +1,21 @@
 # Lokalizacja: /cloudbuild-bot.yaml
 
+
 steps:
 - name: 'gcr.io/cloud-builders/docker'
-  args: ['build', '-t', 'europe-central2-docker.pkg.dev/$PROJECT_ID/trading-bot-image/trading-bot-service:$SHORT_SHA', '--file', 'bot_service/Dockerfile', '.']
+  args: 
+    - 'build'
+    - '-t'
+    - 'europe-central2-docker.pkg.dev/$PROJECT_ID/trading-bot-image/trading-bot-service:$SHORT_SHA'
+    - '--file'
+    - 'bot_service/Dockerfile'
+    - '.'
+
 - name: 'gcr.io/cloud-builders/docker'
-  args: ['push', 'europe-central2-docker.pkg.dev/$PROJECT_ID/trading-bot-image/trading-bot-service:$SHORT_SHA']
+  args: 
+    - 'push'
+    - 'europe-central2-docker.pkg.dev/$PROJECT_ID/trading-bot-image/trading-bot-service:$SHORT_SHA'
+
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
   entrypoint: gcloud
   args:
@@ -24,7 +35,11 @@ steps:
     - '--vpc-egress'
     - 'all-traffic'
     - '--set-env-vars=GCP_PROJECT=$PROJECT_ID'
+    - '--update-secrets'
+    - 'BYBIT_API_KEY=bybit-api-key:latest,BYBIT_API_SECRET=bybit-api-secret:latest'
+
 images:
 - 'europe-central2-docker.pkg.dev/$PROJECT_ID/trading-bot-image/trading-bot-service:$SHORT_SHA'
+
 options:
   logging: CLOUD_LOGGING_ONLY
