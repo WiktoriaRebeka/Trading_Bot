@@ -35,48 +35,43 @@ class BybitExecutor:
         
         self.api_key: str = api_key
         self.api_secret: str = api_secret
-        # === POPRAWKA 1: Upewniamy się, że base_url jest poprawny ===
         self.base_url: str = "https://api.bybit.com"
         self.session = requests.Session()
 
     def _send_request(self, method: str, endpoint: str, params: Optional[Dict] = None) -> Dict[str, Any]:
         """
         OSTATECZNA POPRAWIONA WERSJA.
-        Używa `json=` dla zapytań POST dla większej niezawodności.
+        Używa `requests.PreparedRequest` do zagwarantowania zgodności sygnatury.
         """
         timestamp = str(int(time.time() * 1000))
         recv_window = "10000"
         
-        if params:
-            params = dict(sorted(params.items()))
-        
+        # Przygotowujemy żądanie WSTĘPNIE, aby uzyskać finalną postać danych
+        req = requests.Request(method, self.base_url + endpoint)
         if method.upper() == 'GET':
+            req.params = params
+            prepared_req = self.session.prepare_request(req)
             query_string = urlencode(params) if params else ""
             payload_string = ""
         else: # POST
+            req.json = params
+            prepared_req = self.session.prepare_request(req)
             query_string = ""
-            payload_string = json.dumps(params) if params else ""
+            # Używamy ciała żądania przygotowanego przez `requests`
+            payload_string = prepared_req.body.decode('utf-8') if prepared_req.body else ""
 
         to_sign = timestamp + self.api_key + recv_window + query_string + payload_string
         signature = hmac.new(bytes(self.api_secret, "utf-8"), to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
         
-        headers = {
-            'X-B-API-KEY': self.api_key,
-            'X-B-API-TIMESTAMP': timestamp,
-            'X-B-API-SIGN': signature,
-            'X-B-API-RECV-WINDOW': recv_window,
-            'Content-Type': 'application/json',
-        }
-        
-        full_url = self.base_url + endpoint
+        # Dodajemy nagłówki uwierzytelniające do PRZYGOTOWANEGO żądania
+        prepared_req.headers['X-B-API-KEY'] = self.api_key
+        prepared_req.headers['X-B-API-TIMESTAMP'] = timestamp
+        prepared_req.headers['X-B-API-SIGN'] = signature
+        prepared_req.headers['X-B-API-RECV-WINDOW'] = recv_window
+        prepared_req.headers['Content-Type'] = 'application/json'
         
         try:
-            if method.upper() == 'GET':
-                response = self.session.get(full_url, headers=headers, params=params, timeout=15)
-            else: # POST
-                # === POPRAWKA 2: Używamy `json=params` zamiast `data=payload_string` ===
-                response = self.session.post(full_url, headers=headers, json=params, timeout=15)
-            
+            response = self.session.send(prepared_req, timeout=15)
             response.raise_for_status()
             data = response.json()
 
@@ -102,7 +97,8 @@ class BybitExecutor:
                 lot_size_filter = instrument_data.get('lotSizeFilter', {})
                 return {
                     "max_leverage": int(float(leverage_filter.get('maxLeverage', '1'))),
-                    "qty_step": lot_size_filter.get('qtyStep', '0.001')
+                    "qty_step": lot_size_filter.get('qtyStep', '0.001'),
+                    "min_order_qty": float(lot_size_filter.get('minOrderQty', '0.0'))
                 }
             return None
         except (RequestException, BybitAPIError):
