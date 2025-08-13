@@ -51,7 +51,7 @@ class BybitExecutor:
         if method.upper() == 'GET':
             req.params = params
             prepared_req = self.session.prepare_request(req)
-            query_string = urlencode(params) if params else ""
+            query_string = urlencode(params, doseq=True) if params else ""
             payload_string = ""
         else: # POST
             req.json = params

@@ -176,19 +176,27 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
                         
                         max_leverage = instrument_info['max_leverage']
                         qty_step = instrument_info['qty_step']
+                        min_order_qty = instrument_info['min_order_qty']
                         final_leverage = min(required_leverage, max_leverage)
                         
-                        raw_qty = 10.0 / entry_level
-                        formatted_qty = format_quantity(raw_qty, qty_step)
+                        target_qty = 10.0 / entry_level
+                        
+                        if target_qty < min_order_qty:
+                            logger.warning(f"[{symbol}] Docelowa ilość ({target_qty:.6f}) jest mniejsza niż minimum giełdowe ({min_order_qty}). Używam minimalnej ilości.")
+                            final_qty = min_order_qty
+                        else:
+                            final_qty = target_qty
+                        
+                        formatted_qty = format_quantity(final_qty, qty_step)
 
                         if float(formatted_qty) <= 0:
-                            logger.error(f"[{symbol}] Obliczona wielkość zlecenia ({formatted_qty}) jest zerowa. Przerywam.")
+                            logger.error(f"[{symbol}] Obliczona wielkość zlecenia po sformatowaniu ({formatted_qty}) jest zerowa. Przerywam.")
                             continue
 
                         order_params = {
-                            "symbol": symbol, "side": direction, "price": entry_level,
-                            "qty": formatted_qty, "leverage": final_leverage,
-                            "takeProfit": setup.alert_data.tp_2_0, "stopLoss": sl_price
+                            "symbol": symbol, "side": direction, "price": str(entry_level),
+                            "qty": formatted_qty, "leverage": str(final_leverage),
+                            "takeProfit": str(setup.alert_data.tp_2_0), "stopLoss": str(sl_price)
                         }
                         order_id = bybit_executor.place_limit_order(order_params)
 
@@ -211,6 +219,7 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
             logger.error(f"Błąd walidacji danych setupu dla {symbol}: {e}")
         except Exception as e:
             logger.error(f"Błąd podczas sprawdzania wejścia dla {symbol}: {e}", exc_info=True)
+           
 
 def _handle_manage_open_trades(klines_data: Dict[str, Kline], open_trades: List[DocumentSnapshot]):
     if not open_trades: return
