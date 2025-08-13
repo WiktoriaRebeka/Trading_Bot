@@ -6,9 +6,6 @@ import logging
 logger = logging.getLogger(__name__)
 
 class AppConfig:
-    """
-    Klasa przechowująca dynamicznie ładowaną konfigurację.
-    """
     def __init__(self):
         self.BYBIT_API_KEY: str | None = None
         self.BYBIT_API_SECRET: str | None = None
@@ -16,21 +13,21 @@ class AppConfig:
 
     def load(self):
         """
-        Ładuje konfigurację ze zmiennych środowiskowych.
+        Ładuje konfigurację bezpośrednio ze zmiennych środowiskowych.
         """
         self.BYBIT_API_KEY = os.getenv("BYBIT_API_KEY")
         self.BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET")
 
-        # Logowanie diagnostyczne
+        # OSTATECZNE LOGOWANIE DIAGNOSTYCZNE
         if self.BYBIT_API_KEY:
-            logger.info(f"Załadowano BYBIT_API_KEY (długość: {len(self.BYBIT_API_KEY)}).")
+            logger.info(f"Odczytano BYBIT_API_KEY. Długość: {len(self.BYBIT_API_KEY)}.")
         else:
-            logger.warning("Zmienna środowiskowa BYBIT_API_KEY nie została znaleziona lub jest pusta.")
+            logger.error("KRYTYCZNY BŁĄD: Zmienna środowiskowa BYBIT_API_KEY jest pusta lub nie istnieje!")
 
         if self.BYBIT_API_SECRET:
-            logger.info("Załadowano BYBIT_API_SECRET.")
+            logger.info("Odczytano BYBIT_API_SECRET.")
         else:
-            logger.warning("Zmienna środowiskowa BYBIT_API_SECRET nie została znaleziona lub jest pusta.")
+            logger.error("KRYTYCZNY BŁĄD: Zmienna środowiskowa BYBIT_API_SECRET jest pusta lub nie istnieje!")
         
         self.is_loaded = True
 
