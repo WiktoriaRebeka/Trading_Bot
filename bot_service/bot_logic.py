@@ -92,6 +92,7 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executo
         except Exception as e:
             logger.critical(f"Nieoczekiwany błąd w logice otwierania pozycji: {e}", exc_info=True)
 
+
 def _calculate_rr_analytics(entry_price: float, sl_price: float, extreme_price: float, direction: str) -> Dict[str, Any]:
     risk_diff = abs(entry_price - sl_price)
     if risk_diff == 0:
