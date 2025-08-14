@@ -1,4 +1,5 @@
 # Lokalizacja: /cloudbuild-collector.yaml
+
 steps:
 # Krok 1: Zbuduj obraz Docker
 - name: 'gcr.io/cloud-builders/docker'
@@ -30,6 +31,12 @@ steps:
     - 'app-connector-warsaw'
     - '--vpc-egress'
     - 'all'
+    # === KLUCZOWA DODANA SEKCJA ===
+    # Dodajemy to również tutaj, ponieważ ta usługa używa shared_lib
+    # i próbuje załadować konfigurację przy starcie.
+    - '--update-secrets'
+    - 'BYBIT_API_KEY=bybit-api-key:latest,BYBIT_API_SECRET=bybit-api-secret:latest'
+
 images:
 - 'europe-central2-docker.pkg.dev/$PROJECT_ID/trading-bot-image/data-collector-service:$SHORT_SHA'
 options:
