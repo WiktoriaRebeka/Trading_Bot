@@ -25,13 +25,72 @@ from bot_service.bigquery_logger import log_trade_to_bigquery
 from bot_service.bybit_executor import (
     BybitAPIError,
     BybitExecutor,
-    format_quantity,
 )
 
 logger = logging.getLogger(__name__)
 
-# === USUNIĘTA GLOBALNA INSTANCJA bybit_executor ===
-# Obiekt będzie przekazywany jako argument do funkcji, które go potrzebują.
+def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executor: BybitExecutor):
+    """
+    Odbiera nowe alerty i natychmiast próbuje złożyć na ich podstawie zlecenia.
+    """
+    if not newly_fetched_alerts:
+        return
+    logger.info(f"Przetwarzam {len(newly_fetched_alerts)} nowych alertów w celu złożenia zleceň.")
+    
+    for alert_dict in newly_fetched_alerts:
+        try:
+            alert_data = AlertData.model_validate(alert_dict)
+            symbol = alert_data.symbol
+            logger.info(f"--- [{symbol}] Rozpoczynam proces składania zlecenia na podstawie nowego alertu ---")
+
+            # Krok 1: Obliczenie wymaganej dźwigni
+            leverage_calcs = get_all_calculations_for_alert(alert_data)
+            required_leverage = leverage_calcs.get('required_leverage')
+
+            if not required_leverage or required_leverage < 1:
+                logger.warning(f"[{symbol}] Zlecenie odrzucone. Wymagana dźwignia ({required_leverage}) jest nieprawidłowa.")
+                continue
+
+            # Krok 2: Weryfikacja maksymalnej dźwigni na giełdzie
+            instrument_info = bybit_executor.get_instrument_info(symbol)
+            if not instrument_info:
+                logger.error(f"[{symbol}] Nie udało się pobrać informacji o instrumencie. Przerywam.")
+                continue
+            
+            max_leverage = instrument_info['max_leverage']
+            final_leverage = min(required_leverage, max_leverage)
+            logger.info(f"[{symbol}] Dźwignia: Wymagana={required_leverage}x, Max giełdy={max_leverage}x. Wybrano: {final_leverage}x.")
+            
+            # Krok 3: Przygotowanie i złożenie zlecenia
+            order_params = {
+                "symbol": symbol,
+                "side": alert_data.direction,
+                "price": str(alert_data.entry),
+                "qty": "10", # Zawsze 10 USDT, bo używamy qtyIsQuote=True
+                "leverage": str(final_leverage),
+                "takeProfit": str(alert_data.tp_2_0),
+                "stopLoss": str(alert_data.sl)
+            }
+            order_id = bybit_executor.place_limit_order(order_params)
+
+            # Krok 4: Zapis do Firestore TYLKO po pomyślnym złożeniu zlecenia
+            if order_id:
+                trade_id = str(uuid.uuid4())
+                logger.info(f"[{symbol}] Zlecenie pomyślnie wysłane. Tworzę dokument w open_trades z trade_id: {trade_id} i bybit_order_id: {order_id}")
+                state_manager.create_open_trade(
+                    trade_id=trade_id, symbol=symbol, direction=alert_data.direction, ob_type="Fresh OB",
+                    entry_price=alert_data.entry, sl_price=alert_data.sl, tp_price=alert_data.tp,
+                    alert_data=alert_data, bybit_order_id=order_id
+                )
+            else:
+                logger.error(f"[{symbol}] Nie udało się uzyskać ID zlecenia od Bybit. Pozycja nie zostanie utworzona w Firestore.")
+
+        except (BybitAPIError, RequestException) as e:
+            logger.critical(f"[{alert_data.symbol}] KRYTYCZNY BŁĄD podczas interakcji z API Bybit: {e}")
+        except ValidationError as e:
+            logger.error(f"Błąd walidacji danych alertu: {e}", extra={"json_fields": {"alert_id": alert_dict.get('id')}})
+        except Exception as e:
+            logger.critical(f"Nieoczekiwany błąd w logice otwierania pozycji: {e}", exc_info=True)
 
 def _calculate_rr_analytics(entry_price: float, sl_price: float, extreme_price: float, direction: str) -> Dict[str, Any]:
     risk_diff = abs(entry_price - sl_price)
@@ -313,27 +372,32 @@ def _handle_post_mortem_analysis(analyzed_trades: List[DocumentSnapshot], klines
             logger.error(f"[ANALIZA DUCHA][{trade_id}] Błąd: {e}", exc_info=True)
 
 def run_trading_logic(bybit_executor: BybitExecutor):
-    logger.info("Rozpoczynam główną pętlę logiki tradingowej.")
+    logger.info("Rozpoczynam główną pętlę logiki (tryb: tylko monitorowanie).")
+    
     symbols_to_watch = set(get_symbols_to_watch_from_config())
     open_trades_docs = list(state_manager.get_all_open_trades())
     analyzed_trades_docs = list(state_manager.get_all_analyzed_trades())
+    
     for doc in open_trades_docs:
         if data := doc.to_dict(): symbols_to_watch.add(data.get('symbol'))
     for doc in analyzed_trades_docs:
         if data := doc.to_dict(): symbols_to_watch.add(data.get('symbol'))
+        
     valid_symbols = {s for s in symbols_to_watch if isinstance(s, str) and s}
     if not valid_symbols:
         logger.info("Brak symboli do monitorowania. Kończę cykl.")
         return
+        
     klines_data_from_cache = state_manager.get_latest_klines_from_cache(list(valid_symbols))
     if not klines_data_from_cache:
         logger.warning("Nie udało się pobrać danych z cache'u klines.")
         return
+        
     klines_data = {
         symbol: Kline.model_validate(data) for symbol, data in klines_data_from_cache.items()
     }
-    active_setups_docs = list(state_manager.get_all_active_setups())
+    
     _handle_post_mortem_analysis(analyzed_trades_docs, klines_data)
-    _handle_setups(klines_data, active_setups_docs, bybit_executor)
     _handle_manage_open_trades(klines_data, open_trades_docs)
-    logger.info("Zakończono główną pętlę logiki tradingowej.")
+    
+    logger.info("Zakończono główną pętlę logiki.")

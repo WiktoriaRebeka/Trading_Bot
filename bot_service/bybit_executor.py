@@ -104,6 +104,7 @@ class BybitExecutor:
         except (RequestException, BybitAPIError):
             return None
         
+
     def place_limit_order(self, order_params: Dict[str, Any]) -> Optional[str]:
         symbol = order_params.get('symbol')
         api_symbol = symbol.replace('.P', '')
@@ -119,7 +120,10 @@ class BybitExecutor:
             "leverage": str(order_params['leverage']),
             "takeProfit": str(order_params['takeProfit']),
             "stopLoss": str(order_params['stopLoss']),
-            "timeInForce": "GTC"
+            "timeInForce": "GTC",
+            # === KLUCZOWA DODANA LINIA ===
+            # Mówimy API, że 'qty' to wartość w USDT, a nie w walucie bazowej.
+            "qtyIsQuote": True 
         }
         
         logger.info(f"[{symbol}] Wysyłanie zlecenia do Bybit z parametrami: {payload}")
@@ -131,5 +135,6 @@ class BybitExecutor:
                 return order_id
             logger.error(f"[{symbol}] API Bybit nie zwróciło orderId. Odpowiedź: {result}")
             return None
-        except (RequestException, BybitAPIError):
+        except (RequestException, BybitAPIError) as e:
+            # Błąd jest już logowany w _send_request, więc tutaj nie musimy go powtarzać.
             return None
