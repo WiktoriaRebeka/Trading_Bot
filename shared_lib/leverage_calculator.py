@@ -8,17 +8,22 @@ from shared_lib.models import AlertData
 
 logger = logging.getLogger(__name__)
 
-def format_price(price: float, tick_size: str) -> str:
-    price_decimal = Decimal(str(price))
-    tick_size_decimal = Decimal(tick_size)
-    formatted_price = price_decimal.quantize(tick_size_decimal, rounding=ROUND_DOWN)
-    return str(formatted_price)
 
 RISK_PER_TRADE_PERCENT = 2.5
 POSITION_SIZE_PERCENT = 10.0
 TOTAL_CAPITAL = 100.0
 TRANSACTION_FEE_PERCENT = 0.02
 
+
+def format_price(price: float, tick_size: str) -> str:
+    """
+    Formatuje cenę zgodnie z wymaganym przez giełdę krokiem (tick_size).
+    Używa biblioteki Decimal dla precyzyjnych obliczeń finansowych.
+    """
+    price_decimal = Decimal(str(price))
+    tick_size_decimal = Decimal(tick_size)
+    formatted_price = price_decimal.quantize(tick_size_decimal, rounding=ROUND_DOWN)
+    return str(formatted_price)
 
 def calculate_sl_distance_points(entry_price: float, sl_price: float) -> float:
     """Oblicza bezwzględną odległość w punktach między ceną wejścia a stop lossem."""
