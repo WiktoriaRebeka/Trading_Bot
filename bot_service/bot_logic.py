@@ -9,10 +9,7 @@ from requests.exceptions import RequestException
 
 from shared_lib import constants
 from shared_lib.firebase_client import get_db, get_symbols_to_watch_from_config
-# ==============================================================================
-# === POPRAWKA BŁĘDU: Usunięto 'format_quantity' z tego importu ===
-# ==============================================================================
-from shared_lib.leverage_calculator import get_all_calculations_for_alert
+from shared_lib.leverage_calculator import get_all_calculations_for_alert, format_price
 from shared_lib.models import (
     AlertData,
     AnalyzedTradeData,
@@ -23,9 +20,7 @@ from shared_lib.models import (
 
 from bot_service import state_manager
 from bot_service.bigquery_logger import log_trade_to_bigquery
-# ==============================================================================
-# === POPRAWKA BŁĘDU: Dodano import 'format_quantity' z poprawnej lokalizacji ===
-# ==============================================================================
+
 from bot_service.bybit_executor import (
     BybitAPIError,
     BybitExecutor,
@@ -34,17 +29,8 @@ from bot_service.bybit_executor import (
 
 logger = logging.getLogger(__name__)
 
-# ==============================================================================
-# === NOWA, SKONSOLIDOWANA FUNKCJA REALIZUJĄCA ZADANIE ===
-# ==============================================================================
 
 def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executor: BybitExecutor):
-    """
-    Przetwarza nowe alerty i natychmiast próbuje złożyć na ich podstawie
-    zlecenia na giełdzie Bybit.
-    Ta funkcja NIE tworzy żadnych zapisów w lokalnej bazie danych (np. open_trades).
-    Jej rola jest czysto wykonawcza.
-    """
     if not newly_fetched_alerts:
         return
     logger.info(f"Rozpoczynam przetwarzanie {len(newly_fetched_alerts)} nowych alertów w celu złożenia zleceň.")
@@ -62,26 +48,37 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executo
             required_leverage = leverage_calcs.get('required_leverage')
 
             if not required_leverage:
-                logger.warning(f"[{symbol}] Zlecenie odrzucone. Wymagana dźwignia nie mogła zostać obliczona lub jest < 1. Kończę przetwarzanie tego alertu.")
+                logger.warning(f"[{symbol}] Zlecenie odrzucone. Wymagana dźwignia nie mogła zostać obliczona lub jest < 1.")
                 continue
 
             instrument_info = bybit_executor.get_instrument_info(symbol)
             if not instrument_info:
-                logger.error(f"[{symbol}] Nie udało się pobrać informacji o instrumencie z Bybit. Nie można złożyć zlecenia.")
+                logger.error(f"[{symbol}] Nie udało się pobrać informacji o instrumencie z Bybit.")
                 continue
             
+            tick_size = instrument_info.get('tick_size')
+            if not tick_size:
+                logger.error(f"[{symbol}] Brak 'tick_size' w danych z API. Nie można sformatować ceny. Przerywam.")
+                continue
+
             max_leverage_from_api = instrument_info.get('max_leverage', 1.0)
             final_leverage = min(required_leverage, max_leverage_from_api)
             logger.info(f"[{symbol}] Dźwignia: Wymagana={required_leverage}x, Max giełdy={max_leverage_from_api}x. Wybrano: {final_leverage}x.")
             
+            formatted_price = format_price(alert_data.entry, tick_size)
+            formatted_tp = format_price(alert_data.tp_2_0, tick_size)
+            formatted_sl = format_price(alert_data.sl, tick_size)
+            
+            logger.info(f"[{symbol}] Ceny sformatowane zgodnie z tick_size='{tick_size}': Entry={formatted_price}, TP={formatted_tp}, SL={formatted_sl}")
+
             order_params = {
                 "symbol": symbol,
                 "side": alert_data.direction,
-                "price": alert_data.entry,
+                "price": formatted_price,
                 "qty": "10",
                 "leverage": final_leverage,
-                "takeProfit": alert_data.tp_2_0,
-                "stopLoss": alert_data.sl
+                "takeProfit": formatted_tp,
+                "stopLoss": formatted_sl
             }
             order_id = bybit_executor.place_limit_order(order_params)
 
@@ -96,11 +93,6 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executo
             logger.critical(f"[{symbol}] Błąd API Bybit podczas przetwarzania alertu {alert_id}.")
         except Exception as e:
             logger.critical(f"[{symbol}] Nieoczekiwany błąd w logice przetwarzania alertu {alert_id}: {e}", exc_info=True)
-
-
-# ==============================================================================
-# === ISTNIEJĄCA LOGIKA BIZNESOWA, KTÓRA POZOSTAJE BEZ ZMIAN ===
-# ==============================================================================
 
 def _calculate_rr_analytics(entry_price: float, sl_price: float, extreme_price: float, direction: str) -> Dict[str, Any]:
     risk_diff = abs(entry_price - sl_price)
