@@ -1,5 +1,3 @@
-# Lokalizacja: bot_service/bybit_executor.py
-
 import logging
 import time
 import hmac
@@ -40,13 +38,12 @@ class BybitExecutor:
 
     def _send_request(self, method: str, endpoint: str, params: Optional[Dict] = None) -> Dict[str, Any]:
         """
-        OSTATECZNA POPRAWIONA WERSJA.
+        Wysyła podpisane żądanie do API Bybit V5.
         Używa `requests.PreparedRequest` do zagwarantowania zgodności sygnatury.
         """
         timestamp = str(int(time.time() * 1000))
         recv_window = "10000"
         
-        # Przygotowujemy żądanie WSTĘPNIE, aby uzyskać finalną postać danych
         req = requests.Request(method, self.base_url + endpoint)
         if method.upper() == 'GET':
             req.params = params
@@ -57,13 +54,11 @@ class BybitExecutor:
             req.json = params
             prepared_req = self.session.prepare_request(req)
             query_string = ""
-            # Używamy ciała żądania przygotowanego przez `requests`
             payload_string = prepared_req.body.decode('utf-8') if prepared_req.body else ""
 
         to_sign = timestamp + self.api_key + recv_window + query_string + payload_string
         signature = hmac.new(bytes(self.api_secret, "utf-8"), to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
         
-        # Dodajemy nagłówki uwierzytelniające do PRZYGOTOWANEGO żądania
         prepared_req.headers['X-B-API-KEY'] = self.api_key
         prepared_req.headers['X-B-API-TIMESTAMP'] = timestamp
         prepared_req.headers['X-B-API-SIGN'] = signature
@@ -103,10 +98,17 @@ class BybitExecutor:
             return None
         except (RequestException, BybitAPIError):
             return None
-        
 
     def place_limit_order(self, order_params: Dict[str, Any]) -> Optional[str]:
+        """
+        Składa zlecenie typu Limit Order z pełnym zestawem parametrów,
+        w tym TP/SL oraz interpretacją 'qty' jako wartość w USDT.
+        """
         symbol = order_params.get('symbol')
+        if not symbol:
+            logger.error("Brak 'symbol' w parametrach zlecenia.")
+            return None
+            
         api_symbol = symbol.replace('.P', '')
         side_map = {"LONG": "Buy", "SHORT": "Sell"}
         
@@ -121,8 +123,8 @@ class BybitExecutor:
             "takeProfit": str(order_params['takeProfit']),
             "stopLoss": str(order_params['stopLoss']),
             "timeInForce": "GTC",
-            # === KLUCZOWA DODANA LINIA ===
-            # Mówimy API, że 'qty' to wartość w USDT, a nie w walucie bazowej.
+            # KLUCZOWY PARAMETR: Instruuje Bybit, aby interpretować 'qty'
+            # jako wartość zlecenia w USDT (walucie kwotowanej).
             "qtyIsQuote": True 
         }
         
@@ -135,6 +137,7 @@ class BybitExecutor:
                 return order_id
             logger.error(f"[{symbol}] API Bybit nie zwróciło orderId. Odpowiedź: {result}")
             return None
-        except (RequestException, BybitAPIError) as e:
-            # Błąd jest już logowany w _send_request, więc tutaj nie musimy go powtarzać.
+        except (RequestException, BybitAPIError):
+            # Błąd jest już szczegółowo logowany w _send_request, 
+            # więc tutaj wystarczy zwrócić None, aby zasygnalizować porażkę.
             return None

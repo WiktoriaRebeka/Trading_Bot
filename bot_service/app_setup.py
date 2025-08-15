@@ -9,7 +9,6 @@ from shared_lib.config_loader import load_config
 from shared_lib.firebase_client import initialize_firebase
 from shared_lib.config import config 
 from bot_service.bigquery_logger import initialize_bigquery
-# Zmieniamy importy, aby przekazywać executor jako argument
 from bot_service.bot_logic import process_new_alerts, run_trading_logic
 from bot_service.fetch_from_firestore import (
     load_last_processed_timestamp, 
@@ -23,7 +22,6 @@ def initialize_trading_services() -> Tuple[bool, Optional['BybitExecutor']]:
     from bot_service.bybit_executor import BybitExecutor
     logger.info("Inicjalizacja usług tradingowych...")
     try:
-        # Używamy obiektu config, który został załadowany wcześniej
         if not config.BYBIT_API_KEY or not config.BYBIT_API_SECRET:
             raise ValueError("Klucze API Bybit nie są ustawione w konfiguracji.")
         
@@ -96,11 +94,15 @@ def register_endpoints(app: Flask):
             new_alerts, new_ts = fetch_new_alerts_since(last_ts)
             if new_alerts:
                 logger.info(f"Przetwarzam {len(new_alerts)} nowych alertów.", extra={"json_fields": {"cycle_id": cycle_id}})
-                process_new_alerts(new_alerts)
+                # =========================================================================
+                # === KLUCZOWA ZMIANA: Przekazanie `bybit_executor` do funkcji logicznej ===
+                # =========================================================================
+                process_new_alerts(new_alerts, bybit_executor)
+                
                 if new_ts and new_ts > last_ts:
                     save_last_processed_timestamp(new_ts)
             
-            # Przekazujemy executor jako argument
+            # Istniejąca logika monitorowania jest również wywoływana z executorem
             run_trading_logic(bybit_executor)
 
             logger.info("--- ZAKOŃCZENIE CYKLU BOTA ---", extra={"json_fields": {"cycle_id": cycle_id, "status": "success"}})
