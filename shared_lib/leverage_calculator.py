@@ -9,10 +9,6 @@ from shared_lib.models import AlertData
 logger = logging.getLogger(__name__)
 
 def format_price(price: float, tick_size: str) -> str:
-    """
-    Formatuje cenę zgodnie z wymaganym przez giełdę krokiem (tick_size).
-    Używa biblioteki Decimal dla precyzyjnych obliczeń finansowych.
-    """
     price_decimal = Decimal(str(price))
     tick_size_decimal = Decimal(tick_size)
     formatted_price = price_decimal.quantize(tick_size_decimal, rounding=ROUND_DOWN)

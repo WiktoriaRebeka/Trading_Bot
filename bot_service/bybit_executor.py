@@ -1,3 +1,5 @@
+# Lokalizacja: bot_service/bybit_executor.py
+
 import logging
 import time
 import hmac
@@ -38,7 +40,7 @@ class BybitExecutor:
 
     def _send_request(self, method: str, endpoint: str, params: Optional[Dict] = None) -> Dict[str, Any]:
         """
-        Wysyła podpisane żądanie do API Bybit V5.
+        PRZYWRÓCONA, POPRAWNA WERSJA.
         Używa `requests.PreparedRequest` do zagwarantowania zgodności sygnatury.
         """
         timestamp = str(int(time.time() * 1000))
@@ -81,7 +83,6 @@ class BybitExecutor:
             logger.error(f"Błąd API Bybit. Endpoint: {endpoint}, Code: {e.ret_code}, Msg: '{e.ret_msg}'")
             raise
 
-
     def get_instrument_info(self, symbol: str) -> Optional[Dict[str, Any]]:
         api_symbol = symbol.replace('.P', '')
         params = {"category": "linear", "symbol": api_symbol}
@@ -103,10 +104,6 @@ class BybitExecutor:
             return None
 
     def place_limit_order(self, order_params: Dict[str, Any]) -> Optional[str]:
-        """
-        Składa zlecenie typu Limit Order z pełnym zestawem parametrów,
-        w tym TP/SL oraz interpretacją 'qty' jako wartość w USDT.
-        """
         symbol = order_params.get('symbol')
         if not symbol:
             logger.error("Brak 'symbol' w parametrach zlecenia.")
@@ -126,8 +123,6 @@ class BybitExecutor:
             "takeProfit": str(order_params['takeProfit']),
             "stopLoss": str(order_params['stopLoss']),
             "timeInForce": "GTC",
-            # KLUCZOWY PARAMETR: Instruuje Bybit, aby interpretować 'qty'
-            # jako wartość zlecenia w USDT (walucie kwotowanej).
             "qtyIsQuote": True 
         }
         
@@ -141,6 +136,4 @@ class BybitExecutor:
             logger.error(f"[{symbol}] API Bybit nie zwróciło orderId. Odpowiedź: {result}")
             return None
         except (RequestException, BybitAPIError):
-            # Błąd jest już szczegółowo logowany w _send_request, 
-            # więc tutaj wystarczy zwrócić None, aby zasygnalizować porażkę.
             return None
