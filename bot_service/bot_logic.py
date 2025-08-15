@@ -1,5 +1,3 @@
-# bot_service/bot_logic.py
-
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -11,7 +9,10 @@ from requests.exceptions import RequestException
 
 from shared_lib import constants
 from shared_lib.firebase_client import get_db, get_symbols_to_watch_from_config
-from shared_lib.leverage_calculator import get_all_calculations_for_alert, format_quantity
+# ==============================================================================
+# === POPRAWKA BŁĘDU: Usunięto 'format_quantity' z tego importu ===
+# ==============================================================================
+from shared_lib.leverage_calculator import get_all_calculations_for_alert
 from shared_lib.models import (
     AlertData,
     AnalyzedTradeData,
@@ -22,9 +23,13 @@ from shared_lib.models import (
 
 from bot_service import state_manager
 from bot_service.bigquery_logger import log_trade_to_bigquery
+# ==============================================================================
+# === POPRAWKA BŁĘDU: Dodano import 'format_quantity' z poprawnej lokalizacji ===
+# ==============================================================================
 from bot_service.bybit_executor import (
     BybitAPIError,
     BybitExecutor,
+    format_quantity,
 )
 
 logger = logging.getLogger(__name__)
@@ -46,22 +51,20 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executo
     
     for alert_dict in newly_fetched_alerts:
         alert_id = alert_dict.get('id', 'N/A')
-        symbol = "N/A"  # Domyślna wartość na wypadek błędu walidacji
+        symbol = "N/A"
         try:
             alert_data = AlertData.model_validate(alert_dict)
             symbol = alert_data.symbol
             
             logger.info(f"--- [{symbol}][Alert: {alert_id}] Rozpoczynam przetwarzanie zlecenia ---")
 
-            # Krok 1: Obliczenie wymaganej dźwigni za pomocą współdzielonego modułu
             leverage_calcs = get_all_calculations_for_alert(alert_data)
             required_leverage = leverage_calcs.get('required_leverage')
 
-            if not required_leverage: # Sprawdzamy czy nie jest None lub 0
+            if not required_leverage:
                 logger.warning(f"[{symbol}] Zlecenie odrzucone. Wymagana dźwignia nie mogła zostać obliczona lub jest < 1. Kończę przetwarzanie tego alertu.")
                 continue
 
-            # Krok 2: Weryfikacja maksymalnej dźwigni na giełdzie
             instrument_info = bybit_executor.get_instrument_info(symbol)
             if not instrument_info:
                 logger.error(f"[{symbol}] Nie udało się pobrać informacji o instrumencie z Bybit. Nie można złożyć zlecenia.")
@@ -71,19 +74,17 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executo
             final_leverage = min(required_leverage, max_leverage_from_api)
             logger.info(f"[{symbol}] Dźwignia: Wymagana={required_leverage}x, Max giełdy={max_leverage_from_api}x. Wybrano: {final_leverage}x.")
             
-            # Krok 3: Przygotowanie i złożenie zlecenia
             order_params = {
                 "symbol": symbol,
                 "side": alert_data.direction,
                 "price": alert_data.entry,
-                "qty": "10",  # Stała wartość 10 USDT
+                "qty": "10",
                 "leverage": final_leverage,
                 "takeProfit": alert_data.tp_2_0,
                 "stopLoss": alert_data.sl
             }
             order_id = bybit_executor.place_limit_order(order_params)
 
-            # Krok 4: Logowanie wyniku operacji
             if order_id:
                 logger.info(f"[{symbol}][Alert: {alert_id}] SUKCES. Zlecenie zostało pomyślnie wysłane do Bybit. Order ID: {order_id}")
             else:
@@ -92,7 +93,6 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executo
         except ValidationError as e:
             logger.error(f"Błąd walidacji danych alertu {alert_id}: {e}", extra={"json_fields": {"alert_id": alert_id}})
         except (BybitAPIError, RequestException) as e:
-            # Błąd jest już logowany w executorze, tutaj dodajemy kontekst alertu
             logger.critical(f"[{symbol}] Błąd API Bybit podczas przetwarzania alertu {alert_id}.")
         except Exception as e:
             logger.critical(f"[{symbol}] Nieoczekiwany błąd w logice przetwarzania alertu {alert_id}: {e}", exc_info=True)
@@ -361,10 +361,6 @@ def run_trading_logic(bybit_executor: BybitExecutor):
     logger.info("Rozpoczynam główną pętlę logiki (tryb: tylko monitorowanie).")
     
     symbols_to_watch = set(get_symbols_to_watch_from_config())
-    # UWAGA: Poniższe funkcje `_handle_setups`, `_handle_manage_open_trades` i `_handle_post_mortem_analysis`
-    # są teraz nieaktywne, ponieważ rezygnujemy z lokalnego zarządzania stanem pozycji.
-    # W przyszłości można je usunąć lub zostawić jako referencję.
-    # Na ten moment, kod pozostaje, aby nie naruszać zasady o niemodyfikowaniu istniejącej logiki.
     active_setups = list(state_manager.get_all_active_setups())
     open_trades_docs = list(state_manager.get_all_open_trades())
     analyzed_trades_docs = list(state_manager.get_all_analyzed_trades())
