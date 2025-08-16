@@ -30,11 +30,10 @@ from bot_service.bybit_executor import (
 logger = logging.getLogger(__name__)
 
 
+# Lokalizacja: bot_service/bot_logic.py
+# (importy pozostają bez zmian)
+
 def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executor: BybitExecutor):
-    """
-    Przetwarza nowe alerty i natychmiast próbuje złożyć na ich podstawie
-    zlecenia na giełdzie Bybit, dynamicznie formatując ceny.
-    """
     if not newly_fetched_alerts:
         return
     logger.info(f"Rozpoczynam przetwarzanie {len(newly_fetched_alerts)} nowych alertów w celu złożenia zleceň.")
@@ -56,21 +55,21 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executo
                 continue
 
             instrument_info = bybit_executor.get_instrument_info(symbol)
+            
             if not instrument_info:
-                logger.error(f"[{symbol}] Nie udało się pobrać informacji o instrumencie z Bybit.")
+                logger.error(f"[{symbol}] Nie udało się pobrać informacji o instrumencie z Bybit. Prawdopodobnie symbol jest nieaktywny lub nie istnieje. Przerywam.")
                 continue
             
-            # === KLUCZOWA POPRAWKA: Pobieramy tick_size z informacji o instrumencie ===
             tick_size = instrument_info.get('tick_size')
             if not tick_size:
-                logger.error(f"[{symbol}] Brak 'tick_size' w danych z API. Nie można sformatować ceny. Przerywam.")
+
+                logger.error(f"[{symbol}] Brak 'tick_size' w danych z API, mimo że dane instrumentu zostały pobrane. Przerywam.")
                 continue
 
             max_leverage_from_api = instrument_info.get('max_leverage', 1.0)
             final_leverage = min(required_leverage, max_leverage_from_api)
             logger.info(f"[{symbol}] Dźwignia: Wymagana={required_leverage}x, Max giełdy={max_leverage_from_api}x. Wybrano: {final_leverage}x.")
             
-            # === KLUCZOWA POPRAWKA: Używamy nowej funkcji do sformatowania wszystkich wartości cenowych ===
             formatted_price = format_price(alert_data.entry, tick_size)
             formatted_tp = format_price(alert_data.tp_2_0, tick_size)
             formatted_sl = format_price(alert_data.sl, tick_size)
@@ -99,6 +98,7 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executo
             logger.critical(f"[{symbol}] Błąd API Bybit podczas przetwarzania alertu {alert_id}.")
         except Exception as e:
             logger.critical(f"[{symbol}] Nieoczekiwany błąd w logice przetwarzania alertu {alert_id}: {e}", exc_info=True)
+
 
 def _calculate_rr_analytics(entry_price: float, sl_price: float, extreme_price: float, direction: str) -> Dict[str, Any]:
     risk_diff = abs(entry_price - sl_price)
