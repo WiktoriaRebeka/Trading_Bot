@@ -1,3 +1,5 @@
+# Lokalizacja: bot_service/bot_logic.py
+
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -20,7 +22,6 @@ from shared_lib.models import (
 
 from bot_service import state_manager
 from bot_service.bigquery_logger import log_trade_to_bigquery
-
 from bot_service.bybit_executor import (
     BybitAPIError,
     BybitExecutor,
@@ -28,10 +29,6 @@ from bot_service.bybit_executor import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-# Lokalizacja: bot_service/bot_logic.py
-# (importy pozostają bez zmian)
 
 def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executor: BybitExecutor):
     if not newly_fetched_alerts:
@@ -62,7 +59,6 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executo
             
             tick_size = instrument_info.get('tick_size')
             if not tick_size:
-
                 logger.error(f"[{symbol}] Brak 'tick_size' w danych z API, mimo że dane instrumentu zostały pobrane. Przerywam.")
                 continue
 
@@ -98,6 +94,7 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executo
             logger.critical(f"[{symbol}] Błąd API Bybit podczas przetwarzania alertu {alert_id}.")
         except Exception as e:
             logger.critical(f"[{symbol}] Nieoczekiwany błąd w logice przetwarzania alertu {alert_id}: {e}", exc_info=True)
+
 
 
 def _calculate_rr_analytics(entry_price: float, sl_price: float, extreme_price: float, direction: str) -> Dict[str, Any]:
