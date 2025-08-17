@@ -22,16 +22,27 @@ def initialize_trading_services() -> Tuple[bool, Optional['BybitExecutor']]:
     from bot_service.bybit_executor import BybitExecutor
     logger.info("Inicjalizacja usług tradingowych...")
     try:
-        if not config.BYBIT_API_KEY or not config.BYBIT_API_SECRET:
-            raise ValueError("Klucze API Bybit nie są ustawione w konfiguracji.")
+        # === BARDZIEJ RYGORYSTYCZNE SPRAWDZANIE KLUCZY API ===
+        api_key = config.BYBIT_API_KEY
+        api_secret = config.BYBIT_API_SECRET
+
+        if not api_key or not isinstance(api_key, str) or len(api_key.strip()) == 0:
+            # Ten log jednoznacznie wskaże problem z konfiguracją
+            logger.critical("KRYTYCZNY BŁĄD KONFIGURACJI: BYBIT_API_KEY jest pusty lub nie został załadowany z Secret Manager.")
+            raise ValueError("Klucz API Bybit jest pusty.")
+        
+        if not api_secret or not isinstance(api_secret, str) or len(api_secret.strip()) == 0:
+            logger.critical("KRYTYCZNY BŁĄD KONFIGURACJI: BYBIT_API_SECRET jest pusty lub nie został załadowany z Secret Manager.")
+            raise ValueError("Sekret API Bybit jest pusty.")
         
         executor_instance = BybitExecutor(
-            api_key=config.BYBIT_API_KEY,
-            api_secret=config.BYBIT_API_SECRET
+            api_key=api_key,
+            api_secret=api_secret
         )
         logger.info("BybitExecutor pomyślnie zainicjalizowany.")
         return True, executor_instance
     except (RuntimeError, ValueError) as e:
+        # Log z góry będzie teraz bardziej szczegółowy
         logger.critical(f"Nie można zainicjalizować BybitExecutor: {e}")
         return False, None
 
@@ -94,15 +105,10 @@ def register_endpoints(app: Flask):
             new_alerts, new_ts = fetch_new_alerts_since(last_ts)
             if new_alerts:
                 logger.info(f"Przetwarzam {len(new_alerts)} nowych alertów.", extra={"json_fields": {"cycle_id": cycle_id}})
-                # =========================================================================
-                # === KLUCZOWA ZMIANA: Przekazanie `bybit_executor` do funkcji logicznej ===
-                # =========================================================================
                 process_new_alerts(new_alerts, bybit_executor)
-                
                 if new_ts and new_ts > last_ts:
                     save_last_processed_timestamp(new_ts)
             
-            # Istniejąca logika monitorowania jest również wywoływana z executorem
             run_trading_logic(bybit_executor)
 
             logger.info("--- ZAKOŃCZENIE CYKLU BOTA ---", extra={"json_fields": {"cycle_id": cycle_id, "status": "success"}})
