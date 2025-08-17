@@ -90,10 +90,13 @@ class BybitExecutor:
                 instrument_data = result['list'][0]
                 leverage_filter = instrument_data.get('leverageFilter', {})
                 lot_size_filter = instrument_data.get('lotSizeFilter', {})
+                # === KLUCZOWA POPRAWKA JEST TUTAJ ===
+                price_filter = instrument_data.get('priceFilter', {})
                 return {
                     "max_leverage": int(float(leverage_filter.get('maxLeverage', '1'))),
                     "qty_step": lot_size_filter.get('qtyStep', '0.001'),
-                    "min_order_qty": float(lot_size_filter.get('minOrderQty', '0.0'))
+                    "min_order_qty": float(lot_size_filter.get('minOrderQty', '0.0')),
+                    "tick_size": price_filter.get('tickSize', '0.01')
                 }
             return None
         except (RequestException, BybitAPIError):
