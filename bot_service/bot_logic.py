@@ -100,52 +100,24 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executo
             logger.critical(f"[{symbol}] Nieoczekiwany błąd w logice przetwarzania alertu {alert_id}: {e}", exc_info=True)
 
 
-# Lokalizacja: bot_service/bot_logic.py
-
-# ... (na górze pliku upewnij się, że jest import: from decimal import Decimal) ...
-
-def _calculate_rr_analytics(entry_price: Decimal, sl_price: Decimal, extreme_price: float, direction: str) -> Dict[str, Any]:
-    """
-    Oblicza analitykę R:R, operując na precyzyjnych typach Decimal.
-    Konwertuje `extreme_price` (float) na Decimal, aby uniknąć błędów typów.
-    Zwraca finalne wartości jako float i bool, zgodnie z wymaganiami BigQuery.
-    """
-    # Krok 1: Bezpieczna konwersja `extreme_price` z float na Decimal.
-    # Używamy str() jako pośrednika, aby uniknąć błędów precyzji float.
-    extreme_price_decimal = Decimal(str(extreme_price))
-
-    # Krok 2: Obliczenia na obiektach Decimal dla maksymalnej precyzji.
+def _calculate_rr_analytics(entry_price: float, sl_price: float, extreme_price: float, direction: str) -> Dict[str, Any]:
     risk_diff = abs(entry_price - sl_price)
-    
-    # Porównujemy z Decimal("0"), a nie z 0.
-    if risk_diff == Decimal("0"):
+    if risk_diff == 0:
         logger.warning(f"Różnica ryzyka wynosi zero (entry={entry_price}, sl={sl_price}). R:R ustawione na 0.")
-        # Zwracamy float, bo tego oczekuje BigQuery.
         return {"rr_achieved": 0.0}
-    
-    profit_diff = Decimal("0.0")
-    if direction.upper() == 'LONG' and extreme_price_decimal > entry_price:
-        profit_diff = extreme_price_decimal - entry_price
-    elif direction.upper() == 'SHORT' and extreme_price_decimal < entry_price:
-        profit_diff = entry_price - extreme_price_decimal
-        
-    # Dzielenie Decimal przez Decimal daje precyzyjny wynik Decimal.
-    rr_achieved = profit_diff / risk_diff
-    
-    # Krok 3: Przygotowanie wyników do zapisu w BigQuery.
-    # Konwertujemy finalny wynik na float i zaokrąglamy.
-    rr_achieved_float = float(round(rr_achieved, 4))
-    
-    analytics = {"rr_achieved": rr_achieved_float}
-    
-    # Porównania również wykonujemy na precyzyjnych obiektach Decimal.
+    profit_diff = 0.0
+    if direction.upper() == 'LONG' and extreme_price > entry_price:
+        profit_diff = extreme_price - entry_price
+    elif direction.upper() == 'SHORT' and extreme_price < entry_price:
+        profit_diff = entry_price - extreme_price
+    rr_achieved = round(profit_diff / risk_diff, 4)
+    analytics = {"rr_achieved": rr_achieved}
     rr_thresholds = {
-        "rr_1_0_achieved": Decimal("1.0"), "rr_1_5_achieved": Decimal("1.5"), "rr_2_0_achieved": Decimal("2.0"),
-        "rr_3_0_achieved": Decimal("3.0"), "rr_4_0_achieved": Decimal("4.0"), "rr_5_0_achieved": Decimal("5.0")
+        "rr_1_0_achieved": 1.0, "rr_1_5_achieved": 1.5, "rr_2_0_achieved": 2.0,
+        "rr_3_0_achieved": 3.0, "rr_4_0_achieved": 4.0, "rr_5_0_achieved": 5.0
     }
     for flag, threshold in rr_thresholds.items():
         analytics[flag] = rr_achieved >= threshold
-        
     return analytics
 
 def finalize_trade(trade: OpenTradeData, closed_result: str, close_price: float):

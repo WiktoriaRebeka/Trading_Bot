@@ -3,7 +3,6 @@
 from pydantic import BaseModel, Field, validator
 from typing import Optional, Dict, Any, List
 from datetime import datetime
-from decimal import Decimal  # <-- DODAJEMY IMPORT
 
 class AlertData(BaseModel):
     id: Optional[str] = None
@@ -11,21 +10,18 @@ class AlertData(BaseModel):
     symbol: str
     direction_code: int = Field(alias='directionCode')
     direction: Optional[str] = None
-    # === ZMIANA TYPU DANYCH Z FLOAT NA DECIMAL ===
-    entry: Decimal
-    sl: Decimal
-    tp: Decimal
+    entry: float
+    sl: float
+    tp: float
     timestamp: str
-    tp_1_0: Decimal
-    tp_1_5: Decimal
-    tp_2_0: Decimal
-    tp_3_0: Decimal
-    tp_4_0: Decimal
-    tp_5_0: Decimal
+    tp_1_0: float
+    tp_1_5: float
+    tp_2_0: float
+    tp_3_0: float
+    tp_4_0: float
+    tp_5_0: float
     
     class Config:
-        # Ta opcja jest przestarzała w Pydantic v2, ale zostawiamy ją dla kompatybilności
-        # Jeśli używasz Pydantic v2+, poprawna nazwa to `populate_by_name=True`
         allow_population_by_field_name = True
         extra = 'ignore'
 
@@ -51,10 +47,9 @@ class OpenTradeData(BaseModel):
     symbol: str
     direction: str
     ob_type: str
-    # === ZMIANA TYPU DANYCH Z FLOAT NA DECIMAL ===
-    entry_price: Decimal
-    sl_price: Decimal
-    tp_price: Decimal
+    entry_price: float
+    sl_price: float
+    tp_price: float
     opened_at_ms: int
     opened_at_iso: str
     alert_data_snapshot: Dict[str, Any]
@@ -62,38 +57,15 @@ class OpenTradeData(BaseModel):
 
 class Kline(BaseModel):
     timestamp: int
-    # === ZMIANA TYPU DANYCH Z FLOAT NA DECIMAL ===
-    high: Decimal
-    low: Decimal
-    close: Decimal
+    high: float
+    low: float
+    close: float
 
 class AnalyzedTradeData(BaseModel):
     trade_id: str
     symbol: str
     direction: str
     ob_type: str
-    # === ZMIANA TYPU DANYCH Z FLOAT NA DECIMAL ===
-    entry_price: Decimal
-    original_sl: Decimal
-    original_tp_5_0: Optional[Decimal] = None
-    opened_at_ms: int
-    alert_data_snapshot: Dict[str, Any]
-    last_known_extreme_price: Decimal
-    last_analysis_timestamp_ms: int
-    achieved_tps: List[str] = []
-
-class OrderData(BaseModel):
-    symbol: str
-    direction: str
-    # === ZMIANA TYPU DANYCH Z FLOAT NA DECIMAL ===
-    entry_price: Decimal
-    sl_price: Decimal
-    tp_price: Decimal
-    margin_value_usdc: Decimal
-    leverage: int
-
-    @validator('direction')
-    def direction_must_be_valid(cls, v):
-        if v.upper() not in ['LONG', 'SHORT']:
-            raise ValueError('Kierunek musi być "LONG" lub "SHORT"')
-        return v.upper()
+    entry_price: float
+    original_sl: float
+    original_tp_5_0: Optional[fl
