@@ -46,6 +46,11 @@ class BybitExecutor:
         timestamp = str(int(time.time() * 1000))
         recv_window = "10000"
         
+        # === DODATKOWE ZABEZPIECZENIE DIAGNOSTYCZNE ===
+        if not self.api_key or not self.api_secret:
+            logger.critical("KRYTYCZNY BŁĄD WEWNĘTRZNY: Próba wysłania żądania z pustymi kluczami API w instancji BybitExecutor!")
+            raise RuntimeError("Klucze API w instancji BybitExecutor są puste.")
+
         req = requests.Request(method, self.base_url + endpoint)
         if method.upper() == 'GET':
             req.params = params
