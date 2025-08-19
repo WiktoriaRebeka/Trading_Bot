@@ -40,38 +40,47 @@ class BybitExecutor:
 
     def _send_request(self, method: str, endpoint: str, params: Optional[Dict] = None) -> Dict[str, Any]:
         """
-        PRZYWRÓCONA ORYGINALNA, SPRAWDZONA WERSJA.
-        Używa `requests.PreparedRequest` w sposób, który działał.
+        NOWA, UPROSZCZONA I BARDZIEJ STABILNA WERSJA.
+        Oddziela logikę dla GET i POST, aby uniknąć błędów z sygnaturą.
         """
         timestamp = str(int(time.time() * 1000))
         recv_window = "10000"
         
-        # Przygotowujemy żądanie WSTĘPNIE, aby uzyskać finalną postać danych
-        req = requests.Request(method, self.base_url + endpoint)
-        if method.upper() == 'GET':
-            req.params = params
-            prepared_req = self.session.prepare_request(req)
-            query_string = urlencode(params, doseq=True) if params else ""
-            payload_string = ""
-        else: # POST
-            req.json = params
-            prepared_req = self.session.prepare_request(req)
-            query_string = ""
-            # Używamy ciała żądania przygotowanego przez `requests`
-            payload_string = prepared_req.body.decode('utf-8') if prepared_req.body else ""
+        if not self.api_key or not self.api_secret:
+            logger.critical("KRYTYCZNY BŁĄD: Próba wysłania żądania z pustymi kluczami API!")
+            raise RuntimeError("Klucze API w instancji BybitExecutor są puste.")
 
-        to_sign = timestamp + self.api_key + recv_window + query_string + payload_string
-        signature = hmac.new(bytes(self.api_secret, "utf-8"), to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
-        
-        # Dodajemy nagłówki uwierzytelniające do PRZYGOTOWANEGO żądania
-        prepared_req.headers['X-B-API-KEY'] = self.api_key
-        prepared_req.headers['X-B-API-TIMESTAMP'] = timestamp
-        prepared_req.headers['X-B-API-SIGN'] = signature
-        prepared_req.headers['X-B-API-RECV-WINDOW'] = recv_window
-        prepared_req.headers['Content-Type'] = 'application/json'
-        
         try:
-            response = self.session.send(prepared_req, timeout=15)
+            if method.upper() == 'GET':
+                query_string = urlencode(params, doseq=True) if params else ""
+                to_sign = timestamp + self.api_key + recv_window + query_string
+                signature = hmac.new(bytes(self.api_secret, "utf-8"), to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
+                
+                headers = {
+                    'X-B-API-KEY': self.api_key,
+                    'X-B-API-TIMESTAMP': timestamp,
+                    'X-B-API-SIGN': signature,
+                    'X-B-API-RECV-WINDOW': recv_window,
+                    'Content-Type': 'application/json'
+                }
+                
+                response = self.session.get(self.base_url + endpoint, headers=headers, params=params, timeout=15)
+
+            else: # POST
+                payload_string = json.dumps(params) if params else ""
+                to_sign = timestamp + self.api_key + recv_window + payload_string
+                signature = hmac.new(bytes(self.api_secret, "utf-8"), to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
+
+                headers = {
+                    'X-B-API-KEY': self.api_key,
+                    'X-B-API-TIMESTAMP': timestamp,
+                    'X-B-API-SIGN': signature,
+                    'X-B-API-RECV-WINDOW': recv_window,
+                    'Content-Type': 'application/json'
+                }
+                
+                response = self.session.post(self.base_url + endpoint, headers=headers, data=payload_string, timeout=15)
+
             response.raise_for_status()
             data = response.json()
 
@@ -79,6 +88,7 @@ class BybitExecutor:
                 raise BybitAPIError(ret_code=data.get("retCode"), ret_msg=data.get("retMsg"))
             
             return data.get("result", {})
+            
         except RequestException as e:
             logger.error(f"Błąd sieciowy podczas komunikacji z Bybit. Endpoint: {endpoint}, Błąd: {e}")
             raise
@@ -105,8 +115,6 @@ class BybitExecutor:
             return None
         except (RequestException, BybitAPIError):
             return None
-
-
 
     def place_limit_order(self, order_params: Dict[str, Any]) -> Optional[str]:
         symbol = order_params.get('symbol')
@@ -142,8 +150,6 @@ class BybitExecutor:
             logger.error(f"[{symbol}] API Bybit nie zwróciło orderId. Pełna odpowiedź 'result': {result}")
             return None
         except (RequestException, BybitAPIError) as e:
-            # === KLUCZOWA ZMIANA DIAGNOSTYCZNA ===
-            # Dodajemy logowanie CRITICAL z pełnym tracebackiem, aby wymusić pokazanie błędu.
             logger.critical(
                 f"[{symbol}] KRYTYCZNY BŁĄD podczas wywołania _send_request w place_limit_order. Błąd: {e}",
                 exc_info=True
