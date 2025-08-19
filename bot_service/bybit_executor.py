@@ -106,6 +106,7 @@ class BybitExecutor:
         except (RequestException, BybitAPIError):
             return None
 
+
     def place_limit_order(self, order_params: Dict[str, Any]) -> Optional[str]:
         symbol = order_params.get('symbol')
         if not symbol:
@@ -136,7 +137,11 @@ class BybitExecutor:
             if order_id:
                 logger.info(f"[{symbol}] Zlecenie pomyślnie złożone. Order ID: {order_id}")
                 return order_id
-            logger.error(f"[{symbol}] API Bybit nie zwróciło orderId. Odpowiedź: {result}")
+            
+            # === KLUCZOWA ZMIANA DIAGNOSTYCZNA ===
+            # Logujemy pełną odpowiedź, gdy brakuje orderId
+            logger.error(f"[{symbol}] API Bybit nie zwróciło orderId. Pełna odpowiedź 'result': {result}")
             return None
         except (RequestException, BybitAPIError):
+            # Błąd jest już logowany w _send_request, więc tutaj nie musimy go powtarzać.
             return None
