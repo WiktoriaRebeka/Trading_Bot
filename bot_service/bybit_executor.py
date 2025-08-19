@@ -107,6 +107,7 @@ class BybitExecutor:
             return None
 
 
+
     def place_limit_order(self, order_params: Dict[str, Any]) -> Optional[str]:
         symbol = order_params.get('symbol')
         if not symbol:
@@ -138,10 +139,13 @@ class BybitExecutor:
                 logger.info(f"[{symbol}] Zlecenie pomyślnie złożone. Order ID: {order_id}")
                 return order_id
             
-            # === KLUCZOWA ZMIANA DIAGNOSTYCZNA ===
-            # Logujemy pełną odpowiedź, gdy brakuje orderId
             logger.error(f"[{symbol}] API Bybit nie zwróciło orderId. Pełna odpowiedź 'result': {result}")
             return None
-        except (RequestException, BybitAPIError):
-            # Błąd jest już logowany w _send_request, więc tutaj nie musimy go powtarzać.
+        except (RequestException, BybitAPIError) as e:
+            # === KLUCZOWA ZMIANA DIAGNOSTYCZNA ===
+            # Dodajemy logowanie CRITICAL z pełnym tracebackiem, aby wymusić pokazanie błędu.
+            logger.critical(
+                f"[{symbol}] KRYTYCZNY BŁĄD podczas wywołania _send_request w place_limit_order. Błąd: {e}",
+                exc_info=True
+            )
             return None
