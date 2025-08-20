@@ -58,10 +58,10 @@ class BybitExecutor:
                 signature = hmac.new(bytes(self.api_secret, "utf-8"), to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
                 
                 headers = {
-                    'X-B-API-KEY': self.api_key,
-                    'X-B-API-TIMESTAMP': timestamp,
-                    'X-B-API-SIGN': signature,
-                    'X-B-API-RECV-WINDOW': recv_window,
+                    'X-BAPI-KEY': self.api_key,
+                    'X-BAPI-TIMESTAMP': timestamp,
+                    'X-BAPI-SIGN': signature,
+                    'X-BAPI-RECV-WINDOW': recv_window,
                     'Content-Type': 'application/json'
                 }
                 
@@ -74,10 +74,10 @@ class BybitExecutor:
                 signature = hmac.new(bytes(self.api_secret, "utf-8"), to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
 
                 headers = {
-                    'X-B-API-KEY': self.api_key,
-                    'X-B-API-TIMESTAMP': timestamp,
-                    'X-B-API-SIGN': signature,
-                    'X-B-API-RECV-WINDOW': recv_window,
+                    'X-BAPI-KEY': self.api_key,
+                    'X-BAPI-TIMESTAMP': timestamp,
+                    'X-BAPI-SIGN': signature,
+                    'X-BAPI-RECV-WINDOW': recv_window,
                     'Content-Type': 'application/json'
                 }
                 
