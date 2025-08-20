@@ -9,20 +9,10 @@ from shared_lib.models import AlertData
 logger = logging.getLogger(__name__)
 
 def format_price(price: float, tick_size: str) -> str:
-    """
-    Formatuje cenę zgodnie z krokiem (tick_size) z giełdy.
-    Ta wersja jest odporna na różne formaty tick_size.
-    """
-    try:
-        price_decimal = Decimal(str(price))
-        tick_size_decimal = Decimal(tick_size)
-        
-        rounded_price = price_decimal.quantize(tick_size_decimal, rounding=ROUND_DOWN)
-
-        return f"{rounded_price.normalize()}"
-    except Exception as e:
-        logger.warning(f"Nie można było sformatować ceny {price} z tick_size {tick_size}. Błąd: {e}. Używam formatowania domyślnego.")
-        return str(price)
+    price_decimal = Decimal(str(price))
+    tick_size_decimal = Decimal(tick_size)
+    formatted_price = price_decimal.quantize(tick_size_decimal, rounding=ROUND_DOWN)
+    return str(formatted_price)
 
 RISK_PER_TRADE_PERCENT = 2.5
 POSITION_SIZE_PERCENT = 10.0
