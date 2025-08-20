@@ -41,7 +41,6 @@ class BybitExecutor:
     def _send_request(self, method: str, endpoint: str, params: Optional[Dict] = None) -> Dict[str, Any]:
         """
         PRZYWRÓCONA ORYGINALNA, SPRAWDZONA WERSJA.
-        Używa `requests.PreparedRequest` w sposób, który działał.
         """
         timestamp = str(int(time.time() * 1000))
         recv_window = "10000"
