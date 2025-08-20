@@ -58,7 +58,7 @@ class BybitExecutor:
                 signature = hmac.new(bytes(self.api_secret, "utf-8"), to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
                 
                 headers = {
-                    'X-BAPI-KEY': self.api_key,
+                    'X-BAPI-API-KEY': self.api_key,
                     'X-BAPI-TIMESTAMP': timestamp,
                     'X-BAPI-SIGN': signature,
                     'X-BAPI-RECV-WINDOW': recv_window,
@@ -74,7 +74,7 @@ class BybitExecutor:
                 signature = hmac.new(bytes(self.api_secret, "utf-8"), to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
 
                 headers = {
-                    'X-BAPI-KEY': self.api_key,
+                    'X-BAPI-API-KEY': self.api_key,
                     'X-BAPI-TIMESTAMP': timestamp,
                     'X-BAPI-SIGN': signature,
                     'X-BAPI-RECV-WINDOW': recv_window,
