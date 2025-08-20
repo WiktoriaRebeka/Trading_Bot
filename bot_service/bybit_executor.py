@@ -40,7 +40,7 @@ class BybitExecutor:
 
     def _send_request(self, method: str, endpoint: str, params: Optional[Dict] = None) -> Dict[str, Any]:
         """
-        NOWA, UPROSZCZONA I BARDZIEJ STABILNA WERSJA.
+        NOWA, UPROSZCZONA I STABILNA WERSJA.
         Oddziela logikę dla GET i POST, aby uniknąć błędów z sygnaturą.
         """
         timestamp = str(int(time.time() * 1000))
