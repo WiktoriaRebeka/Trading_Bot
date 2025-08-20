@@ -4,15 +4,41 @@ import logging
 from typing import Dict, Optional
 import math
 from decimal import Decimal, ROUND_DOWN
+
 from shared_lib.models import AlertData
 
 logger = logging.getLogger(__name__)
 
+
+def get_decimal_places(s: str) -> int:
+    """Oblicza liczbę miejsc po przecinku w stringu reprezentującym liczbę."""
+    if '.' in s:
+        return len(s.split('.')[1].rstrip('0'))
+    return 0
+
 def format_price(price: float, tick_size: str) -> str:
-    price_decimal = Decimal(str(price))
-    tick_size_decimal = Decimal(tick_size)
-    formatted_price = price_decimal.quantize(tick_size_decimal, rounding=ROUND_DOWN)
-    return str(formatted_price)
+    """
+    Formatuje cenę do liczby miejsc po przecinku określonej przez tick_size.
+    """
+    try:
+        # Obliczamy wymaganą liczbę miejsc po przecinku na podstawie tick_size
+        precision = get_decimal_places(tick_size)
+        
+        # Tworzymy string formatujący, np. '0.01' dla 2 miejsc, '0.001' dla 3
+        formatter = '1e-' + str(precision)
+        
+        # Używamy Decimal do bezpiecznego zaokrąglenia
+        price_decimal = Decimal(str(price))
+        rounded_price = price_decimal.quantize(Decimal(formatter), rounding=ROUND_DOWN)
+        
+        # Formatujemy finalny string, aby zawsze miał wymaganą liczbę miejsc
+        return f"{rounded_price:.{precision}f}"
+        
+    except Exception:
+        # W razie błędu, wracamy do prostego formatowania, aby uniknąć awarii
+        logger.warning(f"Nie można było sformatować ceny {price} z tick_size {tick_size}. Używam formatowania domyślnego.")
+        return str(price)
+
 
 RISK_PER_TRADE_PERCENT = 2.5
 POSITION_SIZE_PERCENT = 10.0
