@@ -40,49 +40,34 @@ class BybitExecutor:
 
     def _send_request(self, method: str, endpoint: str, params: Optional[Dict] = None) -> Dict[str, Any]:
         """
-        NOWA, UPROSZCZONA I STABILNA WERSJA.
-        Oddziela logikę dla GET i POST, aby uniknąć błędów z sygnaturą.
+        PRZYWRÓCONA ORYGINALNA, SPRAWDZONA WERSJA.
         """
         timestamp = str(int(time.time() * 1000))
         recv_window = "10000"
         
-        if not self.api_key or not self.api_secret:
-            logger.critical("KRYTYCZNY BŁĄD: Próba wysłania żądania z pustymi kluczami API!")
-            raise RuntimeError("Klucze API w instancji BybitExecutor są puste.")
+        req = requests.Request(method, self.base_url + endpoint)
+        if method.upper() == 'GET':
+            req.params = params
+            prepared_req = self.session.prepare_request(req)
+            query_string = urlencode(params, doseq=True) if params else ""
+            payload_string = ""
+        else: # POST
+            req.json = params
+            prepared_req = self.session.prepare_request(req)
+            query_string = ""
+            payload_string = prepared_req.body.decode('utf-8') if prepared_req.body else ""
 
+        to_sign = timestamp + self.api_key + recv_window + query_string + payload_string
+        signature = hmac.new(bytes(self.api_secret, "utf-8"), to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
+        
+        prepared_req.headers['X-BAPI-API-KEY'] = self.api_key
+        prepared_req.headers['X-BAPI-TIMESTAMP'] = timestamp
+        prepared_req.headers['X-BAPI-SIGN'] = signature
+        prepared_req.headers['X-BAPI-RECV-WINDOW'] = recv_window
+        prepared_req.headers['Content-Type'] = 'application/json'
+        
         try:
-            if method.upper() == 'GET':
-                # Logika dla GET, która działa poprawnie
-                query_string = urlencode(params, doseq=True) if params else ""
-                to_sign = timestamp + self.api_key + recv_window + query_string
-                signature = hmac.new(bytes(self.api_secret, "utf-8"), to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
-                
-                headers = {
-                    'X-BAPI-KEY': self.api_key,
-                    'X-BAPI-TIMESTAMP': timestamp,
-                    'X-BAPI-SIGN': signature,
-                    'X-BAPI-RECV-WINDOW': recv_window,
-                    'Content-Type': 'application/json'
-                }
-                
-                response = self.session.get(self.base_url + endpoint, headers=headers, params=params, timeout=15)
-
-            else: # POST
-                # Nowa, jawna i przewidywalna logika dla POST
-                payload_string = json.dumps(params) if params else ""
-                to_sign = timestamp + self.api_key + recv_window + payload_string
-                signature = hmac.new(bytes(self.api_secret, "utf-8"), to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
-
-                headers = {
-                    'X-BAPI-KEY': self.api_key,
-                    'X-BAPI-TIMESTAMP': timestamp,
-                    'X-BAPI-SIGN': signature,
-                    'X-BAPI-RECV-WINDOW': recv_window,
-                    'Content-Type': 'application/json'
-                }
-                
-                response = self.session.post(self.base_url + endpoint, headers=headers, data=payload_string, timeout=15)
-
+            response = self.session.send(prepared_req, timeout=15)
             response.raise_for_status()
             data = response.json()
 
@@ -90,7 +75,6 @@ class BybitExecutor:
                 raise BybitAPIError(ret_code=data.get("retCode"), ret_msg=data.get("retMsg"))
             
             return data.get("result", {})
-            
         except RequestException as e:
             logger.error(f"Błąd sieciowy podczas komunikacji z Bybit. Endpoint: {endpoint}, Błąd: {e}")
             raise
