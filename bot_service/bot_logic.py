@@ -1,5 +1,4 @@
 # Lokalizacja: bot_service/bot_logic.py
-
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -58,41 +57,25 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executo
                 continue
             
             tick_size = instrument_info.get('tick_size')
-            qty_step = instrument_info.get('qty_step')
-            min_order_qty = instrument_info.get('min_order_qty')
-
-            if not tick_size or not qty_step or min_order_qty is None:
-                logger.error(f"[{symbol}] Brak kluczowych informacji o instrumencie (tick_size, qty_step, min_order_qty). Przerywam.")
+            if not tick_size:
+                logger.error(f"[{symbol}] Brak 'tick_size' w danych z API. Przerywam.")
                 continue
 
             max_leverage_from_api = instrument_info.get('max_leverage', 1.0)
             final_leverage = min(required_leverage, max_leverage_from_api)
             logger.info(f"[{symbol}] Dźwignia: Wymagana={required_leverage}x, Max giełdy={max_leverage_from_api}x. Wybrano: {final_leverage}x.")
             
-            # === POPRAWNA LOGIKA OBLICZANIA ILOŚCI ===
-            target_qty = 10.0 / alert_data.entry
-            if target_qty < min_order_qty:
-                logger.warning(f"[{symbol}] Docelowa ilość ({target_qty:.6f}) jest mniejsza niż minimum giełdowe ({min_order_qty}). Używam minimalnej ilości.")
-                final_qty = min_order_qty
-            else:
-                final_qty = target_qty
-            
-            formatted_qty = format_quantity(final_qty, qty_step)
-            if float(formatted_qty) <= 0:
-                logger.error(f"[{symbol}] Obliczona wielkość zlecenia po sformatowaniu ({formatted_qty}) jest zerowa. Przerywam.")
-                continue
-
             formatted_price = format_price(alert_data.entry, tick_size)
             formatted_tp = format_price(alert_data.tp_2_0, tick_size)
             formatted_sl = format_price(alert_data.sl, tick_size)
             
-            logger.info(f"[{symbol}] Ceny sformatowane: Entry={formatted_price}, TP={formatted_tp}, SL={formatted_sl}. Ilość sformatowana: {formatted_qty}")
+            logger.info(f"[{symbol}] Ceny sformatowane: Entry={formatted_price}, TP={formatted_tp}, SL={formatted_sl}")
 
             order_params = {
                 "symbol": symbol,
                 "side": alert_data.direction,
                 "price": formatted_price,
-                "qty": formatted_qty,
+                "qtyValue": "10", # <-- OSTATECZNA POPRAWKA
                 "leverage": final_leverage,
                 "takeProfit": formatted_tp,
                 "stopLoss": formatted_sl
@@ -106,6 +89,8 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executo
 
         except Exception as e:
             logger.critical(f"[{symbol}] Nieoczekiwany błąd w logice przetwarzania alertu {alert_id}: {e}", exc_info=True)
+
+
 
 def _calculate_rr_analytics(entry_price: float, sl_price: float, extreme_price: float, direction: str) -> Dict[str, Any]:
     risk_diff = abs(entry_price - sl_price)
@@ -156,8 +141,6 @@ def finalize_trade(trade: OpenTradeData, closed_result: str, close_price: float)
         state_manager.create_analyzed_trade(trade)
 
 def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSnapshot], bybit_executor: BybitExecutor):
-    # ... (ta funkcja powinna mieć tę samą logikę co process_new_alerts) ...
-    # Dla pewności, wklejam całą, poprawną wersję poniżej
     if not active_setups: return
     logger.info(f"Sprawdzam {len(active_setups)} aktywnych setupów.")
     for setup_doc in active_setups:
@@ -214,22 +197,8 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
                         
                         max_leverage = instrument_info['max_leverage']
                         tick_size = instrument_info.get('tick_size')
-                        qty_step = instrument_info.get('qty_step')
-                        min_order_qty = instrument_info.get('min_order_qty')
                         final_leverage = min(required_leverage, max_leverage)
                         
-                        target_qty = 10.0 / entry_level
-                        if target_qty < min_order_qty:
-                            logger.warning(f"[{symbol}] Docelowa ilość ({target_qty:.6f}) jest mniejsza niż minimum giełdowe ({min_order_qty}). Używam minimalnej ilości.")
-                            final_qty = min_order_qty
-                        else:
-                            final_qty = target_qty
-                        
-                        formatted_qty = format_quantity(final_qty, qty_step)
-                        if float(formatted_qty) <= 0:
-                            logger.error(f"[{symbol}] Obliczona wielkość zlecenia po sformatowaniu ({formatted_qty}) jest zerowa. Przerywam.")
-                            continue
-
                         formatted_price = format_price(entry_level, tick_size)
                         formatted_tp = format_price(setup.alert_data.tp_2_0, tick_size)
                         formatted_sl = format_price(sl_price, tick_size)
@@ -238,7 +207,7 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
                             "symbol": symbol,
                             "side": direction,
                             "price": formatted_price,
-                            "qty": formatted_qty,
+                            "qtyValue": "10", # <-- OSTATECZNA POPRAWKA
                             "leverage": str(final_leverage),
                             "takeProfit": formatted_tp,
                             "stopLoss": formatted_sl

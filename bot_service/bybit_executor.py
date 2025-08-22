@@ -133,13 +133,13 @@ class BybitExecutor:
             "symbol": api_symbol,
             "side": side_map[order_params['side']],
             "orderType": "Limit",
-            "qty": str(order_params['qty']),
+            # === OSTATECZNA POPRAWKA: Użycie 'qtyValue' zamiast 'qty' ===
+            "qtyValue": str(order_params['qtyValue']),
             "price": str(order_params['price']),
             "leverage": str(order_params['leverage']),
             "takeProfit": str(order_params['takeProfit']),
             "stopLoss": str(order_params['stopLoss']),
             "timeInForce": "GTC"
-            # === USUNIĘTO "qtyIsQuote": True ===
         }
         
         logger.info(f"[{symbol}] Wysyłanie zlecenia do Bybit z parametrami: {payload}")
