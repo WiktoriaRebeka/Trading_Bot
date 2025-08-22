@@ -35,7 +35,7 @@ class BybitExecutor:
         
         self.api_key: str = api_key
         self.api_secret: str = api_secret
-        self.base_url: str = "https://api.bybit.com"
+        self.base_url: str = "https://api-testnet.bybit.com"
         self.session = requests.Session()
 
     def _send_request(self, method: str, endpoint: str, params: Optional[Dict] = None) -> Dict[str, Any]:
