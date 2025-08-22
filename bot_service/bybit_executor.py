@@ -118,6 +118,7 @@ class BybitExecutor:
         except (RequestException, BybitAPIError):
             return None
 
+
     def place_limit_order(self, order_params: Dict[str, Any]) -> Optional[str]:
         symbol = order_params.get('symbol')
         if not symbol:
@@ -137,8 +138,8 @@ class BybitExecutor:
             "leverage": str(order_params['leverage']),
             "takeProfit": str(order_params['takeProfit']),
             "stopLoss": str(order_params['stopLoss']),
-            "timeInForce": "GTC",
-            "qtyIsQuote": True 
+            "timeInForce": "GTC"
+            # === USUNIĘTO "qtyIsQuote": True ===
         }
         
         logger.info(f"[{symbol}] Wysyłanie zlecenia do Bybit z parametrami: {payload}")
@@ -156,4 +157,4 @@ class BybitExecutor:
                 f"[{symbol}] KRYTYCZNY BŁĄD podczas wywołania _send_request w place_limit_order. Błąd: {e}",
                 exc_info=True
             )
-            return None
+            return None```
