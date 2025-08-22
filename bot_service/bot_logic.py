@@ -1,4 +1,5 @@
 # Lokalizacja: bot_service/bot_logic.py
+
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -10,7 +11,7 @@ from requests.exceptions import RequestException
 
 from shared_lib import constants
 from shared_lib.firebase_client import get_db, get_symbols_to_watch_from_config
-from shared_lib.leverage_calculator import get_all_calculations_for_alert, format_price
+from shared_lib.leverage_calculator import get_all_calculations_for_alert, format_price, format_quantity
 from shared_lib.models import (
     AlertData,
     AnalyzedTradeData,
@@ -24,7 +25,6 @@ from bot_service.bigquery_logger import log_trade_to_bigquery
 from bot_service.bybit_executor import (
     BybitAPIError,
     BybitExecutor,
-    format_quantity,
 )
 
 logger = logging.getLogger(__name__)
@@ -53,12 +53,12 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executo
             instrument_info = bybit_executor.get_instrument_info(symbol)
             
             if not instrument_info:
-                logger.error(f"[{symbol}] Nie udało się pobrać informacji o instrumencie z Bybit.")
+                logger.error(f"[{symbol}] Nie udało się pobrać informacji o instrumencie z Bybit. Prawdopodobnie symbol jest nieaktywny lub nie istnieje. Przerywam.")
                 continue
             
             tick_size = instrument_info.get('tick_size')
             if not tick_size:
-                logger.error(f"[{symbol}] Brak 'tick_size' w danych z API. Przerywam.")
+                logger.error(f"[{symbol}] Brak 'tick_size' w danych z API, mimo że dane instrumentu zostały pobrane. Przerywam.")
                 continue
 
             max_leverage_from_api = instrument_info.get('max_leverage', 1.0)
@@ -69,13 +69,13 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executo
             formatted_tp = format_price(alert_data.tp_2_0, tick_size)
             formatted_sl = format_price(alert_data.sl, tick_size)
             
-            logger.info(f"[{symbol}] Ceny sformatowane: Entry={formatted_price}, TP={formatted_tp}, SL={formatted_sl}")
+            logger.info(f"[{symbol}] Ceny sformatowane zgodnie z tick_size='{tick_size}': Entry={formatted_price}, TP={formatted_tp}, SL={formatted_sl}")
 
             order_params = {
                 "symbol": symbol,
                 "side": alert_data.direction,
                 "price": formatted_price,
-                "qtyValue": "10", # <-- OSTATECZNA POPRAWKA
+                "qty": "10",
                 "leverage": final_leverage,
                 "takeProfit": formatted_tp,
                 "stopLoss": formatted_sl
@@ -87,6 +87,10 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executo
             else:
                 logger.error(f"[{symbol}][Alert: {alert_id}] PORAŻKA. Nie udało się złożyć zlecenia na giełdzie.")
 
+        except ValidationError as e:
+            logger.error(f"Błąd walidacji danych alertu {alert_id}: {e}", extra={"json_fields": {"alert_id": alert_id}})
+        except (BybitAPIError, RequestException) as e:
+            logger.critical(f"[{symbol}] Błąd API Bybit podczas przetwarzania alertu {alert_id}.")
         except Exception as e:
             logger.critical(f"[{symbol}] Nieoczekiwany błąd w logice przetwarzania alertu {alert_id}: {e}", exc_info=True)
 
@@ -178,7 +182,23 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
                 ob_type = "Fresh OB" if setup.entry_attempts == 0 else "Used OB"
                 
                 if closed_result:
-                    # ... (ta część logiki pozostaje bez zmian) ...
+                    trade_id = str(uuid.uuid4())
+                    logger.info(f"--- [WEJŚCIE I ZAMKNIĘCIE W 1 MIN] --- [{symbol}] | Wynik: {closed_result} | ID: {trade_id}")
+                    entry_timestamp = datetime.fromtimestamp(latest_kline.timestamp / 1000, tz=timezone.utc)
+                    fake_trade = OpenTradeData(
+                        trade_id=trade_id, symbol=symbol, direction=direction, ob_type=ob_type,
+                        entry_price=entry_level, sl_price=sl_price, tp_price=tp_price,
+                        opened_at_ms=latest_kline.timestamp, opened_at_iso=entry_timestamp.isoformat(),
+                        alert_data_snapshot=setup.alert_data.model_dump(by_alias=True),
+                        bybit_order_id="immediate_close_no_order"
+                    )
+                    finalize_trade(fake_trade, closed_result, close_price)
+                    try:
+                        db = get_db()
+                        transaction = db.transaction()
+                        state_manager.update_setup_after_immediate_close_transactional(transaction, symbol, is_loss=(closed_result == "LOSE"))
+                    except Exception as ex:
+                        logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD TRANSAKCJI: {ex}", exc_info=True)
                 else:
                     logger.info(f"--- [DECYZJA: WEJŚCIE {ob_type}] --- [{symbol}] | Cena: {entry_level} | Rozpoczynam proces składania zlecenia.")
                     
@@ -196,21 +216,28 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
                             continue
                         
                         max_leverage = instrument_info['max_leverage']
-                        tick_size = instrument_info.get('tick_size')
+                        qty_step = instrument_info['qty_step']
+                        min_order_qty = instrument_info['min_order_qty']
                         final_leverage = min(required_leverage, max_leverage)
                         
-                        formatted_price = format_price(entry_level, tick_size)
-                        formatted_tp = format_price(setup.alert_data.tp_2_0, tick_size)
-                        formatted_sl = format_price(sl_price, tick_size)
+                        target_qty = 10.0 / entry_level
+                        
+                        if target_qty < min_order_qty:
+                            logger.warning(f"[{symbol}] Docelowa ilość ({target_qty:.6f}) jest mniejsza niż minimum giełdowe ({min_order_qty}). Używam minimalnej ilości.")
+                            final_qty = min_order_qty
+                        else:
+                            final_qty = target_qty
+                        
+                        formatted_qty = format_quantity(final_qty, qty_step)
+
+                        if float(formatted_qty) <= 0:
+                            logger.error(f"[{symbol}] Obliczona wielkość zlecenia po sformatowaniu ({formatted_qty}) jest zerowa. Przerywam.")
+                            continue
 
                         order_params = {
-                            "symbol": symbol,
-                            "side": direction,
-                            "price": formatted_price,
-                            "qtyValue": "10", # <-- OSTATECZNA POPRAWKA
-                            "leverage": str(final_leverage),
-                            "takeProfit": formatted_tp,
-                            "stopLoss": formatted_sl
+                            "symbol": symbol, "side": direction, "price": str(entry_level),
+                            "qty": formatted_qty, "leverage": str(final_leverage),
+                            "takeProfit": str(setup.alert_data.tp_2_0), "stopLoss": str(sl_price)
                         }
                         order_id = bybit_executor.place_limit_order(order_params)
 
@@ -229,6 +256,8 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
                         logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD podczas interakcji z API Bybit: {e}")
                     except Exception as e:
                         logger.critical(f"[{symbol}] Nieoczekiwany błąd w logice otwierania pozycji: {e}", exc_info=True)
+        except ValidationError as e:
+            logger.error(f"Błąd walidacji danych setupu dla {symbol}: {e}")
         except Exception as e:
             logger.error(f"Błąd podczas sprawdzania wejścia dla {symbol}: {e}", exc_info=True)
            
