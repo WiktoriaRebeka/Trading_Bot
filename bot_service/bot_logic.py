@@ -11,7 +11,7 @@ from requests.exceptions import RequestException
 
 from shared_lib import constants
 from shared_lib.firebase_client import get_db, get_symbols_to_watch_from_config
-from shared_lib.leverage_calculator import get_all_calculations_for_alert, format_price, format_quantity
+from shared_lib.leverage_calculator import get_all_calculations_for_alert
 from shared_lib.models import (
     AlertData,
     AnalyzedTradeData,
@@ -25,6 +25,7 @@ from bot_service.bigquery_logger import log_trade_to_bigquery
 from bot_service.bybit_executor import (
     BybitAPIError,
     BybitExecutor,
+    format_quantity,
 )
 
 logger = logging.getLogger(__name__)
@@ -32,67 +33,58 @@ logger = logging.getLogger(__name__)
 def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executor: BybitExecutor):
     if not newly_fetched_alerts:
         return
-    logger.info(f"Rozpoczynam przetwarzanie {len(newly_fetched_alerts)} nowych alertów w celu złożenia zleceň.")
+    logger.info(f"Przetwarzam {len(newly_fetched_alerts)} nowych alertów w celu złożenia zleceň.")
     
     for alert_dict in newly_fetched_alerts:
-        alert_id = alert_dict.get('id', 'N/A')
-        symbol = "N/A"
         try:
             alert_data = AlertData.model_validate(alert_dict)
             symbol = alert_data.symbol
-            
-            logger.info(f"--- [{symbol}][Alert: {alert_id}] Rozpoczynam przetwarzanie zlecenia ---")
+            logger.info(f"--- [{symbol}] Rozpoczynam proces składania zlecenia na podstawie nowego alertu ---")
 
             leverage_calcs = get_all_calculations_for_alert(alert_data)
             required_leverage = leverage_calcs.get('required_leverage')
 
-            if not required_leverage:
-                logger.warning(f"[{symbol}] Zlecenie odrzucone. Wymagana dźwignia nie mogła zostać obliczona lub jest < 1.")
+            if not required_leverage or required_leverage < 1:
+                logger.warning(f"[{symbol}] Zlecenie odrzucone. Wymagana dźwignia ({required_leverage}) jest nieprawidłowa.")
                 continue
 
             instrument_info = bybit_executor.get_instrument_info(symbol)
-            
             if not instrument_info:
-                logger.error(f"[{symbol}] Nie udało się pobrać informacji o instrumencie z Bybit. Prawdopodobnie symbol jest nieaktywny lub nie istnieje. Przerywam.")
+                logger.error(f"[{symbol}] Nie udało się pobrać informacji o instrumencie. Przerywam.")
                 continue
             
-            tick_size = instrument_info.get('tick_size')
-            if not tick_size:
-                logger.error(f"[{symbol}] Brak 'tick_size' w danych z API, mimo że dane instrumentu zostały pobrane. Przerywam.")
-                continue
-
-            max_leverage_from_api = instrument_info.get('max_leverage', 1.0)
-            final_leverage = min(required_leverage, max_leverage_from_api)
-            logger.info(f"[{symbol}] Dźwignia: Wymagana={required_leverage}x, Max giełdy={max_leverage_from_api}x. Wybrano: {final_leverage}x.")
+            max_leverage = instrument_info['max_leverage']
+            final_leverage = min(required_leverage, max_leverage)
+            logger.info(f"[{symbol}] Dźwignia: Wymagana={required_leverage}x, Max giełdy={max_leverage}x. Wybrano: {final_leverage}x.")
             
-            formatted_price = format_price(alert_data.entry, tick_size)
-            formatted_tp = format_price(alert_data.tp_2_0, tick_size)
-            formatted_sl = format_price(alert_data.sl, tick_size)
-            
-            logger.info(f"[{symbol}] Ceny sformatowane zgodnie z tick_size='{tick_size}': Entry={formatted_price}, TP={formatted_tp}, SL={formatted_sl}")
-
             order_params = {
                 "symbol": symbol,
                 "side": alert_data.direction,
-                "price": formatted_price,
+                "price": str(alert_data.entry),
                 "qty": "10",
-                "leverage": final_leverage,
-                "takeProfit": formatted_tp,
-                "stopLoss": formatted_sl
+                "leverage": str(final_leverage),
+                "takeProfit": str(alert_data.tp_2_0),
+                "stopLoss": str(alert_data.sl)
             }
             order_id = bybit_executor.place_limit_order(order_params)
 
             if order_id:
-                logger.info(f"[{symbol}][Alert: {alert_id}] SUKCES. Zlecenie zostało pomyślnie wysłane do Bybit. Order ID: {order_id}")
+                trade_id = str(uuid.uuid4())
+                logger.info(f"[{symbol}] Zlecenie pomyślnie wysłane. Tworzę dokument w open_trades z trade_id: {trade_id} i bybit_order_id: {order_id}")
+                state_manager.create_open_trade(
+                    trade_id=trade_id, symbol=symbol, direction=alert_data.direction, ob_type="Fresh OB",
+                    entry_price=alert_data.entry, sl_price=alert_data.sl, tp_price=alert_data.tp,
+                    alert_data=alert_data, bybit_order_id=order_id
+                )
             else:
-                logger.error(f"[{symbol}][Alert: {alert_id}] PORAŻKA. Nie udało się złożyć zlecenia na giełdzie.")
+                logger.error(f"[{symbol}] Nie udało się uzyskać ID zlecenia od Bybit. Pozycja nie zostanie utworzona w Firestore.")
 
-        except ValidationError as e:
-            logger.error(f"Błąd walidacji danych alertu {alert_id}: {e}", extra={"json_fields": {"alert_id": alert_id}})
         except (BybitAPIError, RequestException) as e:
-            logger.critical(f"[{symbol}] Błąd API Bybit podczas przetwarzania alertu {alert_id}.")
+            logger.critical(f"[{alert_data.symbol}] KRYTYCZNY BŁĄD podczas interakcji z API Bybit: {e}")
+        except ValidationError as e:
+            logger.error(f"Błąd walidacji danych alertu: {e}", extra={"json_fields": {"alert_id": alert_dict.get('id')}})
         except Exception as e:
-            logger.critical(f"[{symbol}] Nieoczekiwany błąd w logice przetwarzania alertu {alert_id}: {e}", exc_info=True)
+            logger.critical(f"Nieoczekiwany błąd w logice otwierania pozycji: {e}", exc_info=True)
 
 
 
