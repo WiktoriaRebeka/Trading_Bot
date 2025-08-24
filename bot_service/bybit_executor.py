@@ -35,7 +35,6 @@ class BybitExecutor:
         
         self.api_key: str = api_key
         self.api_secret: str = api_secret
-        # === OSTATECZNA POPRAWKA: Zmiana adresu URL na Testnet dla konta Demo ===
         self.base_url: str = "https://api-demo.bybit.com"
         self.session = requests.Session()
 
