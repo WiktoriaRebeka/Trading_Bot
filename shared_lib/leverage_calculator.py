@@ -3,10 +3,16 @@
 import logging
 from typing import Dict, Optional
 import math
-
+from decimal import Decimal, ROUND_DOWN
 from shared_lib.models import AlertData
 
 logger = logging.getLogger(__name__)
+
+def format_price(price: float, tick_size: str) -> str:
+    price_decimal = Decimal(str(price))
+    tick_size_decimal = Decimal(tick_size)
+    formatted_price = price_decimal.quantize(tick_size_decimal, rounding=ROUND_DOWN)
+    return str(formatted_price)
 
 RISK_PER_TRADE_PERCENT = 2.5
 POSITION_SIZE_PERCENT = 10.0
@@ -37,35 +43,28 @@ def calculate_real_sl_distance_percentage(sl_distance_percentage: float) -> floa
 
 def calculate_required_leverage(real_sl_percentage: float) -> Optional[int]:
     if real_sl_percentage <= 0:
-        logger.error(f"Realna odległość SL ({real_sl_percentage}%) jest zerowa lub ujemna. Nie można obliczyć dźwigni.")
+        logger.error(f"Realna odległość SL ({real_sl_percentage}%) jest zerowa lub ujemna.")
         return None
-
     risk_in_usd = (RISK_PER_TRADE_PERCENT / 100) * TOTAL_CAPITAL
     margin_in_usd = (POSITION_SIZE_PERCENT / 100) * TOTAL_CAPITAL
     loss_on_margin_in_usd = (real_sl_percentage / 100) * margin_in_usd
-    
     if loss_on_margin_in_usd <= 0:
-        logger.error("Strata na marginie jest zerowa lub ujemna. Nie można obliczyć dźwigni.")
+        logger.error("Strata na marginie jest zerowa lub ujemna.")
         return None
-
     leverage = risk_in_usd / loss_on_margin_in_usd
     safe_leverage = math.floor(leverage)
-    
     if safe_leverage < 1:
-        logger.warning(f"Obliczona dźwignia ({leverage:.2f}x) jest mniejsza niż 1. Oznacza to, że ryzyko jest bardzo duże. Zwracam None, aby uniknąć transakcji.")
+        logger.warning(f"Obliczona dźwignia ({leverage:.2f}x) jest mniejsza niż 1.")
         return None
-
     return int(safe_leverage)
 
 def get_all_calculations_for_alert(alert: AlertData) -> Dict[str, Optional[float | int]]:
     entry = alert.entry
     sl = alert.sl
-    
     distance_points = calculate_sl_distance_points(entry, sl)
     distance_percentage = calculate_sl_distance_percentage(entry, sl)
     real_distance_percentage = calculate_real_sl_distance_percentage(distance_percentage)
     required_leverage = calculate_required_leverage(real_distance_percentage)
-    
     return {
         "distance_points": distance_points,
         "distance_percentage": distance_percentage,
