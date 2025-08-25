@@ -244,29 +244,22 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
                             continue
                         
                         max_leverage = instrument_info['max_leverage']
-                        qty_step = instrument_info['qty_step']
-                        min_order_qty = instrument_info['min_order_qty']
                         final_leverage = min(required_leverage, max_leverage)
                         
-                        target_qty = 10.0 / entry_level
-                        
-                        if target_qty < min_order_qty:
-                            logger.warning(f"[{symbol}] Docelowa ilość ({target_qty:.6f}) jest mniejsza niż minimum giełdowe ({min_order_qty}). Używam minimalnej ilości.")
-                            final_qty = min_order_qty
-                        else:
-                            final_qty = target_qty
-                        
-                        formatted_qty = format_quantity(final_qty, qty_step)
-
-                        if float(formatted_qty) <= 0:
-                            logger.error(f"[{symbol}] Obliczona wielkość zlecenia po sformatowaniu ({formatted_qty}) jest zerowa. Przerywam.")
-                            continue
-
+                        # --- ZMIANA ---
+                        # Usunięto starą logikę obliczania `qty` i zastąpiono ją stałą wartością "10",
+                        # aby zapewnić spójność z `process_new_alerts`.
                         order_params = {
-                            "symbol": symbol, "side": direction, "price": str(entry_level),
-                            "qty": formatted_qty, "leverage": str(final_leverage),
-                            "takeProfit": str(setup.alert_data.tp_2_0), "stopLoss": str(sl_price)
+                            "symbol": symbol, 
+                            "side": direction, 
+                            "price": str(entry_level),
+                            "qty": "10", 
+                            "leverage": str(final_leverage),
+                            "takeProfit": str(setup.alert_data.tp_2_0), 
+                            "stopLoss": str(sl_price)
                         }
+                        # --- KONIEC ZMIANY ---
+                        
                         order_id = bybit_executor.place_limit_order(order_params)
 
                         if order_id:
