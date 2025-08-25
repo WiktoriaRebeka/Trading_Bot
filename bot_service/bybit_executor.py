@@ -132,8 +132,6 @@ class BybitExecutor:
             "takeProfit": str(order_params['takeProfit']),
             "stopLoss": str(order_params['stopLoss']),
             "timeInForce": "GTC"
-            # --- ZMIANA ---
-            # Usunięto nieistniejący i błędny parametr qtyType
         }
         
         logger.info(f"[{symbol}] Wysyłanie zlecenia do Bybit z parametrami: {payload}")

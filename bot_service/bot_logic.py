@@ -31,13 +31,10 @@ from decimal import Decimal
 logger = logging.getLogger(__name__)
 
 
-
-# --- NOWA, UJEDNOLICONA FUNKCJA DO SKŁADANIA ZLECEŃ ---
 def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecutor, alert_id: str = 'N/A'):
     """
-    Przygotowuje i składa zlecenie o wartości ~10 USDT.
-    Jeśli obliczona ilość jest poniżej minimum giełdowego, zlecenie jest odrzucane.
-    Zwraca order_id w przypadku sukcesu, w przeciwnym razie None.
+    Przygotowuje i składa zlecenie, aby ryzyko ZAWSZE wynosiło 2.50 USDT.
+    Dynamicznie dostosowuje wielkość pozycji, jeśli wymagany lewar jest niedostępny.
     """
     symbol = alert_data.symbol
     try:
@@ -55,36 +52,46 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
         tick_size = instrument_info.get('tick_size')
         qty_step = instrument_info.get('qty_step')
         min_order_qty = instrument_info.get('min_order_qty')
+        max_leverage_from_api = instrument_info.get('max_leverage', 1.0)
+
         if not tick_size or not qty_step:
             logger.error(f"[{symbol}] Brak 'tick_size' lub 'qty_step' w danych z API.")
             return None
 
-        max_leverage_from_api = instrument_info.get('max_leverage', 1.0)
-        final_leverage = min(required_leverage, max_leverage_from_api)
+        # --- NOWA, KLUCZOWA LOGIKA STRATEGII ---
+        base_position_value = 10.0
+        final_leverage = required_leverage
+        final_position_value = base_position_value
+
+        if required_leverage > max_leverage_from_api:
+            leverage_ratio = required_leverage / max_leverage_from_api
+            final_position_value = base_position_value * leverage_ratio
+            final_leverage = max_leverage_from_api
+            
+            logger.warning(
+                f"[{symbol}] Wymagany lewar ({required_leverage}x) > Max giełdy ({max_leverage_from_api}x). "
+                f"Zwiększam wartość pozycji do ~{final_position_value:.2f} USDT, aby zachować ryzyko 2.50 USDT."
+            )
         
-        # --- KLUCZOWA LOGIKA OBLICZENIOWA I WALIDACYJNA ---
-        desired_value_usdt = 10.0
         entry_price = alert_data.entry
-        
         if entry_price <= 0:
-            logger.error(f"[{symbol}] Cena wejścia wynosi zero lub jest ujemna. Nie można obliczyć wielkości zlecenia.")
+            logger.error(f"[{symbol}] Cena wejścia wynosi zero lub jest ujemna.")
             return None
             
-        target_qty = desired_value_usdt / entry_price
+        target_qty = final_position_value / entry_price
         
-        # --- ZABEZPIECZENIE STRATEGII ---
         if target_qty < min_order_qty:
             logger.warning(
-                f"[{symbol}] Zlecenie odrzucone. Obliczona ilość ({target_qty:.8f}) jest mniejsza niż minimum giełdowe ({min_order_qty}). "
-                f"Złożenie zlecenia naruszyłoby spójność strategii (wartość > 10 USDT)."
+                f"[{symbol}] Zlecenie odrzucone. Obliczona ilość ({target_qty:.8f}) jest mniejsza niż minimum giełdowe ({min_order_qty})."
             )
             return None
         
         formatted_qty = format_quantity(target_qty, qty_step)
 
         if float(formatted_qty) <= 0:
-            logger.error(f"[{symbol}] Obliczona wielkość zlecenia po sformatowaniu ({formatted_qty}) jest zerowa. Przerywam.")
+            logger.error(f"[{symbol}] Obliczona wielkość zlecenia po sformatowaniu ({formatted_qty}) jest zerowa.")
             return None
+        # --- KONIEC NOWEJ LOGIKI ---
         
         formatted_price = format_price(alert_data.entry, tick_size)
         formatted_tp = format_price(alert_data.tp_2_0, tick_size)
@@ -123,54 +130,6 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executo
         except Exception as e:
             logger.critical(f"[Alert: {alert_id}] Nieoczekiwany błąd: {e}", exc_info=True)
 
-
-def _calculate_rr_analytics(entry_price: float, sl_price: float, extreme_price: float, direction: str) -> Dict[str, Any]:
-    risk_diff = abs(entry_price - sl_price)
-    if risk_diff == 0:
-        logger.warning(f"Różnica ryzyka wynosi zero (entry={entry_price}, sl={sl_price}). R:R ustawione na 0.")
-        return {"rr_achieved": 0.0}
-    profit_diff = 0.0
-    if direction.upper() == 'LONG' and extreme_price > entry_price:
-        profit_diff = extreme_price - entry_price
-    elif direction.upper() == 'SHORT' and extreme_price < entry_price:
-        profit_diff = entry_price - extreme_price
-    rr_achieved = round(profit_diff / risk_diff, 4)
-    analytics = {"rr_achieved": rr_achieved}
-    rr_thresholds = {
-        "rr_1_0_achieved": 1.0, "rr_1_5_achieved": 1.5, "rr_2_0_achieved": 2.0,
-        "rr_3_0_achieved": 3.0, "rr_4_0_achieved": 4.0, "rr_5_0_achieved": 5.0
-    }
-    for flag, threshold in rr_thresholds.items():
-        analytics[flag] = rr_achieved >= threshold
-    return analytics
-
-def finalize_trade(trade: OpenTradeData, closed_result: str, close_price: float):
-    logger.info(f"--- [FINALIZACJA] --- [{trade.symbol}] | ID: {trade.trade_id} | Wynik: {closed_result}")
-    if closed_result == "LOSE":
-        logger.info(f"[{trade.trade_id}] Pozycja przegrana. Analiza historyczna i zapis do BigQuery.")
-        end_time_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-        historical_klines = state_manager.get_historical_klines(trade.symbol, trade.opened_at_ms, end_time_ms)
-        extreme_price = trade.entry_price
-        if historical_klines:
-            if trade.direction == 'LONG':
-                extreme_price = max(k['high'] for k in historical_klines)
-            elif trade.direction == 'SHORT':
-                extreme_price = min(k['low'] for k in historical_klines)
-        analytics_data = _calculate_rr_analytics(trade.entry_price, trade.sl_price, extreme_price, trade.direction)
-        bq_data = {
-            "trade_id": trade.trade_id, 
-            "timestamp_entry": trade.opened_at_iso,
-            "timestamp_close": datetime.now(timezone.utc).isoformat(), 
-            "symbol": trade.symbol,
-            "direction": trade.direction.upper(), 
-            "main_result": "LOSE", 
-            "ob_type": trade.ob_type
-        }
-        bq_data.update(analytics_data)
-        log_trade_to_bigquery(bq_data)
-    elif closed_result == "WIN":
-        logger.info(f"[{trade.trade_id}] Pozycja wygrana. Tworzę 'ducha' do dalszej analizy.")
-        state_manager.create_analyzed_trade(trade)
 
 def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSnapshot], bybit_executor: BybitExecutor):
     if not active_setups: return
@@ -244,6 +203,55 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
             logger.error(f"Błąd walidacji danych setupu dla {symbol}: {e}")
         except Exception as e:
             logger.error(f"Błąd podczas sprawdzania wejścia dla {symbol}: {e}", exc_info=True)
+
+def _calculate_rr_analytics(entry_price: float, sl_price: float, extreme_price: float, direction: str) -> Dict[str, Any]:
+    risk_diff = abs(entry_price - sl_price)
+    if risk_diff == 0:
+        logger.warning(f"Różnica ryzyka wynosi zero (entry={entry_price}, sl={sl_price}). R:R ustawione na 0.")
+        return {"rr_achieved": 0.0}
+    profit_diff = 0.0
+    if direction.upper() == 'LONG' and extreme_price > entry_price:
+        profit_diff = extreme_price - entry_price
+    elif direction.upper() == 'SHORT' and extreme_price < entry_price:
+        profit_diff = entry_price - extreme_price
+    rr_achieved = round(profit_diff / risk_diff, 4)
+    analytics = {"rr_achieved": rr_achieved}
+    rr_thresholds = {
+        "rr_1_0_achieved": 1.0, "rr_1_5_achieved": 1.5, "rr_2_0_achieved": 2.0,
+        "rr_3_0_achieved": 3.0, "rr_4_0_achieved": 4.0, "rr_5_0_achieved": 5.0
+    }
+    for flag, threshold in rr_thresholds.items():
+        analytics[flag] = rr_achieved >= threshold
+    return analytics
+
+def finalize_trade(trade: OpenTradeData, closed_result: str, close_price: float):
+    logger.info(f"--- [FINALIZACJA] --- [{trade.symbol}] | ID: {trade.trade_id} | Wynik: {closed_result}")
+    if closed_result == "LOSE":
+        logger.info(f"[{trade.trade_id}] Pozycja przegrana. Analiza historyczna i zapis do BigQuery.")
+        end_time_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        historical_klines = state_manager.get_historical_klines(trade.symbol, trade.opened_at_ms, end_time_ms)
+        extreme_price = trade.entry_price
+        if historical_klines:
+            if trade.direction == 'LONG':
+                extreme_price = max(k['high'] for k in historical_klines)
+            elif trade.direction == 'SHORT':
+                extreme_price = min(k['low'] for k in historical_klines)
+        analytics_data = _calculate_rr_analytics(trade.entry_price, trade.sl_price, extreme_price, trade.direction)
+        bq_data = {
+            "trade_id": trade.trade_id, 
+            "timestamp_entry": trade.opened_at_iso,
+            "timestamp_close": datetime.now(timezone.utc).isoformat(), 
+            "symbol": trade.symbol,
+            "direction": trade.direction.upper(), 
+            "main_result": "LOSE", 
+            "ob_type": trade.ob_type
+        }
+        bq_data.update(analytics_data)
+        log_trade_to_bigquery(bq_data)
+    elif closed_result == "WIN":
+        logger.info(f"[{trade.trade_id}] Pozycja wygrana. Tworzę 'ducha' do dalszej analizy.")
+        state_manager.create_analyzed_trade(trade)
+
            
 def _handle_manage_open_trades(klines_data: Dict[str, Kline], open_trades: List[DocumentSnapshot]):
     if not open_trades: return
