@@ -1,6 +1,7 @@
 # Lokalizacja: bot_service/state_manager.py
 
 import logging
+from typing import Optional
 from typing import Iterable, Dict, Any, List
 from datetime import datetime, timezone
 from google.cloud import firestore
