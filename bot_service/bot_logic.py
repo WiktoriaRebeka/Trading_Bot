@@ -85,15 +85,17 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executo
             else:  # SHORT
                 corrected_sl = entry_price_dec + sl_distance
 
+            # --- POCZĄTEK POPRAWKI ---
+            # Zastąpiono błędne wywołanie .compareTo() standardowym operatorem Pythona '!='
+            if Decimal(str(alert_data.tp_2_0)) != corrected_tp:
+                 logger.warning(f"[{symbol}][Alert: {alert_id}] Skorygowano niepoprawny TP dla zlecenia {alert_data.direction}. Oryginalny: {alert_data.tp_2_0}, Poprawiony: {float(corrected_tp):.8f}")
+            
+            if Decimal(str(alert_data.sl)) != corrected_sl:
+                 logger.warning(f"[{symbol}][Alert: {alert_id}] Skorygowano niepoprawny SL dla zlecenia {alert_data.direction}. Oryginalny: {alert_data.sl}, Poprawiony: {float(corrected_sl):.8f}")
+            # --- KONIEC POPRAWKI ---
+
             formatted_tp = format_price(float(corrected_tp), tick_size)
             formatted_sl = format_price(float(corrected_sl), tick_size)
-
-            if Decimal(str(alert_data.tp_2_0)).compareTo(corrected_tp) != 0:
-                 logger.warning(f"[{symbol}][Alert: {alert_id}] Skorygowano niepoprawny TP dla zlecenia {alert_data.direction}. Oryginalny: {alert_data.tp_2_0}, Poprawiony: {formatted_tp}")
-            
-            if Decimal(str(alert_data.sl)).compareTo(corrected_sl) != 0:
-                 logger.warning(f"[{symbol}][Alert: {alert_id}] Skorygowano niepoprawny SL dla zlecenia {alert_data.direction}. Oryginalny: {alert_data.sl}, Poprawiony: {formatted_sl}")
-            # --- KONIEC BLOKU KOREKTY ---
 
             logger.info(f"[{symbol}] Ceny sformatowane zgodnie z tick_size='{tick_size}': Entry={formatted_price}, TP={formatted_tp}, SL={formatted_sl}")
 
