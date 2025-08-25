@@ -150,3 +150,32 @@ class BybitExecutor:
                 exc_info=True
             )
             return None
+
+    def cancel_order(self, symbol: str, order_id: str) -> bool:
+        """Anuluje aktywne zlecenie na podstawie jego ID."""
+        api_symbol = symbol.replace('.P', '')
+        payload = {
+            "category": "linear",
+            "symbol": api_symbol,
+            "orderId": order_id
+        }
+        logger.info(f"[{symbol}] Wysyłanie żądania anulowania zlecenia: {order_id}")
+        try:
+            result = self._send_request("POST", "/v5/order/cancel", params=payload)
+            # Sprawdzamy, czy API zwróciło ID anulowanego zlecenia
+            if result.get("orderId") == order_id:
+                logger.info(f"[{symbol}] Zlecenie {order_id} pomyślnie anulowane.")
+                return True
+            else:
+                logger.error(f"[{symbol}] API Bybit nie potwierdziło anulowania zlecenia {order_id}. Odpowiedź: {result}")
+                return False
+        except BybitAPIError as e:
+            # Jeśli zlecenie już nie istnieje (bo np. zostało zrealizowane), traktujemy to jako sukces
+            if e.ret_code == 110021: # Order does not exist or has been closed
+                logger.warning(f"[{symbol}] Próba anulowania zlecenia {order_id}, które już nie istnieje (prawdopodobnie zrealizowane lub anulowane). Traktuję jako sukces.")
+                return True
+            logger.critical(f"[{symbol}] Błąd API Bybit podczas anulowania zlecenia {order_id}: {e}")
+            return False
+        except RequestException as e:
+            logger.critical(f"[{symbol}] Błąd sieciowy podczas anulowania zlecenia {order_id}: {e}")
+            return False

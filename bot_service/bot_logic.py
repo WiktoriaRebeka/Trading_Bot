@@ -113,22 +113,73 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
         return None
 
 
+# ... (wszystkie importy bez zmian)
+
+# --- BEZ ZMIAN ---
+# _prepare_and_place_order, _calculate_rr_analytics, finalize_trade
+
+# --- ZMIANA W process_new_alerts ---
 def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executor: BybitExecutor):
     if not newly_fetched_alerts:
         return
     logger.info(f"Rozpoczynam przetwarzanie {len(newly_fetched_alerts)} nowych alertów.")
+    
     for alert_dict in newly_fetched_alerts:
         alert_id = alert_dict.get('id', 'N/A')
+        symbol = "N/A"
         try:
             alert_data = AlertData.model_validate(alert_dict)
-            logger.info(f"--- [{alert_data.symbol}][Alert: {alert_id}] Przetwarzanie zlecenia ---")
+            symbol = alert_data.symbol
+            
+            logger.info(f"--- [{symbol}][Alert: {alert_id}] Rozpoczynam przetwarzanie zlecenia ---")
+
+            # --- POCZĄTEK NOWEJ LOGIKI ANULOWANIA ---
+            existing_trade_data = state_manager.get_open_trade_by_symbol(symbol)
+            if existing_trade_data:
+                existing_order_id = existing_trade_data.get('bybit_order_id')
+                existing_trade_id = existing_trade_data.get('trade_id')
+                
+                logger.warning(f"[{symbol}] Znaleziono istniejące, niezrealizowane zlecenie (Bybit ID: {existing_order_id}). Anuluję przed złożeniem nowego.")
+                
+                success = bybit_executor.cancel_order(symbol, existing_order_id)
+                
+                if success:
+                    state_manager.delete_open_trade(existing_trade_id)
+                    logger.info(f"[{symbol}] Stare zlecenie i jego wpis w bazie danych zostały pomyślnie usunięte.")
+                else:
+                    logger.critical(
+                        f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się anulować istniejącego zlecenia {existing_order_id}. "
+                        f"Przerywam przetwarzanie tego alertu, aby uniknąć duplikacji pozycji."
+                    )
+                    continue # Przejdź do następnego alertu
+            # --- KONIEC NOWEJ LOGIKI ANULOWANIA ---
+
             order_id = _prepare_and_place_order(alert_data, bybit_executor, alert_id)
+
             if order_id:
-                logger.info(f"[{alert_data.symbol}][Alert: {alert_id}] SUKCES. Order ID: {order_id}")
+                # Po pomyślnym złożeniu zlecenia, musimy stworzyć nowy dokument w open_trades.
+                # Ta logika musi być tutaj, a nie w _prepare_and_place_order, bo potrzebujemy trade_id.
+                trade_id = str(uuid.uuid4())
+                state_manager.create_open_trade(
+                    trade_id=trade_id,
+                    symbol=symbol,
+                    direction=alert_data.direction,
+                    ob_type="New Alert", # Można by to bardziej uszczegółowić
+                    entry_price=alert_data.entry,
+                    sl_price=alert_data.sl,
+                    tp_price=alert_data.tp_2_0,
+                    alert_data=alert_data,
+                    bybit_order_id=order_id
+                )
+                logger.info(f"[{symbol}][Alert: {alert_id}] SUKCES. Zlecenie {order_id} złożone. Utworzono wpis w open_trades: {trade_id}")
             else:
-                logger.error(f"[{alert_data.symbol}][Alert: {alert_id}] PORAŻKA. Nie udało się złożyć zlecenia.")
+                logger.error(f"[{symbol}][Alert: {alert_id}] PORAŻKA. Nie udało się złożyć zlecenia na giełdzie.")
+
+        except ValidationError as e:
+            logger.error(f"Błąd walidacji danych alertu {alert_id}: {e}", extra={"json_fields": {"alert_id": alert_id}})
         except Exception as e:
-            logger.critical(f"[Alert: {alert_id}] Nieoczekiwany błąd: {e}", exc_info=True)
+            logger.critical(f"[{symbol}] Nieoczekiwany błąd w głównej pętli przetwarzania alertu {alert_id}: {e}", exc_info=True)
+
 
 
 def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSnapshot], bybit_executor: BybitExecutor):

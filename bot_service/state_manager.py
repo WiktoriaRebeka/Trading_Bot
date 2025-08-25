@@ -240,3 +240,29 @@ def get_historical_klines(symbol: str, start_time_ms: int, end_time_ms: int) -> 
         logger.error(f"[{symbol}] Krytyczny błąd podczas pobierania historii świec: {e}", exc_info=True)
         
     return []
+
+# Należy dodać te dwie funkcje do pliku state_manager.py
+
+def get_open_trade_by_symbol(symbol: str) -> Optional[Dict[str, Any]]:
+    """Wyszukuje w kolekcji 'open_trades' dokument dla danego symbolu."""
+    try:
+        db = get_db()
+        trades_ref = db.collection('open_trades').where('symbol', '==', symbol).limit(1).stream()
+        for trade_doc in trades_ref:
+            # Zwracamy słownik, aby mieć dostęp do trade_id (które jest ID dokumentu)
+            trade_data = trade_doc.to_dict()
+            trade_data['trade_id'] = trade_doc.id
+            return trade_data
+        return None
+    except Exception as e:
+        logger.error(f"Błąd podczas wyszukiwania otwartego zlecenia dla symbolu {symbol}: {e}")
+        return None
+
+def delete_open_trade(trade_id: str):
+    """Usuwa dokument z kolekcji 'open_trades' na podstawie jego ID."""
+    try:
+        db = get_db()
+        db.collection('open_trades').document(trade_id).delete()
+        logger.info(f"Pomyślnie usunięto dokument zlecenia {trade_id} z Firestore.")
+    except Exception as e:
+        logger.error(f"Błąd podczas usuwania dokumentu zlecenia {trade_id}: {e}")
