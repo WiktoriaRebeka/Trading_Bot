@@ -27,8 +27,10 @@ from bot_service.bybit_executor import (
     BybitExecutor,
     format_quantity,
 )
-
+from decimal import Decimal
 logger = logging.getLogger(__name__)
+
+
 
 def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executor: BybitExecutor):
     if not newly_fetched_alerts:
@@ -67,9 +69,32 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executo
             logger.info(f"[{symbol}] Dźwignia: Wymagana={required_leverage}x, Max giełdy={max_leverage_from_api}x. Wybrano: {final_leverage}x.")
             
             formatted_price = format_price(alert_data.entry, tick_size)
-            formatted_tp = format_price(alert_data.tp_2_0, tick_size)
-            formatted_sl = format_price(alert_data.sl, tick_size)
+
+            # --- BLOK KOREKTY I WALIDACJI TP/SL ---
+            entry_price_dec = Decimal(str(alert_data.entry))
             
+            tp_distance = abs(Decimal(str(alert_data.tp_2_0)) - entry_price_dec)
+            if alert_data.direction == 'LONG':
+                corrected_tp = entry_price_dec + tp_distance
+            else:  # SHORT
+                corrected_tp = entry_price_dec - tp_distance
+            
+            sl_distance = abs(Decimal(str(alert_data.sl)) - entry_price_dec)
+            if alert_data.direction == 'LONG':
+                corrected_sl = entry_price_dec - sl_distance
+            else:  # SHORT
+                corrected_sl = entry_price_dec + sl_distance
+
+            formatted_tp = format_price(float(corrected_tp), tick_size)
+            formatted_sl = format_price(float(corrected_sl), tick_size)
+
+            if Decimal(str(alert_data.tp_2_0)).compareTo(corrected_tp) != 0:
+                 logger.warning(f"[{symbol}][Alert: {alert_id}] Skorygowano niepoprawny TP dla zlecenia {alert_data.direction}. Oryginalny: {alert_data.tp_2_0}, Poprawiony: {formatted_tp}")
+            
+            if Decimal(str(alert_data.sl)).compareTo(corrected_sl) != 0:
+                 logger.warning(f"[{symbol}][Alert: {alert_id}] Skorygowano niepoprawny SL dla zlecenia {alert_data.direction}. Oryginalny: {alert_data.sl}, Poprawiony: {formatted_sl}")
+            # --- KONIEC BLOKU KOREKTY ---
+
             logger.info(f"[{symbol}] Ceny sformatowane zgodnie z tick_size='{tick_size}': Entry={formatted_price}, TP={formatted_tp}, SL={formatted_sl}")
 
             order_params = {
@@ -91,7 +116,7 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executo
         except ValidationError as e:
             logger.error(f"Błąd walidacji danych alertu {alert_id}: {e}", extra={"json_fields": {"alert_id": alert_id}})
         except (BybitAPIError, RequestException) as e:
-            logger.critical(f"[{symbol}] Błąd API Bybit podczas przetwarzania alertu {alert_id}.")
+            logger.critical(f"[{symbol}] Błąd API Bybit podczas przetwarzania alertu {alert_id}. Zlecenie nie zostało złożone.")
         except Exception as e:
             logger.critical(f"[{symbol}] Nieoczekiwany błąd w logice przetwarzania alertu {alert_id}: {e}", exc_info=True)
 

@@ -138,7 +138,7 @@ class BybitExecutor:
             "takeProfit": str(order_params['takeProfit']),
             "stopLoss": str(order_params['stopLoss']),
             "timeInForce": "GTC",
-            "qtyIsQuote": True 
+            "qtyType": "ByVal"  # KLUCZOWA ZMIANA: Z 'qtyIsQuote' na 'qtyType'
         }
         
         logger.info(f"[{symbol}] Wysyłanie zlecenia do Bybit z parametrami: {payload}")
