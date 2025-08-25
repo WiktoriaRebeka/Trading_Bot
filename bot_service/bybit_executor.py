@@ -39,10 +39,6 @@ class BybitExecutor:
         self.session = requests.Session()
 
     def _send_request(self, method: str, endpoint: str, params: Optional[Dict] = None) -> Dict[str, Any]:
-        """
-        NOWA, UPROSZCZONA I STABILNA WERSJA.
-        Oddziela logikę dla GET i POST, aby uniknąć błędów z sygnaturą.
-        """
         timestamp = str(int(time.time() * 1000))
         recv_window = "10000"
         
@@ -52,7 +48,6 @@ class BybitExecutor:
 
         try:
             if method.upper() == 'GET':
-                # Logika dla GET, która działa poprawnie
                 query_string = urlencode(params, doseq=True) if params else ""
                 to_sign = timestamp + self.api_key + recv_window + query_string
                 signature = hmac.new(bytes(self.api_secret, "utf-8"), to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
@@ -68,7 +63,6 @@ class BybitExecutor:
                 response = self.session.get(self.base_url + endpoint, headers=headers, params=params, timeout=15)
 
             else: # POST
-                # Nowa, jawna i przewidywalna logika dla POST
                 payload_string = json.dumps(params) if params else ""
                 to_sign = timestamp + self.api_key + recv_window + payload_string
                 signature = hmac.new(bytes(self.api_secret, "utf-8"), to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
@@ -137,8 +131,9 @@ class BybitExecutor:
             "leverage": str(order_params['leverage']),
             "takeProfit": str(order_params['takeProfit']),
             "stopLoss": str(order_params['stopLoss']),
-            "timeInForce": "GTC",
-            "qtyType": "ByVal"  # KLUCZOWA ZMIANA: Z 'qtyIsQuote' na 'qtyType'
+            "timeInForce": "GTC"
+            # --- ZMIANA ---
+            # Usunięto nieistniejący i błędny parametr qtyType
         }
         
         logger.info(f"[{symbol}] Wysyłanie zlecenia do Bybit z parametrami: {payload}")

@@ -32,96 +32,96 @@ logger = logging.getLogger(__name__)
 
 
 
+# --- NOWA, UJEDNOLICONA FUNKCJA DO SKŁADANIA ZLECEŃ ---
+def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecutor, alert_id: str = 'N/A'):
+    """
+    Przygotowuje i składa zlecenie o wartości ~10 USDT.
+    Jeśli obliczona ilość jest poniżej minimum giełdowego, zlecenie jest odrzucane.
+    Zwraca order_id w przypadku sukcesu, w przeciwnym razie None.
+    """
+    symbol = alert_data.symbol
+    try:
+        leverage_calcs = get_all_calculations_for_alert(alert_data)
+        required_leverage = leverage_calcs.get('required_leverage')
+        if not required_leverage:
+            logger.warning(f"[{symbol}] Zlecenie odrzucone. Wymagana dźwignia nie mogła zostać obliczona.")
+            return None
+
+        instrument_info = bybit_executor.get_instrument_info(symbol)
+        if not instrument_info:
+            logger.error(f"[{symbol}] Nie udało się pobrać informacji o instrumencie z Bybit.")
+            return None
+        
+        tick_size = instrument_info.get('tick_size')
+        qty_step = instrument_info.get('qty_step')
+        min_order_qty = instrument_info.get('min_order_qty')
+        if not tick_size or not qty_step:
+            logger.error(f"[{symbol}] Brak 'tick_size' lub 'qty_step' w danych z API.")
+            return None
+
+        max_leverage_from_api = instrument_info.get('max_leverage', 1.0)
+        final_leverage = min(required_leverage, max_leverage_from_api)
+        
+        # --- KLUCZOWA LOGIKA OBLICZENIOWA I WALIDACYJNA ---
+        desired_value_usdt = 10.0
+        entry_price = alert_data.entry
+        
+        if entry_price <= 0:
+            logger.error(f"[{symbol}] Cena wejścia wynosi zero lub jest ujemna. Nie można obliczyć wielkości zlecenia.")
+            return None
+            
+        target_qty = desired_value_usdt / entry_price
+        
+        # --- ZABEZPIECZENIE STRATEGII ---
+        if target_qty < min_order_qty:
+            logger.warning(
+                f"[{symbol}] Zlecenie odrzucone. Obliczona ilość ({target_qty:.8f}) jest mniejsza niż minimum giełdowe ({min_order_qty}). "
+                f"Złożenie zlecenia naruszyłoby spójność strategii (wartość > 10 USDT)."
+            )
+            return None
+        
+        formatted_qty = format_quantity(target_qty, qty_step)
+
+        if float(formatted_qty) <= 0:
+            logger.error(f"[{symbol}] Obliczona wielkość zlecenia po sformatowaniu ({formatted_qty}) jest zerowa. Przerywam.")
+            return None
+        
+        formatted_price = format_price(alert_data.entry, tick_size)
+        formatted_tp = format_price(alert_data.tp_2_0, tick_size)
+        formatted_sl = format_price(alert_data.sl, tick_size)
+
+        order_params = {
+            "symbol": symbol,
+            "side": alert_data.direction,
+            "price": formatted_price,
+            "qty": formatted_qty,
+            "leverage": final_leverage,
+            "takeProfit": formatted_tp,
+            "stopLoss": formatted_sl
+        }
+        return bybit_executor.place_limit_order(order_params)
+
+    except Exception as e:
+        logger.critical(f"[{symbol}] Nieoczekiwany błąd w logice przygotowywania zlecenia dla alertu {alert_id}: {e}", exc_info=True)
+        return None
+
+
 def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executor: BybitExecutor):
     if not newly_fetched_alerts:
         return
-    logger.info(f"Rozpoczynam przetwarzanie {len(newly_fetched_alerts)} nowych alertów w celu złożenia zleceň.")
-    
+    logger.info(f"Rozpoczynam przetwarzanie {len(newly_fetched_alerts)} nowych alertów.")
     for alert_dict in newly_fetched_alerts:
         alert_id = alert_dict.get('id', 'N/A')
-        symbol = "N/A"
         try:
             alert_data = AlertData.model_validate(alert_dict)
-            symbol = alert_data.symbol
-            
-            logger.info(f"--- [{symbol}][Alert: {alert_id}] Rozpoczynam przetwarzanie zlecenia ---")
-
-            leverage_calcs = get_all_calculations_for_alert(alert_data)
-            required_leverage = leverage_calcs.get('required_leverage')
-
-            if not required_leverage:
-                logger.warning(f"[{symbol}] Zlecenie odrzucone. Wymagana dźwignia nie mogła zostać obliczona lub jest < 1.")
-                continue
-
-            instrument_info = bybit_executor.get_instrument_info(symbol)
-            
-            if not instrument_info:
-                logger.error(f"[{symbol}] Nie udało się pobrać informacji o instrumencie z Bybit. Prawdopodobnie symbol jest nieaktywny lub nie istnieje. Przerywam.")
-                continue
-            
-            tick_size = instrument_info.get('tick_size')
-            if not tick_size:
-                logger.error(f"[{symbol}] Brak 'tick_size' w danych z API, mimo że dane instrumentu zostały pobrane. Przerywam.")
-                continue
-
-            max_leverage_from_api = instrument_info.get('max_leverage', 1.0)
-            final_leverage = min(required_leverage, max_leverage_from_api)
-            logger.info(f"[{symbol}] Dźwignia: Wymagana={required_leverage}x, Max giełdy={max_leverage_from_api}x. Wybrano: {final_leverage}x.")
-            
-            formatted_price = format_price(alert_data.entry, tick_size)
-
-            # --- BLOK KOREKTY I WALIDACJI TP/SL ---
-            entry_price_dec = Decimal(str(alert_data.entry))
-            
-            tp_distance = abs(Decimal(str(alert_data.tp_2_0)) - entry_price_dec)
-            if alert_data.direction == 'LONG':
-                corrected_tp = entry_price_dec + tp_distance
-            else:  # SHORT
-                corrected_tp = entry_price_dec - tp_distance
-            
-            sl_distance = abs(Decimal(str(alert_data.sl)) - entry_price_dec)
-            if alert_data.direction == 'LONG':
-                corrected_sl = entry_price_dec - sl_distance
-            else:  # SHORT
-                corrected_sl = entry_price_dec + sl_distance
-
-            # --- POCZĄTEK POPRAWKI ---
-            # Zastąpiono błędne wywołanie .compareTo() standardowym operatorem Pythona '!='
-            if Decimal(str(alert_data.tp_2_0)) != corrected_tp:
-                 logger.warning(f"[{symbol}][Alert: {alert_id}] Skorygowano niepoprawny TP dla zlecenia {alert_data.direction}. Oryginalny: {alert_data.tp_2_0}, Poprawiony: {float(corrected_tp):.8f}")
-            
-            if Decimal(str(alert_data.sl)) != corrected_sl:
-                 logger.warning(f"[{symbol}][Alert: {alert_id}] Skorygowano niepoprawny SL dla zlecenia {alert_data.direction}. Oryginalny: {alert_data.sl}, Poprawiony: {float(corrected_sl):.8f}")
-            # --- KONIEC POPRAWKI ---
-
-            formatted_tp = format_price(float(corrected_tp), tick_size)
-            formatted_sl = format_price(float(corrected_sl), tick_size)
-
-            logger.info(f"[{symbol}] Ceny sformatowane zgodnie z tick_size='{tick_size}': Entry={formatted_price}, TP={formatted_tp}, SL={formatted_sl}")
-
-            order_params = {
-                "symbol": symbol,
-                "side": alert_data.direction,
-                "price": formatted_price,
-                "qty": "10",
-                "leverage": final_leverage,
-                "takeProfit": formatted_tp,
-                "stopLoss": formatted_sl
-            }
-            order_id = bybit_executor.place_limit_order(order_params)
-
+            logger.info(f"--- [{alert_data.symbol}][Alert: {alert_id}] Przetwarzanie zlecenia ---")
+            order_id = _prepare_and_place_order(alert_data, bybit_executor, alert_id)
             if order_id:
-                logger.info(f"[{symbol}][Alert: {alert_id}] SUKCES. Zlecenie zostało pomyślnie wysłane do Bybit. Order ID: {order_id}")
+                logger.info(f"[{alert_data.symbol}][Alert: {alert_id}] SUKCES. Order ID: {order_id}")
             else:
-                logger.error(f"[{symbol}][Alert: {alert_id}] PORAŻKA. Nie udało się złożyć zlecenia na giełdzie.")
-
-        except ValidationError as e:
-            logger.error(f"Błąd walidacji danych alertu {alert_id}: {e}", extra={"json_fields": {"alert_id": alert_id}})
-        except (BybitAPIError, RequestException) as e:
-            logger.critical(f"[{symbol}] Błąd API Bybit podczas przetwarzania alertu {alert_id}. Zlecenie nie zostało złożone.")
+                logger.error(f"[{alert_data.symbol}][Alert: {alert_id}] PORAŻKA. Nie udało się złożyć zlecenia.")
         except Exception as e:
-            logger.critical(f"[{symbol}] Nieoczekiwany błąd w logice przetwarzania alertu {alert_id}: {e}", exc_info=True)
-
+            logger.critical(f"[Alert: {alert_id}] Nieoczekiwany błąd: {e}", exc_info=True)
 
 
 def _calculate_rr_analytics(entry_price: float, sl_price: float, extreme_price: float, direction: str) -> Dict[str, Any]:
@@ -229,54 +229,17 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
                         logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD TRANSAKCJI: {ex}", exc_info=True)
                 else:
                     logger.info(f"--- [DECYZJA: WEJŚCIE {ob_type}] --- [{symbol}] | Cena: {entry_level} | Rozpoczynam proces składania zlecenia.")
-                    
-                    leverage_calcs = get_all_calculations_for_alert(setup.alert_data)
-                    required_leverage = leverage_calcs.get('required_leverage')
-
-                    if not required_leverage or required_leverage < 1:
-                        logger.warning(f"[{symbol}] Zlecenie odrzucone. Wymagana dźwignia ({required_leverage}) jest nieprawidłowa.")
-                        continue
-
-                    try:
-                        instrument_info = bybit_executor.get_instrument_info(symbol)
-                        if not instrument_info:
-                            logger.error(f"[{symbol}] Nie udało się pobrać informacji o instrumencie. Przerywam.")
-                            continue
-                        
-                        max_leverage = instrument_info['max_leverage']
-                        final_leverage = min(required_leverage, max_leverage)
-                        
-                        # --- ZMIANA ---
-                        # Usunięto starą logikę obliczania `qty` i zastąpiono ją stałą wartością "10",
-                        # aby zapewnić spójność z `process_new_alerts`.
-                        order_params = {
-                            "symbol": symbol, 
-                            "side": direction, 
-                            "price": str(entry_level),
-                            "qty": "10", 
-                            "leverage": str(final_leverage),
-                            "takeProfit": str(setup.alert_data.tp_2_0), 
-                            "stopLoss": str(sl_price)
-                        }
-                        # --- KONIEC ZMIANY ---
-                        
-                        order_id = bybit_executor.place_limit_order(order_params)
-
-                        if order_id:
-                            trade_id = str(uuid.uuid4())
-                            logger.info(f"[{symbol}] Zlecenie pomyślnie wysłane. Tworzę dokument w open_trades z trade_id: {trade_id} i bybit_order_id: {order_id}")
-                            state_manager.create_open_trade(
-                                trade_id=trade_id, symbol=symbol, direction=direction, ob_type=ob_type,
-                                entry_price=entry_level, sl_price=sl_price, tp_price=tp_price,
-                                alert_data=setup.alert_data, bybit_order_id=order_id
-                            )
-                        else:
-                            logger.error(f"[{symbol}] Nie udało się uzyskać ID zlecenia od Bybit.")
-
-                    except (BybitAPIError, RequestException) as e:
-                        logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD podczas interakcji z API Bybit: {e}")
-                    except Exception as e:
-                        logger.critical(f"[{symbol}] Nieoczekiwany błąd w logice otwierania pozycji: {e}", exc_info=True)
+                    order_id = _prepare_and_place_order(setup.alert_data, bybit_executor)
+                    if order_id:
+                        trade_id = str(uuid.uuid4())
+                        logger.info(f"[{symbol}] Zlecenie pomyślnie wysłane. Tworzę dokument w open_trades z trade_id: {trade_id} i bybit_order_id: {order_id}")
+                        state_manager.create_open_trade(
+                            trade_id=trade_id, symbol=symbol, direction=direction, ob_type=ob_type,
+                            entry_price=entry_level, sl_price=sl_price, tp_price=tp_price,
+                            alert_data=setup.alert_data, bybit_order_id=order_id
+                        )
+                    else:
+                        logger.error(f"[{symbol}] Nie udało się uzyskać ID zlecenia od Bybit.")
         except ValidationError as e:
             logger.error(f"Błąd walidacji danych setupu dla {symbol}: {e}")
         except Exception as e:
