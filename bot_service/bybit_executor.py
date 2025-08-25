@@ -179,3 +179,39 @@ class BybitExecutor:
         except RequestException as e:
             logger.critical(f"[{symbol}] Błąd sieciowy podczas anulowania zlecenia {order_id}: {e}")
             return False
+
+    # ... (reszta pliku bez zmian, dodajemy nową metodę na końcu klasy BybitExecutor)
+
+    def close_position_market(self, symbol: str, side: str) -> bool:
+        """Zamyka pozycję dla danego symbolu przez złożenie zlecenia rynkowego w przeciwnym kierunku."""
+        api_symbol = symbol.replace('.P', '')
+        
+        # Składamy zlecenie w przeciwnym kierunku, aby zamknąć pozycję
+        close_side_map = {"LONG": "Sell", "SHORT": "Buy"}
+        
+        payload = {
+            "category": "linear",
+            "symbol": api_symbol,
+            "side": close_side_map[side.upper()],
+            "orderType": "Market",
+            "qty": "0",  # Qty "0" z closeOnTrigger=True zamyka całą pozycję
+            "reduceOnly": True,
+            "closeOnTrigger": True
+        }
+        logger.info(f"[{symbol}] Wysyłanie zlecenia rynkowego zamknięcia pozycji z parametrami: {payload}")
+        try:
+            result = self._send_request("POST", "/v5/order/create", params=payload)
+            if result.get("orderId"):
+                logger.info(f"[{symbol}] Zlecenie zamknięcia pozycji pomyślnie wysłane. Order ID: {result.get('orderId')}")
+                return True
+            return False
+        except BybitAPIError as e:
+            # Jeśli pozycja już nie istnieje, to nasz cel (zamknięcie) został osiągnięty
+            if e.ret_code == 110025: # Position is not exists
+                 logger.warning(f"[{symbol}] Próba zamknięcia pozycji, która już nie istnieje. Traktuję jako sukces.")
+                 return True
+            logger.critical(f"[{symbol}] Błąd API Bybit podczas zamykania pozycji: {e}")
+            return False
+        except RequestException as e:
+            logger.critical(f"[{symbol}] Błąd sieciowy podczas zamykania pozycji: {e}")
+            return False

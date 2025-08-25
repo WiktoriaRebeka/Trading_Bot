@@ -112,13 +112,8 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
         logger.critical(f"[{symbol}] Nieoczekiwany błąd w logice przygotowywania zlecenia dla alertu {alert_id}: {e}", exc_info=True)
         return None
 
+# ... (importy i inne funkcje bez zmian)
 
-# ... (wszystkie importy bez zmian)
-
-# --- BEZ ZMIAN ---
-# _prepare_and_place_order, _calculate_rr_analytics, finalize_trade
-
-# --- ZMIANA W process_new_alerts ---
 def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executor: BybitExecutor):
     if not newly_fetched_alerts:
         return
@@ -133,38 +128,42 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executo
             
             logger.info(f"--- [{symbol}][Alert: {alert_id}] Rozpoczynam przetwarzanie zlecenia ---")
 
-            # --- POCZĄTEK NOWEJ LOGIKI ANULOWANIA ---
+            # --- POCZĄTEK NOWEJ, POPRAWIONEJ LOGIKI ANULOWANIA/ZAMYKANIA ---
             existing_trade_data = state_manager.get_open_trade_by_symbol(symbol)
             if existing_trade_data:
                 existing_order_id = existing_trade_data.get('bybit_order_id')
                 existing_trade_id = existing_trade_data.get('trade_id')
+                existing_side = existing_trade_data.get('direction')
                 
-                logger.warning(f"[{symbol}] Znaleziono istniejące, niezrealizowane zlecenie (Bybit ID: {existing_order_id}). Anuluję przed złożeniem nowego.")
+                logger.warning(f"[{symbol}] Znaleziono istniejącą pozycję/zlecenie (Bybit ID: {existing_order_id}). Zamykam/anuluję przed złożeniem nowego.")
                 
-                success = bybit_executor.cancel_order(symbol, existing_order_id)
+                # Krok 1: Spróbuj zamknąć pozycję rynkowo. To zadziała, jeśli pozycja jest aktywna.
+                close_success = bybit_executor.close_position_market(symbol, existing_side)
                 
-                if success:
+                # Krok 2: Spróbuj anulować zlecenie. To zadziała, jeśli było to tylko zlecenie oczekujące.
+                cancel_success = bybit_executor.cancel_order(symbol, existing_order_id)
+                
+                # Jeśli którakolwiek z operacji się powiodła, możemy usunąć wpis z bazy.
+                if close_success or cancel_success:
                     state_manager.delete_open_trade(existing_trade_id)
-                    logger.info(f"[{symbol}] Stare zlecenie i jego wpis w bazie danych zostały pomyślnie usunięte.")
+                    logger.info(f"[{symbol}] Stara pozycja/zlecenie i jej wpis w bazie danych zostały pomyślnie usunięte.")
                 else:
                     logger.critical(
-                        f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się anulować istniejącego zlecenia {existing_order_id}. "
+                        f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się ani zamknąć, ani anulować istniejącego zlecenia {existing_order_id}. "
                         f"Przerywam przetwarzanie tego alertu, aby uniknąć duplikacji pozycji."
                     )
                     continue # Przejdź do następnego alertu
-            # --- KONIEC NOWEJ LOGIKI ANULOWANIA ---
+            # --- KONIEC NOWEJ LOGIKI ---
 
             order_id = _prepare_and_place_order(alert_data, bybit_executor, alert_id)
 
             if order_id:
-                # Po pomyślnym złożeniu zlecenia, musimy stworzyć nowy dokument w open_trades.
-                # Ta logika musi być tutaj, a nie w _prepare_and_place_order, bo potrzebujemy trade_id.
                 trade_id = str(uuid.uuid4())
                 state_manager.create_open_trade(
                     trade_id=trade_id,
                     symbol=symbol,
                     direction=alert_data.direction,
-                    ob_type="New Alert", # Można by to bardziej uszczegółowić
+                    ob_type="New Alert",
                     entry_price=alert_data.entry,
                     sl_price=alert_data.sl,
                     tp_price=alert_data.tp_2_0,
@@ -179,6 +178,7 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executo
             logger.error(f"Błąd walidacji danych alertu {alert_id}: {e}", extra={"json_fields": {"alert_id": alert_id}})
         except Exception as e:
             logger.critical(f"[{symbol}] Nieoczekiwany błąd w głównej pętli przetwarzania alertu {alert_id}: {e}", exc_info=True)
+
 
 
 
