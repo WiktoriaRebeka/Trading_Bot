@@ -3,6 +3,7 @@
 import logging
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any, Dict, List
 
 from google.cloud.firestore_v1.document import DocumentSnapshot
@@ -27,7 +28,7 @@ from bot_service.bybit_executor import (
     BybitExecutor,
     format_quantity,
 )
-from decimal import Decimal
+
 logger = logging.getLogger(__name__)
 
 
@@ -58,7 +59,6 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
             logger.error(f"[{symbol}] Brak 'tick_size' lub 'qty_step' w danych z API.")
             return None
 
-        # --- NOWA, KLUCZOWA LOGIKA STRATEGII ---
         base_position_value = 10.0
         final_leverage = required_leverage
         final_position_value = base_position_value
@@ -91,7 +91,6 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
         if float(formatted_qty) <= 0:
             logger.error(f"[{symbol}] Obliczona wielkość zlecenia po sformatowaniu ({formatted_qty}) jest zerowa.")
             return None
-        # --- KONIEC NOWEJ LOGIKI ---
         
         formatted_price = format_price(alert_data.entry, tick_size)
         formatted_tp = format_price(alert_data.tp_2_0, tick_size)
@@ -112,7 +111,6 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
         logger.critical(f"[{symbol}] Nieoczekiwany błąd w logice przygotowywania zlecenia dla alertu {alert_id}: {e}", exc_info=True)
         return None
 
-# ... (importy i inne funkcje bez zmian)
 
 def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executor: BybitExecutor):
     if not newly_fetched_alerts:
@@ -128,32 +126,35 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executo
             
             logger.info(f"--- [{symbol}][Alert: {alert_id}] Rozpoczynam przetwarzanie zlecenia ---")
 
-            # --- POCZĄTEK NOWEJ, POPRAWIONEJ LOGIKI ANULOWANIA/ZAMYKANIA ---
             existing_trade_data = state_manager.get_open_trade_by_symbol(symbol)
             if existing_trade_data:
                 existing_order_id = existing_trade_data.get('bybit_order_id')
                 existing_trade_id = existing_trade_data.get('trade_id')
-                existing_side = existing_trade_data.get('direction')
                 
-                logger.warning(f"[{symbol}] Znaleziono istniejącą pozycję/zlecenie (Bybit ID: {existing_order_id}). Zamykam/anuluję przed złożeniem nowego.")
+                logger.warning(f"[{symbol}] Znaleziono istniejące, niezrealizowane zlecenie (Bybit ID: {existing_order_id}). Anuluję przed złożeniem nowego.")
                 
-                # Krok 1: Spróbuj zamknąć pozycję rynkowo. To zadziała, jeśli pozycja jest aktywna.
-                close_success = bybit_executor.close_position_market(symbol, existing_side)
-                
-                # Krok 2: Spróbuj anulować zlecenie. To zadziała, jeśli było to tylko zlecenie oczekujące.
                 cancel_success = bybit_executor.cancel_order(symbol, existing_order_id)
                 
-                # Jeśli którakolwiek z operacji się powiodła, możemy usunąć wpis z bazy.
-                if close_success or cancel_success:
-                    state_manager.delete_open_trade(existing_trade_id)
-                    logger.info(f"[{symbol}] Stara pozycja/zlecenie i jej wpis w bazie danych zostały pomyślnie usunięte.")
+                if cancel_success:
+                    # --- POCZĄTEK POPRAWKI ---
+                    # Używamy transakcji, aby atomowo usunąć stary trade i zresetować setup.
+                    # To jest kluczowa zmiana, która naprawia błąd.
+                    try:
+                        db = get_db()
+                        transaction = db.transaction()
+                        # Używamy is_loss=False, ponieważ to nie jest zamknięcie na SL.
+                        state_manager.close_trade_transactional(transaction, existing_trade_id, symbol, is_loss=False)
+                        logger.info(f"[{symbol}] Stare zlecenie i jego wpis w bazie danych zostały pomyślnie usunięte.")
+                    except Exception as ex:
+                        logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD podczas transakcji czyszczenia stanu: {ex}", exc_info=True)
+                        continue # Bezpieczniej jest przerwać, niż ryzykować niespójność
+                    # --- KONIEC POPRAWKI ---
                 else:
                     logger.critical(
-                        f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się ani zamknąć, ani anulować istniejącego zlecenia {existing_order_id}. "
+                        f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się anulować istniejącego zlecenia {existing_order_id}. "
                         f"Przerywam przetwarzanie tego alertu, aby uniknąć duplikacji pozycji."
                     )
-                    continue # Przejdź do następnego alertu
-            # --- KONIEC NOWEJ LOGIKI ---
+                    continue
 
             order_id = _prepare_and_place_order(alert_data, bybit_executor, alert_id)
 
