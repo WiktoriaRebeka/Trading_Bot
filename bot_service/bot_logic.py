@@ -111,7 +111,6 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
         logger.critical(f"[{symbol}] Nieoczekiwany błąd w logice przygotowywania zlecenia dla alertu {alert_id}: {e}", exc_info=True)
         return None
 
-# Lokalizacja: bot_service/bot_logic.py
 
 def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executor: BybitExecutor):
     if not newly_fetched_alerts:
@@ -149,9 +148,18 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executo
                     cancel_success = bybit_executor.cancel_order(symbol, order_id_to_check)
                     
                     if cancel_success:
-                        logger.info(f"[{symbol}] Zlecenie {order_id_to_check} pomyślnie anulowane. Czyszczę wpis w bazie.")
-                        # Usuwamy tylko wpis z open_trades. Nie ruszamy setupu.
-                        state_manager.delete_open_trade(trade_id_in_db)
+                        logger.info(f"[{symbol}] Zlecenie {order_id_to_check} pomyślnie anulowane. Czyszczę stan w bazie transakcyjnie.")
+                        try:
+                            # Używamy transakcji, aby atomowo usunąć stary trade i zresetować setup.
+                            # To jest kluczowa zmiana, która naprawia błąd desynchronizacji.
+                            db = get_db()
+                            transaction = db.transaction()
+                            # Używamy is_loss=False, ponieważ to nie jest zamknięcie na SL, tylko anulowanie.
+                            state_manager.close_trade_transactional(transaction, trade_id_in_db, symbol, is_loss=False)
+                            logger.info(f"[{symbol}] Stare zlecenie (Trade ID: {trade_id_in_db}) zostało pomyślnie usunięte z bazy.")
+                        except Exception as ex:
+                            logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD podczas transakcji czyszczenia stanu: {ex}", exc_info=True)
+                            continue # Bezpieczniej jest przerwać, niż ryzykować niespójność
                     else:
                         logger.critical(
                             f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się anulować oczekującego zlecenia {order_id_to_check}. "
@@ -176,16 +184,22 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executo
             # KROK 3: Składam nowe zlecenie.
             # Ten kod wykona się tylko, jeśli:
             # a) Nie było żadnej aktywności.
-            # b) Istniejące zlecenie było oczekujące i zostało pomyślnie anulowane.
+            # b) Istniejące zlecenie było oczekujące i zostało pomyślnie anulowane i wyczyszczone z bazy.
             logger.info(f"[{symbol}] Pole jest czyste. Przystępuję do składania nowego zlecenia.")
             order_id = _prepare_and_place_order(alert_data, bybit_executor, alert_id)
 
             if order_id:
                 trade_id = str(uuid.uuid4())
                 state_manager.create_open_trade(
-                    trade_id=trade_id, symbol=symbol, direction=alert_data.direction,
-                    ob_type="New Alert", entry_price=alert_data.entry, sl_price=alert_data.sl,
-                    tp_price=alert_data.tp_2_0, alert_data=alert_data, bybit_order_id=order_id
+                    trade_id=trade_id,
+                    symbol=symbol,
+                    direction=alert_data.direction,
+                    ob_type="New Alert",
+                    entry_price=alert_data.entry,
+                    sl_price=alert_data.sl,
+                    tp_price=alert_data.tp_2_0,
+                    alert_data=alert_data,
+                    bybit_order_id=order_id
                 )
                 logger.info(f"[{symbol}][Alert: {alert_id}] SUKCES. Zlecenie {order_id} złożone. Utworzono wpis w open_trades: {trade_id}")
             else:
