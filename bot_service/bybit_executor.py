@@ -215,3 +215,40 @@ class BybitExecutor:
         except RequestException as e:
             logger.critical(f"[{symbol}] Błąd sieciowy podczas zamykania pozycji: {e}")
             return False
+
+    # Lokalizacja: bot_service/bybit_executor.py (dodać w klasie BybitExecutor)
+
+    def get_order_status(self, symbol: str, order_id: str) -> Optional[str]:
+        """
+        Pobiera status konkretnego zlecenia z Bybit.
+        Zwraca status jako string (np. "New", "Filled", "Cancelled") lub None w przypadku błędu.
+        """
+        api_symbol = symbol.replace('.P', '')
+        params = {
+            "category": "linear",
+            "symbol": api_symbol,
+            "orderId": order_id
+        }
+        logger.info(f"[{symbol}] Sprawdzanie statusu zlecenia {order_id}...")
+        try:
+            # Używamy endpointu do historii zleceń, bo pokazuje on wszystkie statusy
+            result = self._send_request("GET", "/v5/order/history", params=params)
+            if result and result.get('list'):
+                order_data = result['list'][0]
+                status = order_data.get("orderStatus")
+                logger.info(f"[{symbol}] Status zlecenia {order_id} to: '{status}'")
+                return status
+            
+            logger.warning(f"[{symbol}] Nie znaleziono zlecenia o ID {order_id} w historii. Może być bardzo stare lub niepoprawne ID.")
+            return "NotFound" # Zwracamy specjalny status, jeśli nie znaleziono
+            
+        except BybitAPIError as e:
+            # Jeśli zlecenie nie istnieje, to na pewno nie jest "wiszącym" zleceniem
+            if e.ret_code == 110021: # Order does not exist
+                logger.warning(f"[{symbol}] Zlecenie {order_id} nie istnieje wg API. Traktuję jako 'NotFound'.")
+                return "NotFound"
+            logger.error(f"[{symbol}] Błąd API Bybit podczas sprawdzania statusu zlecenia {order_id}: {e}")
+            return None
+        except RequestException as e:
+            logger.error(f"[{symbol}] Błąd sieciowy podczas sprawdzania statusu zlecenia {order_id}: {e}")
+            return None
