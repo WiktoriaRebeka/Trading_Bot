@@ -267,3 +267,16 @@ def delete_open_trade(trade_id: str):
         logger.info(f"Pomyślnie usunięto dokument zlecenia {trade_id} z Firestore.")
     except Exception as e:
         logger.error(f"Błąd podczas usuwania dokumentu zlecenia {trade_id}: {e}")
+
+
+def get_active_setup(symbol: str) -> Optional[Dict[str, Any]]:
+    """Pobiera pojedynczy dokument setupu na podstawie symbolu (ID dokumentu)."""
+    try:
+        doc_ref = _get_db().collection(constants.SETUP_COLLECTION).document(symbol)
+        doc = doc_ref.get()
+        if doc.exists:
+            return doc.to_dict()
+        return None
+    except Exception as e:
+        logger.error(f"Błąd podczas pobierania aktywnego setupu dla {symbol}: {e}")
+        return None

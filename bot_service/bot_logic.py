@@ -111,7 +111,6 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
         logger.critical(f"[{symbol}] Nieoczekiwany błąd w logice przygotowywania zlecenia dla alertu {alert_id}: {e}", exc_info=True)
         return None
 
-# Lokalizacja: bot_service/bot_logic.py
 
 def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executor: BybitExecutor):
     if not newly_fetched_alerts:
@@ -120,17 +119,29 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executo
     
     for alert_dict in newly_fetched_alerts:
         alert_id = alert_dict.get('id', 'N/A')
-        symbol = "N/A"  # Inicjalizacja na wypadek błędu walidacji
+        symbol = "N/A"
         try:
             alert_data = AlertData.model_validate(alert_dict)
             symbol = alert_data.symbol
             
             logger.info(f"--- [{symbol}][Alert: {alert_id}] Rozpoczynam przetwarzanie ---")
 
-            # KROK 2: Sprawdzam, czy czeka stare zlecenie w naszej bazie danych.
+            # KROK 1: Sprawdzenie nadrzędnego stanu - czy pozycja jest już w grze?
+            # To jest kluczowa zmiana, która naprawia błąd.
+            active_setup = state_manager.get_active_setup(symbol) # Musimy dodać tę funkcję do state_manager
+            if active_setup and active_setup.get("is_position_open_on_this_setup", False):
+                logger.warning(
+                    f"[{symbol}] Otrzymano nowy alert, ale istnieje już AKTYWNA POZYCJA dla tego setupu. "
+                    f"Zgodnie z Nadrzędną Zasadą, ignoruję ten alert i nie podejmuję żadnych działań."
+                )
+                continue # Przechodzimy do następnego alertu
+
+            # Jeśli dotarliśmy tutaj, oznacza to, że NIE MA aktywnej pozycji.
+            # Teraz możemy bezpiecznie zająć się anulowaniem ewentualnego STAREGO, NIEZREALIZOWANEGO zlecenia.
+
+            # KROK 2: Sprawdzam, czy czeka stare, niezrealizowane zlecenie w naszej bazie.
             existing_trade_doc = state_manager.get_open_trade_by_symbol(symbol)
             
-            # KROK 3: Analizuję wynik sprawdzenia.
             if existing_trade_doc:
                 existing_order_id = existing_trade_doc.get('bybit_order_id')
                 existing_trade_id = existing_trade_doc.get('trade_id')
@@ -140,55 +151,32 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executo
                     f"Bybit Order ID: {existing_order_id}). Rozpoczynam procedurę anulowania."
                 )
                 
-                # KROK 4: Wykonuję polecenie anulowania.
-                # Ta funkcja jest odporna - zwróci True nawet jeśli zlecenie już nie istnieje na giełdzie.
                 cancel_success = bybit_executor.cancel_order(symbol, existing_order_id)
                 
-                # KROK 5: Sprzątam po sobie.
                 if cancel_success:
-                    logger.info(f"[{symbol}] Giełda potwierdziła anulowanie zlecenia {existing_order_id}. "
-                                f"Usuwam stary wpis z bazy danych.")
-                    try:
-                        # Używamy transakcji, aby zapewnić atomowość operacji usunięcia
-                        # starego zlecenia i zresetowania powiązanego z nim setupu.
-                        db = get_db()
-                        transaction = db.transaction()
-                        # is_loss=False, ponieważ to jest anulowanie, a nie zamknięcie na SL.
-                        state_manager.close_trade_transactional(transaction, existing_trade_id, symbol, is_loss=False)
-                        logger.info(f"[{symbol}] Stare zlecenie (Trade ID: {existing_trade_id}) zostało pomyślnie usunięte z bazy.")
-                    except Exception as ex:
-                        logger.critical(
-                            f"[{symbol}] KRYTYCZNY BŁĄD podczas transakcji czyszczenia stanu dla Trade ID {existing_trade_id}. "
-                            f"Przerywam przetwarzanie alertu, aby uniknąć niespójności danych. Błąd: {ex}", exc_info=True
-                        )
-                        continue # Przejdź do następnego alertu
+                    logger.info(f"[{symbol}] Giełda potwierdziła anulowanie zlecenia {existing_order_id}. Usuwam stary wpis z bazy.")
+                    # WAŻNE: Używamy teraz prostej funkcji usuwającej, a nie `close_trade_transactional`,
+                    # ponieważ ta druga modyfikuje `active_setups`, czego nie chcemy robić w tym miejscu.
+                    # Stan `active_setups` jest już poprawny (is_position_open_on_this_setup: False).
+                    state_manager.delete_open_trade(existing_trade_id)
                 else:
-                    # Ten scenariusz jest mało prawdopodobny, ale musi być obsłużony.
                     logger.critical(
-                        f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się anulować istniejącego zlecenia {existing_order_id} na giełdzie. "
-                        f"Przerywam przetwarzanie tego alertu, aby uniknąć duplikacji pozycji."
+                        f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się anulować istniejącego zlecenia {existing_order_id}. "
+                        f"Przerywam przetwarzanie tego alertu, aby uniknąć duplikacji."
                     )
-                    continue # Przejdź do następnego alertu
+                    continue
 
-            # KROK 6: Składam nowe zlecenie.
-            # Ten kod wykona się tylko jeśli:
-            # a) Nie było żadnego oczekującego zlecenia.
-            # b) Oczekujące zlecenie zostało pomyślnie anulowane i usunięte z bazy.
+            # KROK 3: Składam nowe zlecenie.
             logger.info(f"[{symbol}] Pole jest czyste. Przystępuję do składania nowego zlecenia.")
             order_id = _prepare_and_place_order(alert_data, bybit_executor, alert_id)
 
             if order_id:
                 trade_id = str(uuid.uuid4())
+                # Ta funkcja teraz bezpiecznie ustawi flagę `is_position_open_on_this_setup` na True
                 state_manager.create_open_trade(
-                    trade_id=trade_id,
-                    symbol=symbol,
-                    direction=alert_data.direction,
-                    ob_type="New Alert",
-                    entry_price=alert_data.entry,
-                    sl_price=alert_data.sl,
-                    tp_price=alert_data.tp_2_0,
-                    alert_data=alert_data,
-                    bybit_order_id=order_id
+                    trade_id=trade_id, symbol=symbol, direction=alert_data.direction,
+                    ob_type="New Alert", entry_price=alert_data.entry, sl_price=alert_data.sl,
+                    tp_price=alert_data.tp_2_0, alert_data=alert_data, bybit_order_id=order_id
                 )
                 logger.info(f"[{symbol}][Alert: {alert_id}] SUKCES. Zlecenie {order_id} złożone. Utworzono wpis w open_trades: {trade_id}")
             else:
