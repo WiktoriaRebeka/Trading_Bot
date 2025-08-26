@@ -39,7 +39,6 @@ class BybitExecutor:
         self.session = requests.Session()
 
     def _send_request(self, method: str, endpoint: str, params: Optional[Dict] = None) -> Dict[str, Any]:
-        # ... (ta funkcja pozostaje bez zmian)
         timestamp = str(int(time.time() * 1000))
         recv_window = "10000"
         
@@ -94,7 +93,6 @@ class BybitExecutor:
             raise
 
     def get_instrument_info(self, symbol: str) -> Optional[Dict[str, Any]]:
-        # ... (ta funkcja pozostaje bez zmian)
         api_symbol = symbol.replace('.P', '')
         params = {"category": "linear", "symbol": api_symbol}
         try:
@@ -115,7 +113,6 @@ class BybitExecutor:
             return None
 
     def place_limit_order(self, order_params: Dict[str, Any]) -> Optional[str]:
-        # ... (ta funkcja pozostaje bez zmian)
         symbol = order_params.get('symbol')
         if not symbol:
             logger.error("Brak 'symbol' w parametrach zlecenia.")
@@ -155,7 +152,7 @@ class BybitExecutor:
             return None
 
     def cancel_order(self, symbol: str, order_id: str) -> bool:
-        # ... (ta funkcja pozostaje bez zmian)
+        """Anuluje aktywne zlecenie na podstawie jego ID."""
         api_symbol = symbol.replace('.P', '')
         payload = {
             "category": "linear",
@@ -165,6 +162,7 @@ class BybitExecutor:
         logger.info(f"[{symbol}] Wysyłanie żądania anulowania zlecenia: {order_id}")
         try:
             result = self._send_request("POST", "/v5/order/cancel", params=payload)
+            # Sprawdzamy, czy API zwróciło ID anulowanego zlecenia
             if result.get("orderId") == order_id:
                 logger.info(f"[{symbol}] Zlecenie {order_id} pomyślnie anulowane.")
                 return True
@@ -172,8 +170,9 @@ class BybitExecutor:
                 logger.error(f"[{symbol}] API Bybit nie potwierdziło anulowania zlecenia {order_id}. Odpowiedź: {result}")
                 return False
         except BybitAPIError as e:
-            if e.ret_code == 110021:
-                logger.warning(f"[{symbol}] Próba anulowania zlecenia {order_id}, które już nie istnieje. Traktuję jako sukces.")
+            # Jeśli zlecenie już nie istnieje (bo np. zostało zrealizowane), traktujemy to jako sukces
+            if e.ret_code == 110021: # Order does not exist or has been closed
+                logger.warning(f"[{symbol}] Próba anulowania zlecenia {order_id}, które już nie istnieje (prawdopodobnie zrealizowane lub anulowane). Traktuję jako sukces.")
                 return True
             logger.critical(f"[{symbol}] Błąd API Bybit podczas anulowania zlecenia {order_id}: {e}")
             return False
@@ -181,10 +180,13 @@ class BybitExecutor:
             logger.critical(f"[{symbol}] Błąd sieciowy podczas anulowania zlecenia {order_id}: {e}")
             return False
 
-    # --- NOWA FUNKCJA ---
+    # ... (reszta pliku bez zmian, dodajemy nową metodę na końcu klasy BybitExecutor)
+
     def close_position_market(self, symbol: str, side: str) -> bool:
         """Zamyka pozycję dla danego symbolu przez złożenie zlecenia rynkowego w przeciwnym kierunku."""
         api_symbol = symbol.replace('.P', '')
+        
+        # Składamy zlecenie w przeciwnym kierunku, aby zamknąć pozycję
         close_side_map = {"LONG": "Sell", "SHORT": "Buy"}
         
         payload = {
@@ -192,7 +194,7 @@ class BybitExecutor:
             "symbol": api_symbol,
             "side": close_side_map[side.upper()],
             "orderType": "Market",
-            "qty": "0",
+            "qty": "0",  # Qty "0" z closeOnTrigger=True zamyka całą pozycję
             "reduceOnly": True,
             "closeOnTrigger": True
         }
@@ -204,7 +206,8 @@ class BybitExecutor:
                 return True
             return False
         except BybitAPIError as e:
-            if e.ret_code == 110025:
+            # Jeśli pozycja już nie istnieje, to nasz cel (zamknięcie) został osiągnięty
+            if e.ret_code == 110025: # Position is not exists
                  logger.warning(f"[{symbol}] Próba zamknięcia pozycji, która już nie istnieje. Traktuję jako sukces.")
                  return True
             logger.critical(f"[{symbol}] Błąd API Bybit podczas zamykania pozycji: {e}")
