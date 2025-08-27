@@ -252,3 +252,33 @@ class BybitExecutor:
         except RequestException as e:
             logger.error(f"[{symbol}] Błąd sieciowy podczas sprawdzania statusu zlecenia {order_id}: {e}")
             return None
+
+# Lokalizacja: bot_service/bybit_executor.py (dodać nową metodę w klasie BybitExecutor)
+
+    def cancel_all_open_orders_for_symbol(self, symbol: str) -> bool:
+        """
+        Pobiera wszystkie aktywne (niezrealizowane) zlecenia dla danego symbolu i anuluje je.
+        Zwraca True, jeśli na koniec operacji nie ma żadnych otwartych zleceň.
+        """
+        api_symbol = symbol.replace('.P', '')
+        logger.warning(f"[{symbol}] Rozpoczynam procedurę czyszczenia: anulowanie WSZYSTKICH otwartych zleceń.")
+        try:
+            params = {"category": "linear", "symbol": api_symbol}
+            result = self._send_request("GET", "/v5/order/realtime", params=params)
+            
+            open_orders = result.get('list', [])
+            if not open_orders:
+                logger.info(f"[{symbol}] Brak otwartych zleceń na giełdzie. Pole jest czyste.")
+                return True
+
+            logger.warning(f"[{symbol}] Znaleziono {len(open_orders)} otwartych zleceń na giełdzie. Anuluję wszystkie.")
+            for order in open_orders:
+                order_id = order.get("orderId")
+                if order_id:
+                    self.cancel_order(symbol, order_id)
+            
+            return True
+
+        except Exception as e:
+            logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD podczas czyszczenia otwartych zleceň: {e}", exc_info=True)
+            return False

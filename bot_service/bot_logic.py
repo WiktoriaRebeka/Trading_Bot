@@ -125,58 +125,45 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executo
             
             logger.info(f"--- [{symbol}][Alert: {alert_id}] Rozpoczynam pełny cykl przetwarzania ---")
 
-            # KROK 1: Anulowanie starego, niezrealizowanego zlecenia (jeśli istnieje).
+            # KROK 1: Czyszczenie stanu na GIEŁDZIE.
+            # Niezależnie od stanu naszej bazy, czyścimy wszystkie otwarte zlecenia na giełdzie.
+            # To jest ostateczne rozwiązanie problemu "osieroconych" zleceň.
+            if not bybit_executor.cancel_all_open_orders_for_symbol(symbol):
+                logger.critical(f"[{symbol}] Nie udało się wyczyścić zleceń na giełdzie. Przerywam przetwarzanie alertu dla bezpieczeństwa.")
+                continue
+
+            # KROK 2: Czyszczenie stanu w NASZEJ BAZIE.
+            # Teraz, gdy giełda jest czysta, synchronizujemy z tym stan naszej bazy.
             existing_trade_doc = state_manager.get_open_trade_by_symbol(symbol)
             if existing_trade_doc:
-                order_id_to_check = existing_trade_doc.get('bybit_order_id')
                 trade_id_in_db = existing_trade_doc.get('trade_id')
-                order_status = bybit_executor.get_order_status(symbol, order_id_to_check)
-                cancellable_statuses = ["New", "PartiallyFilled"]
+                logger.info(f"[{symbol}] Synchronizacja stanu: usuwam stary wpis {trade_id_in_db} z bazy danych.")
+                db = get_db()
+                transaction = db.transaction()
+                state_manager.close_trade_transactional(transaction, trade_id_in_db, symbol, is_loss=False)
 
-                if order_status in cancellable_statuses:
-                    logger.warning(f"[{symbol}] Nowy alert. Znaleziono stare, oczekujące zlecenie (ID: {order_id_to_check}). Anuluję je.")
-                    if bybit_executor.cancel_order(symbol, order_id_to_check):
-                        db = get_db()
-                        transaction = db.transaction()
-                        state_manager.close_trade_transactional(transaction, trade_id_in_db, symbol, is_loss=False)
-                    else:
-                        logger.critical(f"[{symbol}] Nie udało się anulować starego zlecenia. Przerywam przetwarzanie alertu.")
-                        continue
-                else:
-                    logger.info(f"[{symbol}] Istnieje aktywna pozycja (status: {order_status}). Ignoruję nowy alert.")
-                    continue
-
-            # KROK 2: Utworzenie lub zresetowanie wpisu w `active_setups`.
-            # To jest brakujący krok, który naprawia błąd "Setup nie istnieje".
+            # KROK 3: Utworzenie nowego setupu.
+            # (Zakładając, że masz funkcję create_setup_from_alert w state_manager)
             state_manager.create_setup_from_alert(alert_data)
 
-            # KROK 3: Złożenie nowego zlecenia na giełdzie.
-            logger.info(f"[{symbol}] Pole jest czyste, setup przygotowany. Przystępuję do składania nowego zlecenia.")
+            # KROK 4: Złożenie nowego zlecenia.
+            logger.info(f"[{symbol}] Giełda i baza danych są czyste. Składam nowe zlecenie.")
             order_id = _prepare_and_place_order(alert_data, bybit_executor, alert_id)
 
-            # KROK 4: Finalizacja stanu - zapisanie nowego zlecenia w bazie.
+            # KROK 5: Zapisanie nowego zlecenia w bazie.
             if order_id:
                 trade_id = str(uuid.uuid4())
-                # Ta funkcja teraz bezpiecznie znajdzie setup utworzony w Kroku 2.
                 state_manager.create_open_trade(
-                    trade_id=trade_id,
-                    symbol=symbol,
-                    direction=alert_data.direction,
-                    ob_type="New Alert",
-                    entry_price=alert_data.entry,
-                    sl_price=alert_data.sl,
-                    tp_price=alert_data.tp_2_0,
-                    alert_data=alert_data,
-                    bybit_order_id=order_id
+                    trade_id=trade_id, symbol=symbol, direction=alert_data.direction,
+                    ob_type="New Alert", entry_price=alert_data.entry, sl_price=alert_data.sl,
+                    tp_price=alert_data.tp_2_0, alert_data=alert_data, bybit_order_id=order_id
                 )
-                logger.info(f"[{symbol}][Alert: {alert_id}] SUKCES. Zlecenie {order_id} złożone i zapisane w bazie.")
+                logger.info(f"[{symbol}][Alert: {alert_id}] SUKCES. Zlecenie {order_id} złożone i zapisane.")
             else:
-                logger.error(f"[{symbol}][Alert: {alert_id}] PORAŻKA. Nie udało się złożyć nowego zlecenia na giełdzie.")
+                logger.error(f"[{symbol}][Alert: {alert_id}] PORAŻKA. Nie udało się złożyć nowego zlecenia.")
 
-        except ValidationError as e:
-            logger.error(f"Błąd walidacji danych alertu {alert_id}: {e}")
         except Exception as e:
-            logger.critical(f"[{symbol}] Nieoczekiwany błąd w głównej pętli przetwarzania alertu {alert_id}: {e}", exc_info=True)
+            logger.critical(f"[{symbol}] Nieoczekiwany błąd w głównej pętli alertu {alert_id}: {e}", exc_info=True)
 
 def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSnapshot], bybit_executor: BybitExecutor):
     if not active_setups: return
