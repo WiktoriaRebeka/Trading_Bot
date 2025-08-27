@@ -280,3 +280,24 @@ def get_active_setup(symbol: str) -> Optional[Dict[str, Any]]:
     except Exception as e:
         logger.error(f"Błąd podczas pobierania aktywnego setupu dla {symbol}: {e}")
         return None
+
+# Lokalizacja: bot_service/state_manager.py (dodać nową funkcję)
+
+def create_setup_from_alert(alert_data: AlertData):
+    """
+    Tworzy nowy dokument w 'active_setups' na podstawie alertu.
+    Jeśli dokument już istnieje, nadpisuje go, resetując stan.
+    """
+    db = _get_db()
+    setup_doc_ref = db.collection(constants.SETUP_COLLECTION).document(alert_data.symbol)
+    
+    new_setup_data = {
+        "alert_data": alert_data.model_dump(by_alias=True),
+        "is_position_open_on_this_setup": False,
+        "is_reset_needed_after_loss": False,
+        "entry_attempts": 0,
+        "updated_at": firestore.SERVER_TIMESTAMP
+    }
+    
+    setup_doc_ref.set(new_setup_data) # Używamy set(), aby zagwarantować czysty start
+    logger.info(f"[{alert_data.symbol}] Utworzono/zresetowano setup na podstawie nowego alertu.")

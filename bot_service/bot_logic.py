@@ -114,7 +114,7 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
 def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executor: BybitExecutor):
     if not newly_fetched_alerts:
         return
-    logger.info(f"Rozpoczynam przetwarzanie {len(newly_fetched_alerts)} nowych alertów w celu anulowania starych zleceń.")
+    logger.info(f"Rozpoczynam przetwarzanie {len(newly_fetched_alerts)} nowych alertów.")
     
     for alert_dict in newly_fetched_alerts:
         alert_id = alert_dict.get('id', 'N/A')
@@ -123,53 +123,60 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executo
             alert_data = AlertData.model_validate(alert_dict)
             symbol = alert_data.symbol
             
-            logger.info(f"--- [{symbol}][Alert: {alert_id}] Sprawdzam, czy istnieje stare zlecenie do anulowania ---")
+            logger.info(f"--- [{symbol}][Alert: {alert_id}] Rozpoczynam pełny cykl przetwarzania ---")
 
-            # JEDYNE ZADANIE TEJ FUNKCJI:
-            # Sprawdzić, czy dla symbolu z nowego alertu istnieje w naszej bazie
-            # niezrealizowane, oczekujące zlecenie. Jeśli tak - anulować je.
-
+            # KROK 1: Anulowanie starego, niezrealizowanego zlecenia (jeśli istnieje).
             existing_trade_doc = state_manager.get_open_trade_by_symbol(symbol)
-            
-            if not existing_trade_doc:
-                logger.info(f"[{symbol}] Brak oczekujących zleceń w bazie. Nic do zrobienia.")
-                continue # Przejdź do następnego alertu
+            if existing_trade_doc:
+                order_id_to_check = existing_trade_doc.get('bybit_order_id')
+                trade_id_in_db = existing_trade_doc.get('trade_id')
+                order_status = bybit_executor.get_order_status(symbol, order_id_to_check)
+                cancellable_statuses = ["New", "PartiallyFilled"]
 
-            # Jeśli znaleziono wpis, weryfikujemy jego status na giełdzie
-            order_id_to_check = existing_trade_doc.get('bybit_order_id')
-            trade_id_in_db = existing_trade_doc.get('trade_id')
-            order_status = bybit_executor.get_order_status(symbol, order_id_to_check)
-            cancellable_statuses = ["New", "PartiallyFilled"]
-
-            if order_status in cancellable_statuses:
-                logger.warning(
-                    f"[{symbol}] Nowy alert! Znaleziono stare, oczekujące zlecenie (ID: {order_id_to_check}). Anuluję je."
-                )
-                cancel_success = bybit_executor.cancel_order(symbol, order_id_to_check)
-                
-                if cancel_success:
-                    logger.info(f"[{symbol}] Zlecenie anulowane. Czyszczę stan w bazie transakcyjnie.")
-                    db = get_db()
-                    transaction = db.transaction()
-                    state_manager.close_trade_transactional(transaction, trade_id_in_db, symbol, is_loss=False)
+                if order_status in cancellable_statuses:
+                    logger.warning(f"[{symbol}] Nowy alert. Znaleziono stare, oczekujące zlecenie (ID: {order_id_to_check}). Anuluję je.")
+                    if bybit_executor.cancel_order(symbol, order_id_to_check):
+                        db = get_db()
+                        transaction = db.transaction()
+                        state_manager.close_trade_transactional(transaction, trade_id_in_db, symbol, is_loss=False)
+                    else:
+                        logger.critical(f"[{symbol}] Nie udało się anulować starego zlecenia. Przerywam przetwarzanie alertu.")
+                        continue
                 else:
-                    logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się anulować zlecenia {order_id_to_check}.")
-            
-            elif order_status is None:
-                logger.error(f"[{symbol}] Nie udało się pobrać statusu zlecenia {order_id_to_check}. Pomijam dla bezpieczeństwa.")
-            
-            else:
-                # To jest aktywna pozycja (status "Filled") lub już zamknięta.
-                # Zgodnie z zasadami, nic nie robimy.
-                logger.info(
-                    f"[{symbol}] Znaleziono aktywną lub zamkniętą pozycję (Status: {order_status}). "
-                    f"Nie podejmuję żadnych działań."
+                    logger.info(f"[{symbol}] Istnieje aktywna pozycja (status: {order_status}). Ignoruję nowy alert.")
+                    continue
+
+            # KROK 2: Utworzenie lub zresetowanie wpisu w `active_setups`.
+            # To jest brakujący krok, który naprawia błąd "Setup nie istnieje".
+            state_manager.create_setup_from_alert(alert_data)
+
+            # KROK 3: Złożenie nowego zlecenia na giełdzie.
+            logger.info(f"[{symbol}] Pole jest czyste, setup przygotowany. Przystępuję do składania nowego zlecenia.")
+            order_id = _prepare_and_place_order(alert_data, bybit_executor, alert_id)
+
+            # KROK 4: Finalizacja stanu - zapisanie nowego zlecenia w bazie.
+            if order_id:
+                trade_id = str(uuid.uuid4())
+                # Ta funkcja teraz bezpiecznie znajdzie setup utworzony w Kroku 2.
+                state_manager.create_open_trade(
+                    trade_id=trade_id,
+                    symbol=symbol,
+                    direction=alert_data.direction,
+                    ob_type="New Alert",
+                    entry_price=alert_data.entry,
+                    sl_price=alert_data.sl,
+                    tp_price=alert_data.tp_2_0,
+                    alert_data=alert_data,
+                    bybit_order_id=order_id
                 )
+                logger.info(f"[{symbol}][Alert: {alert_id}] SUKCES. Zlecenie {order_id} złożone i zapisane w bazie.")
+            else:
+                logger.error(f"[{symbol}][Alert: {alert_id}] PORAŻKA. Nie udało się złożyć nowego zlecenia na giełdzie.")
 
         except ValidationError as e:
             logger.error(f"Błąd walidacji danych alertu {alert_id}: {e}")
         except Exception as e:
-            logger.critical(f"[{symbol}] Nieoczekiwany błąd w pętli przetwarzania alertu {alert_id}: {e}", exc_info=True)
+            logger.critical(f"[{symbol}] Nieoczekiwany błąd w głównej pętli przetwarzania alertu {alert_id}: {e}", exc_info=True)
 
 def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSnapshot], bybit_executor: BybitExecutor):
     if not active_setups: return
