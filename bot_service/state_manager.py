@@ -10,7 +10,6 @@ from google.cloud.firestore_v1.document import DocumentSnapshot
 from shared_lib.firebase_client import get_db
 from shared_lib import constants
 from shared_lib.models import AlertData, OpenTradeData, AnalyzedTradeData
-
 logger = logging.getLogger(__name__)
 
 def _get_db() -> firestore.Client:
