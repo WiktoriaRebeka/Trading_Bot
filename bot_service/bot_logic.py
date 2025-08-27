@@ -30,77 +30,68 @@ from bot_service.bybit_executor import (
 )
 
 logger = logging.getLogger(__name__)
+
+
 def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecutor, alert_id: str = 'N/A'):
     """
-    Przygotowuje i składa zlecenie, aby ryzyko ZAWSZE wynosiło 2.50 USDT,
-    zgodnie z logiką dynamicznego dostosowywania wielkości depozytu.
+    Przygotowuje i składa zlecenie, aby ryzyko ZAWSZE wynosiło 2.50 USDT.
+    Dynamicznie dostosowuje wielkość pozycji, jeśli wymagany lewar jest niedostępny.
     """
     symbol = alert_data.symbol
     try:
-        # --- KROK 1: Pobierz informacje o instrumencie ---
+        leverage_calcs = get_all_calculations_for_alert(alert_data)
+        required_leverage = leverage_calcs.get('required_leverage')
+        if not required_leverage:
+            logger.warning(f"[{symbol}] Zlecenie odrzucone. Wymagana dźwignia nie mogła zostać obliczona.")
+            return None
+
         instrument_info = bybit_executor.get_instrument_info(symbol)
         if not instrument_info:
-            logger.error(f"[{symbol}] Nie udało się pobrać informacji o instrumencie.")
+            logger.error(f"[{symbol}] Nie udało się pobrać informacji o instrumencie z Bybit.")
             return None
         
         tick_size = instrument_info.get('tick_size')
         qty_step = instrument_info.get('qty_step')
         min_order_qty = instrument_info.get('min_order_qty')
-        max_leverage_from_api = float(instrument_info.get('max_leverage', 1.0))
+        max_leverage_from_api = instrument_info.get('max_leverage', 1.0)
 
-        # --- KROK 2: Oblicz wymaganą dźwignię dla bazowego depozytu 10 USDT ---
-        RISK_IN_USDT = 2.50
-        BASE_MARGIN_USDT = 10.0
-        entry_price = alert_data.entry
-        sl_price = alert_data.sl
-
-        if entry_price <= 0:
-            logger.error(f"[{symbol}] Cena wejścia jest nieprawidłowa.")
+        if not tick_size or not qty_step:
+            logger.error(f"[{symbol}] Brak 'tick_size' lub 'qty_step' w danych z API.")
             return None
 
-        sl_distance_percentage = abs(entry_price - sl_price) / entry_price
-        if sl_distance_percentage == 0:
-            logger.error(f"[{symbol}] Odległość SL wynosi zero.")
-            return None
-
-        required_position_value = RISK_IN_USDT / sl_distance_percentage
-        required_leverage = required_position_value / BASE_MARGIN_USDT
-        
-        # --- KROK 3: Dostosuj wielkość depozytu i dźwignię ---
-        final_margin_usdt = BASE_MARGIN_USDT
+        base_position_value = 10.0
         final_leverage = required_leverage
+        final_position_value = base_position_value
 
         if required_leverage > max_leverage_from_api:
             leverage_ratio = required_leverage / max_leverage_from_api
-            final_margin_usdt = BASE_MARGIN_USDT * leverage_ratio
+            final_position_value = base_position_value * leverage_ratio
             final_leverage = max_leverage_from_api
             
             logger.warning(
-                f"[{symbol}] Wymagana dźwignia ({required_leverage:.0f}x) > Max giełdy ({max_leverage_from_api:.0f}x). "
-                f"Zwiększam depozyt do ~{final_margin_usdt:.2f} USDT, aby zachować ryzyko {RISK_IN_USDT} USDT."
+                f"[{symbol}] Wymagany lewar ({required_leverage}x) > Max giełdy ({max_leverage_from_api}x). "
+                f"Zwiększam wartość pozycji do ~{final_position_value:.2f} USDT, aby zachować ryzyko 2.50 USDT."
             )
         
-        # --- KROK 4: Oblicz ostateczną wartość pozycji i qty ---
-        final_position_value = final_margin_usdt * final_leverage
+        entry_price = alert_data.entry
+        if entry_price <= 0:
+            logger.error(f"[{symbol}] Cena wejścia wynosi zero lub jest ujemna.")
+            return None
+            
         target_qty = final_position_value / entry_price
         
         if target_qty < min_order_qty:
-            logger.warning(f"[{symbol}] Zlecenie odrzucone. Obliczona ilość ({target_qty:.8f}) < minimum giełdowe ({min_order_qty}).")
+            logger.warning(
+                f"[{symbol}] Zlecenie odrzucone. Obliczona ilość ({target_qty:.8f}) jest mniejsza niż minimum giełdowe ({min_order_qty})."
+            )
             return None
         
         formatted_qty = format_quantity(target_qty, qty_step)
-        final_qty = float(formatted_qty)
-        if final_qty <= 0:
-            logger.error(f"[{symbol}] Obliczona wielkość zlecenia po sformatowaniu jest zerowa.")
+
+        if float(formatted_qty) <= 0:
+            logger.error(f"[{symbol}] Obliczona wielkość zlecenia po sformatowaniu ({formatted_qty}) jest zerowa.")
             return None
-
-        logger.info(
-            f"[{symbol}] Finalna kalkulacja: Wartość pozycji: {final_position_value:.2f} USDT, "
-            f"Ilość: {formatted_qty}, Dźwignia: {int(final_leverage)}x, Depozyt: {final_margin_usdt:.2f} USDT. "
-            f"Oczekiwana strata na SL: ~{final_qty * abs(entry_price - sl_price):.2f} USDT."
-        )
-
-        # --- KROK 5: Przygotuj i złóż zlecenie ---
+        
         formatted_price = format_price(alert_data.entry, tick_size)
         formatted_tp = format_price(alert_data.tp_2_0, tick_size)
         formatted_sl = format_price(alert_data.sl, tick_size)
@@ -110,7 +101,7 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
             "side": alert_data.direction,
             "price": formatted_price,
             "qty": formatted_qty,
-            "leverage": str(int(final_leverage)),
+            "leverage": final_leverage,
             "takeProfit": formatted_tp,
             "stopLoss": formatted_sl
         }
@@ -123,7 +114,7 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
 def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executor: BybitExecutor):
     if not newly_fetched_alerts:
         return
-    logger.info(f"Rozpoczynam przetwarzanie {len(newly_fetched_alerts)} nowych alertów w celu anulowania starych zleceń.")
+    logger.info(f"Rozpoczynam przetwarzanie {len(newly_fetched_alerts)} nowych alertów.")
     
     for alert_dict in newly_fetched_alerts:
         alert_id = alert_dict.get('id', 'N/A')
@@ -132,53 +123,47 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executo
             alert_data = AlertData.model_validate(alert_dict)
             symbol = alert_data.symbol
             
-            logger.info(f"--- [{symbol}][Alert: {alert_id}] Sprawdzam, czy istnieje stare zlecenie do anulowania ---")
+            logger.info(f"--- [{symbol}][Alert: {alert_id}] Rozpoczynam pełny cykl przetwarzania ---")
 
-            # JEDYNE ZADANIE TEJ FUNKCJI:
-            # Sprawdzić, czy dla symbolu z nowego alertu istnieje w naszej bazie
-            # niezrealizowane, oczekujące zlecenie. Jeśli tak - anulować je.
+            # KROK 1: Czyszczenie stanu na GIEŁDZIE.
+            # Niezależnie od stanu naszej bazy, czyścimy wszystkie otwarte zlecenia na giełdzie.
+            # To jest ostateczne rozwiązanie problemu "osieroconych" zleceň.
+            if not bybit_executor.cancel_all_open_orders_for_symbol(symbol):
+                logger.critical(f"[{symbol}] Nie udało się wyczyścić zleceń na giełdzie. Przerywam przetwarzanie alertu dla bezpieczeństwa.")
+                continue
 
+            # KROK 2: Czyszczenie stanu w NASZEJ BAZIE.
+            # Teraz, gdy giełda jest czysta, synchronizujemy z tym stan naszej bazy.
             existing_trade_doc = state_manager.get_open_trade_by_symbol(symbol)
-            
-            if not existing_trade_doc:
-                logger.info(f"[{symbol}] Brak oczekujących zleceń w bazie. Nic do zrobienia.")
-                continue # Przejdź do następnego alertu
+            if existing_trade_doc:
+                trade_id_in_db = existing_trade_doc.get('trade_id')
+                logger.info(f"[{symbol}] Synchronizacja stanu: usuwam stary wpis {trade_id_in_db} z bazy danych.")
+                db = get_db()
+                transaction = db.transaction()
+                state_manager.close_trade_transactional(transaction, trade_id_in_db, symbol, is_loss=False)
 
-            # Jeśli znaleziono wpis, weryfikujemy jego status na giełdzie
-            order_id_to_check = existing_trade_doc.get('bybit_order_id')
-            trade_id_in_db = existing_trade_doc.get('trade_id')
-            order_status = bybit_executor.get_order_status(symbol, order_id_to_check)
-            cancellable_statuses = ["New", "PartiallyFilled"]
+            # KROK 3: Utworzenie nowego setupu.
+            # (Zakładając, że masz funkcję create_setup_from_alert w state_manager)
+            state_manager.create_setup_from_alert(alert_data)
 
-            if order_status in cancellable_statuses:
-                logger.warning(
-                    f"[{symbol}] Nowy alert! Znaleziono stare, oczekujące zlecenie (ID: {order_id_to_check}). Anuluję je."
+            # KROK 4: Złożenie nowego zlecenia.
+            logger.info(f"[{symbol}] Giełda i baza danych są czyste. Składam nowe zlecenie.")
+            order_id = _prepare_and_place_order(alert_data, bybit_executor, alert_id)
+
+            # KROK 5: Zapisanie nowego zlecenia w bazie.
+            if order_id:
+                trade_id = str(uuid.uuid4())
+                state_manager.create_open_trade(
+                    trade_id=trade_id, symbol=symbol, direction=alert_data.direction,
+                    ob_type="New Alert", entry_price=alert_data.entry, sl_price=alert_data.sl,
+                    tp_price=alert_data.tp_2_0, alert_data=alert_data, bybit_order_id=order_id
                 )
-                cancel_success = bybit_executor.cancel_order(symbol, order_id_to_check)
-                
-                if cancel_success:
-                    logger.info(f"[{symbol}] Zlecenie anulowane. Czyszczę stan w bazie transakcyjnie.")
-                    db = get_db()
-                    transaction = db.transaction()
-                    state_manager.close_trade_transactional(transaction, trade_id_in_db, symbol, is_loss=False)
-                else:
-                    logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się anulować zlecenia {order_id_to_check}.")
-            
-            elif order_status is None:
-                logger.error(f"[{symbol}] Nie udało się pobrać statusu zlecenia {order_id_to_check}. Pomijam dla bezpieczeństwa.")
-            
+                logger.info(f"[{symbol}][Alert: {alert_id}] SUKCES. Zlecenie {order_id} złożone i zapisane.")
             else:
-                # To jest aktywna pozycja (status "Filled") lub już zamknięta.
-                # Zgodnie z zasadami, nic nie robimy.
-                logger.info(
-                    f"[{symbol}] Znaleziono aktywną lub zamkniętą pozycję (Status: {order_status}). "
-                    f"Nie podejmuję żadnych działań."
-                )
+                logger.error(f"[{symbol}][Alert: {alert_id}] PORAŻKA. Nie udało się złożyć nowego zlecenia.")
 
-        except ValidationError as e:
-            logger.error(f"Błąd walidacji danych alertu {alert_id}: {e}")
         except Exception as e:
-            logger.critical(f"[{symbol}] Nieoczekiwany błąd w pętli przetwarzania alertu {alert_id}: {e}", exc_info=True)
+            logger.critical(f"[{symbol}] Nieoczekiwany błąd w głównej pętli alertu {alert_id}: {e}", exc_info=True)
 
 def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSnapshot], bybit_executor: BybitExecutor):
     if not active_setups: return
