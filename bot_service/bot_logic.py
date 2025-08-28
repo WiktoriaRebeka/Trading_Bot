@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecutor, alert_id: str = 'N/A'):
     """
     Przygotowuje i składa zlecenie, aby ryzyko ZAWSZE wynosiło 2.50 USDT,
-    zgodnie z logiką opartą na stałym ryzyku i docelowej wartości pozycji.
+    zgodnie z logiką dynamicznego dostosowywania wielkości depozytu.
     """
     symbol = alert_data.symbol
     try:
@@ -128,6 +128,8 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
     except Exception as e:
         logger.critical(f"[{symbol}] Nieoczekiwany błąd w logice przygotowywania zlecenia dla alertu {alert_id}: {e}", exc_info=True)
         return None
+### KONIEC JEDYNEJ ZMIANY ###
+
 
 def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executor: BybitExecutor):
     if not newly_fetched_alerts:
@@ -143,15 +145,10 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executo
             
             logger.info(f"--- [{symbol}][Alert: {alert_id}] Rozpoczynam pełny cykl przetwarzania ---")
 
-            # KROK 1: Czyszczenie stanu na GIEŁDZIE.
-            # Niezależnie od stanu naszej bazy, czyścimy wszystkie otwarte zlecenia na giełdzie.
-            # To jest ostateczne rozwiązanie problemu "osieroconych" zleceň.
             if not bybit_executor.cancel_all_open_orders_for_symbol(symbol):
                 logger.critical(f"[{symbol}] Nie udało się wyczyścić zleceń na giełdzie. Przerywam przetwarzanie alertu dla bezpieczeństwa.")
                 continue
 
-            # KROK 2: Czyszczenie stanu w NASZEJ BAZIE.
-            # Teraz, gdy giełda jest czysta, synchronizujemy z tym stan naszej bazy.
             existing_trade_doc = state_manager.get_open_trade_by_symbol(symbol)
             if existing_trade_doc:
                 trade_id_in_db = existing_trade_doc.get('trade_id')
@@ -160,15 +157,11 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executo
                 transaction = db.transaction()
                 state_manager.close_trade_transactional(transaction, trade_id_in_db, symbol, is_loss=False)
 
-            # KROK 3: Utworzenie nowego setupu.
-            # (Zakładając, że masz funkcję create_setup_from_alert w state_manager)
             state_manager.create_setup_from_alert(alert_data)
 
-            # KROK 4: Złożenie nowego zlecenia.
             logger.info(f"[{symbol}] Giełda i baza danych są czyste. Składam nowe zlecenie.")
             order_id = _prepare_and_place_order(alert_data, bybit_executor, alert_id)
 
-            # KROK 5: Zapisanie nowego zlecenia w bazie.
             if order_id:
                 trade_id = str(uuid.uuid4())
                 state_manager.create_open_trade(
