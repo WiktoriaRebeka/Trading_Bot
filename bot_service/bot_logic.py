@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecutor, alert_id: str = 'N/A'):
     """
     Przygotowuje i składa zlecenie, aby ryzyko ZAWSZE wynosiło 2.50 USDT,
-    zgodnie z logiką dynamicznego dostosowywania wielkości depozytu.
+    używając bezpośredniej kalkulacji wielkości pozycji (qty).
     """
     symbol = alert_data.symbol
     try:
@@ -49,51 +49,28 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
         tick_size = instrument_info.get('tick_size')
         qty_step = instrument_info.get('qty_step')
         min_order_qty = instrument_info.get('min_order_qty')
-        max_leverage_from_api = float(instrument_info.get('max_leverage', 1.0))
+        max_leverage_from_api = instrument_info.get('max_leverage', 1.0)
 
-        # --- KROK 2: Obliczenia zgodne z Twoją logiką ---
+        # --- KROK 2: Oblicz poprawną wielkość pozycji (qty) na podstawie ryzyka ---
         RISK_IN_USDT = 2.50
-        BASE_MARGIN_USDT = 10.0
         entry_price = alert_data.entry
         sl_price = alert_data.sl
 
-        if entry_price <= 0:
-            logger.error(f"[{symbol}] Cena wejścia jest nieprawidłowa.")
+        if entry_price <= 0 or sl_price <= 0:
+            logger.error(f"[{symbol}] Cena wejścia lub SL jest nieprawidłowa.")
             return None
 
-        sl_distance_percentage = abs(entry_price - sl_price) / entry_price
-        if sl_distance_percentage == 0:
-            logger.error(f"[{symbol}] Odległość SL wynosi zero.")
+        sl_distance_points = abs(entry_price - sl_price)
+        if sl_distance_points == 0:
+            logger.error(f"[{symbol}] Odległość SL wynosi zero. Nie można otworzyć pozycji.")
             return None
-        
-        logger.info(f"[{symbol}] [Kalkulacja 1/4] Odległość SL: {sl_distance_percentage:.4%}")
 
-        # Krok 1: Obliczenie Wymaganej Wartości Pozycji
-        required_position_value = RISK_IN_USDT / sl_distance_percentage
-        logger.info(f"[{symbol}] [Kalkulacja 2/4] Wymagana wartość pozycji (dla ryzyka {RISK_IN_USDT} USDT): {required_position_value:.2f} USDT")
+        # KLUCZOWY, POPRAWNY WZÓR: Ilość = Ryzyko / Różnica Cen
+        target_qty = RISK_IN_USDT / sl_distance_points
         
-        # Krok 2: Obliczenie Wymaganej Dźwigni dla depozytu 10 USDT
-        required_leverage = required_position_value / BASE_MARGIN_USDT
-        logger.info(f"[{symbol}] [Kalkulacja 3/4] Wymagana dźwignia (dla depozytu {BASE_MARGIN_USDT} USDT): {required_leverage:.2f}x")
-        
-        # --- KROK 3: Dostosuj wielkość depozytu i dźwignię ---
-        final_margin_usdt = BASE_MARGIN_USDT
-        final_leverage = required_leverage
+        logger.info(f"[{symbol}] [Kalkulacja 1/2] Odległość SL: {sl_distance_points:.8f} USDT. Docelowa ilość (qty): {target_qty:.8f}")
 
-        if required_leverage > max_leverage_from_api:
-            leverage_ratio = required_leverage / max_leverage_from_api
-            final_margin_usdt = BASE_MARGIN_USDT * leverage_ratio
-            final_leverage = max_leverage_from_api
-            
-            logger.warning(
-                f"[{symbol}] Wymagana dźwignia ({required_leverage:.0f}x) > Max giełdy ({max_leverage_from_api:.0f}x). "
-                f"Ratio: {leverage_ratio:.2f}. Zwiększam depozyt do ~{final_margin_usdt:.2f} USDT."
-            )
-        
-        # --- KROK 4: Oblicz ostateczną wartość pozycji i qty ---
-        final_position_value = final_margin_usdt * final_leverage
-        target_qty = final_position_value / entry_price
-        
+        # --- KROK 3: Weryfikacja i formatowanie ---
         if target_qty < min_order_qty:
             logger.warning(f"[{symbol}] Zlecenie odrzucone. Obliczona ilość ({target_qty:.8f}) < minimum giełdowe ({min_order_qty}).")
             return None
@@ -104,9 +81,16 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
             logger.error(f"[{symbol}] Obliczona wielkość zlecenia po sformatowaniu jest zerowa.")
             return None
 
+        # --- KROK 4: Ustaw dźwignię na maksymalną wartość ---
+        final_leverage = int(max_leverage_from_api)
+        
+        position_value = final_qty * entry_price
+        required_margin = position_value / final_leverage
+        
         logger.info(
-            f"[{symbol}] [Kalkulacja 4/4] Finalne parametry: Ilość: {formatted_qty}, Dźwignia: {int(final_leverage)}x, Depozyt: {final_margin_usdt:.2f} USDT. "
-            f"Wartość pozycji: ~{final_position_value:.2f} USDT. Oczekiwana strata na SL: ~{final_qty * abs(entry_price - sl_price):.2f} USDT."
+            f"[{symbol}] [Kalkulacja 2/2] Finalne parametry: Ilość: {formatted_qty}, Dźwignia: {final_leverage}x. "
+            f"Wartość pozycji: ~{position_value:.2f} USDT. Wymagany depozyt: ~{required_margin:.2f} USDT. "
+            f"Oczekiwana strata na SL: ~{final_qty * sl_distance_points:.2f} USDT."
         )
 
         # --- KROK 5: Przygotuj i złóż zlecenie ---
@@ -119,7 +103,7 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
             "side": alert_data.direction,
             "price": formatted_price,
             "qty": formatted_qty,
-            "leverage": str(int(final_leverage)),
+            "leverage": str(final_leverage),
             "takeProfit": formatted_tp,
             "stopLoss": formatted_sl
         }
@@ -128,7 +112,6 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
     except Exception as e:
         logger.critical(f"[{symbol}] Nieoczekiwany błąd w logice przygotowywania zlecenia dla alertu {alert_id}: {e}", exc_info=True)
         return None
-### KONIEC JEDYNEJ ZMIANY ###
 
 
 def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executor: BybitExecutor):
