@@ -66,66 +66,56 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
             logger.error(f"[{symbol}] Odległość SL wynosi zero.")
             return None
         
-        logger.info(f"[{symbol}] [Kalkulacja 1/3] Odległość SL: {sl_distance_percentage:.4%}")
-
+        # --- KROK 3: Oblicz docelowy margin i dźwignię ---
         loss_on_base_position_no_leverage = BASE_POSITION_VALUE_USDT * sl_distance_percentage
         required_leverage = RISK_IN_USDT / loss_on_base_position_no_leverage
-        logger.info(f"[{symbol}] [Kalkulacja 2/3] Wymagana dźwignia (dla pozycji {BASE_POSITION_VALUE_USDT} USDT): {required_leverage:.2f}x")
         
-        # --- KROK 3: Dostosuj wielkość pozycji i dźwignię ---
-        final_position_value_usdt = BASE_POSITION_VALUE_USDT
+        final_margin_usdt = BASE_POSITION_VALUE_USDT
         final_leverage = required_leverage
 
         if required_leverage > max_leverage_from_api:
             leverage_ratio = required_leverage / max_leverage_from_api
-            final_position_value_usdt = BASE_POSITION_VALUE_USDT * leverage_ratio
+            final_margin_usdt = BASE_POSITION_VALUE_USDT * leverage_ratio
             final_leverage = max_leverage_from_api
             
             logger.warning(
                 f"[{symbol}] Wymagana dźwignia ({required_leverage:.0f}x) > Max giełdy ({max_leverage_from_api:.0f}x). "
-                f"Ratio: {leverage_ratio:.2f}. Zwiększam wielkość pozycji do ~{final_position_value_usdt:.2f} USDT."
+                f"Zwiększam margin do ~{final_margin_usdt:.2f} USDT."
             )
         
-        # --- KROK 4: Oblicz ostateczną ilość (qty) ---
-        # To jest kluczowa zmiana: qty to wartość pozycji w USDT / cena
-        target_qty = final_position_value_usdt / entry_price
+        # --- KROK 4: Oblicz Wartość Nominalną i finalne QTY ---
+        # <<< TO JEST JEDYNA I KLUCZOWA ZMIANA W LOGICE >>>
+        notional_value = final_margin_usdt * final_leverage
+        target_qty = notional_value / entry_price
         
         if target_qty < min_order_qty:
             logger.warning(f"[{symbol}] Zlecenie odrzucone. Obliczona ilość ({target_qty:.8f}) < minimum giełdowe ({min_order_qty}).")
             return None
         
         formatted_qty = format_quantity(target_qty, qty_step)
-        final_qty = float(formatted_qty)
-        if final_qty <= 0:
-            logger.error(f"[{symbol}] Obliczona wielkość zlecenia po sformatowaniu jest zerowa.")
-            return None
-
-        # Logi weryfikacyjne
-        notional_value = final_qty * entry_price * final_leverage
+        
+        # --- Logi weryfikacyjne ---
         expected_loss = notional_value * sl_distance_percentage
         
         logger.info(
-            f"[{symbol}] [Kalkulacja 3/3] Finalne parametry: Ilość: {formatted_qty}, Dźwignia: {int(final_leverage)}x. "
-            f"Wielkość pozycji (Margin): ~{final_position_value_usdt:.2f} USDT."
+            f"[{symbol}] [Finalne Parametry] Docelowy Margin: ~{final_margin_usdt:.2f} USDT, Dźwignia: {int(final_leverage)}x."
         )
         logger.info(
-            f"[{symbol}] Wartość notionalna (z dźwignią): ~{notional_value:.2f} USDT. "
-            f"Oczekiwana strata na SL: ~{expected_loss:.2f} USDT."
+            f"[{symbol}] [Finalne Zlecenie] Wartość Nominalna: ~{notional_value:.2f} USDT, Ilość (Qty): {formatted_qty} {symbol.replace('USDT.P', '')}."
+        )
+        logger.info(
+            f"[{symbol}] [Weryfikacja Ryzyka] Oczekiwana strata na SL: ~{expected_loss:.2f} USDT (Cel: {RISK_IN_USDT:.2f} USDT)."
         )
 
         # --- KROK 5: Przygotuj i złóż zlecenie ---
-        formatted_price = format_price(alert_data.entry, tick_size)
-        formatted_tp = format_price(alert_data.tp_2_0, tick_size)
-        formatted_sl = format_price(alert_data.sl, tick_size)
-
         order_params = {
             "symbol": symbol,
             "side": alert_data.direction,
-            "price": formatted_price,
+            "price": format_price(alert_data.entry, tick_size),
             "qty": formatted_qty,
             "leverage": str(int(final_leverage)),
-            "takeProfit": formatted_tp,
-            "stopLoss": formatted_sl
+            "takeProfit": format_price(alert_data.tp_2_0, tick_size),
+            "stopLoss": format_price(alert_data.sl, tick_size)
         }
         return bybit_executor.place_limit_order(order_params)
 
