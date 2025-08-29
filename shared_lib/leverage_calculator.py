@@ -1,73 +1,82 @@
-# Lokalizacja: shared_lib/leverage_calculator.py
+# shared_lib/leverage_calculator.py
 
 import logging
-from typing import Dict, Optional
-import math
 from decimal import Decimal, ROUND_DOWN
-from shared_lib.models import AlertData
+from typing import NamedTuple, Optional
 
 logger = logging.getLogger(__name__)
 
+# --- Konfiguracja Strategii Zarządzania Ryzykiem ---
+TARGET_RISK_USDT = Decimal("2.50")
+BASE_POSITION_VALUE_USDT = Decimal("10.00")
+
+
+class CalculationResult(NamedTuple):
+    """Struktura przechowująca wyniki kalkulacji parametrów zlecenia."""
+    final_leverage: int
+    final_position_value_usdt: Decimal
+    notional_value_usdt: Decimal # Pełna, dźwigniowana wartość pozycji
+
+
+def calculate_order_parameters(
+    entry_price: float, 
+    sl_price: float, 
+    max_leverage_from_api: float
+) -> Optional[CalculationResult]:
+    """
+    Oblicza finalną dźwignię i wielkość pozycji (margin) zgodnie z logiką
+    stałego ryzyka 2.50 USDT.
+    """
+    try:
+        entry_price_d = Decimal(str(entry_price))
+        sl_price_d = Decimal(str(sl_price))
+        max_leverage_d = Decimal(str(max_leverage_from_api))
+
+        if entry_price_d <= 0:
+            logger.error("Cena wejścia jest nieprawidłowa (<= 0).")
+            return None
+
+        sl_distance = abs(entry_price_d - sl_price_d)
+        if sl_distance == 0:
+            logger.error("Odległość Stop Lossa wynosi zero. Nie można obliczyć ryzyka.")
+            return None
+        sl_distance_percentage = sl_distance / entry_price_d
+
+        loss_on_base_position = BASE_POSITION_VALUE_USDT * sl_distance_percentage
+        if loss_on_base_position == 0:
+            logger.error("Strata na pozycji bazowej wynosi zero. Nie można obliczyć dźwigni.")
+            return None
+            
+        required_leverage = TARGET_RISK_USDT / loss_on_base_position
+
+        final_position_value_usdt = BASE_POSITION_VALUE_USDT
+        final_leverage_decimal = required_leverage
+
+        if required_leverage > max_leverage_d:
+            ratio = required_leverage / max_leverage_d
+            final_position_value_usdt = BASE_POSITION_VALUE_USDT * ratio
+            final_leverage_decimal = max_leverage_d
+            logger.warning(
+                f"[Kalkulator] Wymagana dźwignia ({required_leverage:.0f}x) > Max giełdy ({max_leverage_d:.0f}x). "
+                f"Dostosowuję wielkość pozycji do ~{final_position_value_usdt:.2f} USDT."
+            )
+
+        # Oblicz finalną wartość nominalną
+        notional_value = final_position_value_usdt * final_leverage_decimal
+
+        return CalculationResult(
+            final_leverage=int(final_leverage_decimal),
+            final_position_value_usdt=final_position_value_usdt,
+            notional_value_usdt=notional_value
+        )
+
+    except Exception as e:
+        logger.error(f"Nieoczekiwany błąd w kalkulatorze dźwigni: {e}", exc_info=True)
+        return None
+
 def format_price(price: float, tick_size: str) -> str:
+    """Formatuje cenę zgodnie z tick_size instrumentu."""
     price_decimal = Decimal(str(price))
     tick_size_decimal = Decimal(tick_size)
     formatted_price = price_decimal.quantize(tick_size_decimal, rounding=ROUND_DOWN)
     return str(formatted_price)
-
-RISK_PER_TRADE_PERCENT = 2.5
-POSITION_SIZE_PERCENT = 10.0
-TOTAL_CAPITAL = 100.0
-TRANSACTION_FEE_PERCENT = 0.02
-
-def calculate_sl_distance_points(entry_price: float, sl_price: float) -> float:
-    if entry_price == sl_price:
-        logger.warning(f"Cena wejścia ({entry_price}) i stop loss ({sl_price}) są identyczne.")
-        return 0.0
-    distance = abs(entry_price - sl_price)
-    return round(distance, 8)
-
-def calculate_sl_distance_percentage(entry_price: float, sl_price: float) -> float:
-    if entry_price == 0:
-        logger.error("Cena wejścia wynosi 0. Nie można obliczyć procentowej odległości SL.")
-        return 0.0
-    sl_distance_points = calculate_sl_distance_points(entry_price, sl_price)
-    if sl_distance_points == 0.0:
-        return 0.0
-    percentage = (sl_distance_points / entry_price) * 100
-    return round(percentage, 4)
-
-def calculate_real_sl_distance_percentage(sl_distance_percentage: float) -> float:
-    total_fee = TRANSACTION_FEE_PERCENT * 2
-    real_distance = sl_distance_percentage + total_fee
-    return round(real_distance, 4)
-
-def calculate_required_leverage(real_sl_percentage: float) -> Optional[int]:
-    if real_sl_percentage <= 0:
-        logger.error(f"Realna odległość SL ({real_sl_percentage}%) jest zerowa lub ujemna.")
-        return None
-    risk_in_usd = (RISK_PER_TRADE_PERCENT / 100) * TOTAL_CAPITAL
-    margin_in_usd = (POSITION_SIZE_PERCENT / 100) * TOTAL_CAPITAL
-    loss_on_margin_in_usd = (real_sl_percentage / 100) * margin_in_usd
-    if loss_on_margin_in_usd <= 0:
-        logger.error("Strata na marginie jest zerowa lub ujemna.")
-        return None
-    leverage = risk_in_usd / loss_on_margin_in_usd
-    safe_leverage = math.floor(leverage)
-    if safe_leverage < 1:
-        logger.warning(f"Obliczona dźwignia ({leverage:.2f}x) jest mniejsza niż 1.")
-        return None
-    return int(safe_leverage)
-
-def get_all_calculations_for_alert(alert: AlertData) -> Dict[str, Optional[float | int]]:
-    entry = alert.entry
-    sl = alert.sl
-    distance_points = calculate_sl_distance_points(entry, sl)
-    distance_percentage = calculate_sl_distance_percentage(entry, sl)
-    real_distance_percentage = calculate_real_sl_distance_percentage(distance_percentage)
-    required_leverage = calculate_required_leverage(real_distance_percentage)
-    return {
-        "distance_points": distance_points,
-        "distance_percentage": distance_percentage,
-        "distance_percentage_real": real_distance_percentage,
-        "required_leverage": required_leverage
-    }
