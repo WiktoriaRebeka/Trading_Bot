@@ -180,7 +180,34 @@ class BybitExecutor:
             logger.critical(f"[{symbol}] Błąd sieciowy podczas anulowania zlecenia {order_id}: {e}")
             return False
 
-    # ... (reszta pliku bez zmian, dodajemy nową metodę na końcu klasy BybitExecutor)
+    def set_leverage(self, symbol: str, leverage: int) -> bool:
+            """
+            Ustawia dźwignię dla danego symbolu w trybie One-Way.
+            """
+            api_symbol = symbol.replace('.P', '')
+            endpoint = "/v5/position/set-leverage"
+            params = {
+                "category": "linear",
+                "symbol": api_symbol,
+                "buyLeverage": str(leverage),
+                "sellLeverage": str(leverage)
+            }
+            try:
+                response_data = self._send_request("POST", endpoint, params=params)
+                # API v5 zwraca 0 w retCode przy sukcesie
+                if response_data.get("retCode") == 0:
+                    logger.info(f"[{symbol}] Pomyślnie ustawiono dźwignię na {leverage}x.")
+                    return True
+                else:
+                    # W tym przypadku nie rzucamy wyjątku, ale logujemy błąd i zwracamy False
+                    logger.error(
+                        f"[{symbol}] Błąd API podczas ustawiania dźwigni. "
+                        f"retCode: {response_data.get('retCode')}, retMsg: {response_data.get('retMsg')}"
+                    )
+                    return False
+            except (RequestException, BybitAPIError) as e:
+                logger.error(f"[{symbol}] Wyjątek podczas ustawiania dźwigni: {e}")
+                return False
 
     def close_position_market(self, symbol: str, side: str) -> bool:
         """Zamyka pozycję dla danego symbolu przez złożenie zlecenia rynkowego w przeciwnym kierunku."""
