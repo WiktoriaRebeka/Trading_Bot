@@ -10,11 +10,10 @@ from google.cloud.firestore_v1.document import DocumentSnapshot
 from pydantic import ValidationError
 from requests.exceptions import RequestException
 
+# --- Importy z projektu ---
 from shared_lib import constants
 from shared_lib.firebase_client import get_db, get_symbols_to_watch_from_config
-from shared_lib.leverage_calculator import get_all_calculations_for_alert, format_price
 from shared_lib.leverage_calculator import calculate_order_parameters, format_price, TARGET_RISK_USDT
-from bot_service.bybit_executor import BybitExecutor, format_quantity  
 from shared_lib.models import (
     AlertData,
     AnalyzedTradeData,
@@ -22,14 +21,9 @@ from shared_lib.models import (
     OpenTradeData,
     SetupData,
 )
-
 from bot_service import state_manager
 from bot_service.bigquery_logger import log_trade_to_bigquery
-from bot_service.bybit_executor import (
-    BybitAPIError,
-    BybitExecutor,
-    format_quantity,
-)
+from bot_service.bybit_executor import BybitAPIError, BybitExecutor, format_quantity
 
 logger = logging.getLogger(__name__)
 
