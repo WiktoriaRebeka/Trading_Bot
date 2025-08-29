@@ -34,16 +34,15 @@ logger = logging.getLogger(__name__)
 
 def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecutor, alert_id: str = 'N/A'):
     """
-    Przygotowuje i składa zlecenie, aby ryzyko ZAWSZE wynosiło 2.50 USDT,
-    zgodnie z logiką bazowej wielkości pozycji 10 USDT i dynamicznego jej dostosowywania.
+    Przygotowuje i składa zlecenie, aby CAŁKOWITE ryzyko (strata na cenie + opłaty)
+    wynosiło ~2.50 USDT.
     """
     symbol = alert_data.symbol
     try:
         logger.info(f"[{symbol}] --- Rozpoczynam kalkulację ryzyka dla alertu {alert_id} ---")
-        # --- KROK 1: Pobierz informacje o instrumencie ---
+        # --- KROK 1: Pobierz informacje o instrumencie i zdefiniuj stałe ---
         instrument_info = bybit_executor.get_instrument_info(symbol)
         if not instrument_info:
-            logger.error(f"[{symbol}] Nie udało się pobrać informacji o instrumencie.")
             return None
         
         tick_size = instrument_info.get('tick_size')
@@ -51,42 +50,48 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
         min_order_qty = instrument_info.get('min_order_qty')
         max_leverage_from_api = float(instrument_info.get('max_leverage', 1.0))
 
-        # --- KROK 2: Obliczenia zgodne z Twoją logiką ---
-        RISK_IN_USDT = 2.50
-        BASE_POSITION_VALUE_USDT = 10.0
+        # --- Stałe strategii ---
+        TOTAL_RISK_USDT = 2.50
+        BASE_MARGIN_USDT = 10.0
+        # Ustaw tutaj swoją stawkę Taker Fee (np. 0.06% to 0.0006)
+        TAKER_FEE_RATE = 0.00055 # Standardowa opłata Taker na Bybit
+
+        # --- KROK 2: Obliczenia wstępne (bez uwzględnienia opłat) ---
         entry_price = alert_data.entry
         sl_price = alert_data.sl
 
-        if entry_price <= 0:
-            logger.error(f"[{symbol}] Cena wejścia jest nieprawidłowa.")
-            return None
-
+        if entry_price <= 0: return None
         sl_distance_percentage = abs(entry_price - sl_price) / entry_price
-        if sl_distance_percentage == 0:
-            logger.error(f"[{symbol}] Odległość SL wynosi zero.")
-            return None
+        if sl_distance_percentage == 0: return None
+
+        loss_on_base_position = BASE_MARGIN_USDT * sl_distance_percentage
+        required_leverage = TOTAL_RISK_USDT / loss_on_base_position
         
-        # --- KROK 3: Oblicz docelowy margin i dźwignię ---
-        loss_on_base_position_no_leverage = BASE_POSITION_VALUE_USDT * sl_distance_percentage
-        required_leverage = RISK_IN_USDT / loss_on_base_position_no_leverage
-        
-        final_margin_usdt = BASE_POSITION_VALUE_USDT
+        final_margin_usdt = BASE_MARGIN_USDT
         final_leverage = required_leverage
 
         if required_leverage > max_leverage_from_api:
-            leverage_ratio = required_leverage / max_leverage_from_api
-            final_margin_usdt = BASE_POSITION_VALUE_USDT * leverage_ratio
+            ratio = required_leverage / max_leverage_from_api
+            final_margin_usdt = BASE_MARGIN_USDT * ratio
             final_leverage = max_leverage_from_api
-            
-            logger.warning(
-                f"[{symbol}] Wymagana dźwignia ({required_leverage:.0f}x) > Max giełdy ({max_leverage_from_api:.0f}x). "
-                f"Zwiększam margin do ~{final_margin_usdt:.2f} USDT."
-            )
         
-        # --- KROK 4: Oblicz Wartość Nominalną i finalne QTY ---
-        # <<< TO JEST JEDYNA I KLUCZOWA ZMIANA W LOGICE >>>
-        notional_value = final_margin_usdt * final_leverage
-        target_qty = notional_value / entry_price
+        # --- KROK 3: Korekta o szacowane opłaty ---
+        # Szacujemy wartość nominalną i opłaty na podstawie wstępnych obliczeń
+        preliminary_notional_value = final_margin_usdt * final_leverage
+        estimated_fees = preliminary_notional_value * TAKER_FEE_RATE * 2 # Za wejście i wyjście
+
+        # Obliczamy nowy cel dla straty z samej ceny
+        price_loss_target = TOTAL_RISK_USDT - estimated_fees
+        
+        if price_loss_target <= 0:
+            logger.error(f"[{symbol}] Szacowane opłaty ({estimated_fees:.2f} USDT) są wyższe niż całe ryzyko. Nie można złożyć zlecenia.")
+            return None
+
+        # Przeliczamy wymaganą wartość nominalną, aby strata na cenie wyniosła price_loss_target
+        final_notional_value = price_loss_target / sl_distance_percentage
+        
+        # --- KROK 4: Oblicz finalne QTY ---
+        target_qty = final_notional_value / entry_price
         
         if target_qty < min_order_qty:
             logger.warning(f"[{symbol}] Zlecenie odrzucone. Obliczona ilość ({target_qty:.8f}) < minimum giełdowe ({min_order_qty}).")
@@ -95,19 +100,17 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
         formatted_qty = format_quantity(target_qty, qty_step)
         
         # --- Logi weryfikacyjne ---
-        expected_loss = notional_value * sl_distance_percentage
-        
-        logger.info(
-            f"[{symbol}] [Finalne Parametry] Docelowy Margin: ~{final_margin_usdt:.2f} USDT, Dźwignia: {int(final_leverage)}x."
-        )
-        logger.info(
-            f"[{symbol}] [Finalne Zlecenie] Wartość Nominalna: ~{notional_value:.2f} USDT, Ilość (Qty): {formatted_qty} {symbol.replace('USDT.P', '')}."
-        )
-        logger.info(
-            f"[{symbol}] [Weryfikacja Ryzyka] Oczekiwana strata na SL: ~{expected_loss:.2f} USDT (Cel: {RISK_IN_USDT:.2f} USDT)."
-        )
+        final_margin_required = final_notional_value / final_leverage
+        expected_price_loss = final_notional_value * sl_distance_percentage
+        final_expected_fees = final_notional_value * TAKER_FEE_RATE * 2
+        total_expected_loss = expected_price_loss + final_expected_fees
 
-        # --- KROK 5: Przygotuj i złóż zlecenie ---
+        logger.info(f"[{symbol}] [Finalne Parametry] Docelowy Margin: ~{final_margin_required:.2f} USDT, Dźwignia: {int(final_leverage)}x.")
+        logger.info(f"[{symbol}] [Finalne Zlecenie] Wartość Nominalna: ~{final_notional_value:.2f} USDT, Ilość (Qty): {formatted_qty} {symbol.replace('USDT.P', '')}.")
+        logger.info(f"[{symbol}] [Weryfikacja Ryzyka] Oczekiwana strata na cenie: ~{expected_price_loss:.2f} USDT, Szacowane opłaty: ~{final_expected_fees:.2f} USDT.")
+        logger.info(f"[{symbol}] [SUMA] Całkowita oczekiwana strata: ~{total_expected_loss:.2f} USDT (Cel: {TOTAL_RISK_USDT:.2f} USDT).")
+
+        # --- KROK 5: Złóż zlecenie (bez set_leverage, zgodnie z życzeniem) ---
         order_params = {
             "symbol": symbol,
             "side": alert_data.direction,
