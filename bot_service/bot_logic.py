@@ -88,7 +88,8 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
         
         # --- KROK 4: Oblicz ostateczną ilość (qty) ---
         # To jest kluczowa zmiana: qty to wartość pozycji w USDT / cena
-        target_qty = final_position_value_usdt / entry_price
+        notional_value = final_position_value_usdt * final_leverage
+        target_qty = notional_value / entry_price
         
         if target_qty < min_order_qty:
             logger.warning(f"[{symbol}] Zlecenie odrzucone. Obliczona ilość ({target_qty:.8f}) < minimum giełdowe ({min_order_qty}).")
