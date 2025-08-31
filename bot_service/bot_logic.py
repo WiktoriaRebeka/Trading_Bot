@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecutor, alert_id: str = 'N/A'):
     """
     Przygotowuje i składa zlecenie, aby CAŁKOWITE ryzyko (strata na cenie + opłaty)
-    wynosiło ~2.50 USDT.
+    wynosiło ~2.50 USDT, z filtrem minimalnej odległości SL.
     """
     symbol = alert_data.symbol
     try:
@@ -53,8 +53,9 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
 
         TOTAL_RISK_USDT = 2.50
         TAKER_FEE_RATE = 0.00055  # Standardowa opłata Taker na Bybit (0.055%)
+        MIN_SL_DISTANCE_PERCENT = 0.001 # Nasz nowy filtr: 0.1%
 
-        # --- KROK 2: Oblicz procentowe koszty ---
+        # --- KROK 2: Oblicz procentowe koszty i zastosuj filtr ---
         entry_price = alert_data.entry
         sl_price = alert_data.sl
 
@@ -66,11 +67,19 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
             logger.error(f"[{symbol}] Odległość SL wynosi zero.")
             return None
 
-        # Sumujemy koszt ruchu ceny i podwójną opłatę transakcyjną (za wejście i wyjście)
+        # <<< NOWE ZABEZPIECZENIE >>>
+        if sl_distance_percentage < MIN_SL_DISTANCE_PERCENT:
+            logger.warning(
+                f"[{symbol}] Zlecenie odrzucone. Odległość SL ({sl_distance_percentage:.4%}) "
+                f"< minimum ({MIN_SL_DISTANCE_PERCENT:.4%}). Zbyt duże ryzyko poślizgu."
+            )
+            return None
+        # <<< KONIEC ZABEZPIECZENIA >>>
+
+        # Sumujemy koszt ruchu ceny i podwójną opłatę transakcyjną
         total_cost_percentage = sl_distance_percentage + (TAKER_FEE_RATE * 2)
         
         # --- KROK 3: Oblicz docelową Wartość Nominalną ---
-        # To jest serce logiki: Dzielimy cel (2.50 USDT) przez całkowity koszt procentowy
         notional_value = TOTAL_RISK_USDT / total_cost_percentage
         
         # --- KROK 4: Oblicz finalne parametry zlecenia ---
