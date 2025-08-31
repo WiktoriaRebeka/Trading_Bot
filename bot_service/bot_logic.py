@@ -34,14 +34,14 @@ logger = logging.getLogger(__name__)
 
 def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecutor, alert_id: str = 'N/A'):
     """
-    Przygotowuje i składa zlecenie, aby CAŁKOWITE ryzyko (strata na cenie + opłaty)
-    wynosiło ~2.50 USDT, z filtrem minimalnej odległości SL.
+    Przygotowuje i składa zlecenie, implementując logikę stałego ryzyka 2.50 USDT,
+    uwzględniając opłaty transakcyjne i filtr minimalnej odległości SL.
     """
     symbol = alert_data.symbol
     try:
         logger.info(f"[{symbol}] --- Rozpoczynam kalkulację ryzyka dla alertu {alert_id} ---")
         
-        # --- KROK 1: Pobierz dane i zdefiniuj stałe ---
+        # --- KROK 1: Pobierz dane i zdefiniuj stałe (jak w Excelu) ---
         instrument_info = bybit_executor.get_instrument_info(symbol)
         if not instrument_info:
             return None
@@ -52,10 +52,10 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
         max_leverage_from_api = float(instrument_info.get('max_leverage', 1.0))
 
         TOTAL_RISK_USDT = 2.50
-        TAKER_FEE_RATE = 0.00055  # Standardowa opłata Taker na Bybit (0.055%)
-        MIN_SL_DISTANCE_PERCENT = 0.001 # Nasz nowy filtr: 0.1%
+        TAKER_FEE_RATE = 0.00055  # Opłata Taker 0.055%
+        MIN_SL_DISTANCE_PERCENT = 0.001 # Filtr 0.1%
 
-        # --- KROK 2: Oblicz procentowe koszty i zastosuj filtr ---
+        # --- KROK 2: Oblicz procentowe koszty (jak w Excelu) ---
         entry_price = alert_data.entry
         sl_price = alert_data.sl
 
@@ -67,22 +67,22 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
             logger.error(f"[{symbol}] Odległość SL wynosi zero.")
             return None
 
-        # <<< NOWE ZABEZPIECZENIE >>>
+        # Zastosuj filtr
         if sl_distance_percentage < MIN_SL_DISTANCE_PERCENT:
             logger.warning(
                 f"[{symbol}] Zlecenie odrzucone. Odległość SL ({sl_distance_percentage:.4%}) "
-                f"< minimum ({MIN_SL_DISTANCE_PERCENT:.4%}). Zbyt duże ryzyko poślizgu."
+                f"< minimum ({MIN_SL_DISTANCE_PERCENT:.4%})."
             )
             return None
-        # <<< KONIEC ZABEZPIECZENIA >>>
 
-        # Sumujemy koszt ruchu ceny i podwójną opłatę transakcyjną
+        # Sumujemy koszt ruchu ceny i podwójną opłatę transakcyjną (za wejście i wyjście)
         total_cost_percentage = sl_distance_percentage + (TAKER_FEE_RATE * 2)
         
-        # --- KROK 3: Oblicz docelową Wartość Nominalną ---
+        # --- KROK 3: Oblicz docelową Wartość Nominalną (jak w Excelu) ---
+        # To jest serce logiki: Dzielimy cel (2.50 USDT) przez całkowity koszt procentowy
         notional_value = TOTAL_RISK_USDT / total_cost_percentage
         
-        # --- KROK 4: Oblicz finalne parametry zlecenia ---
+        # --- KROK 4: Oblicz finalne parametry zlecenia (jak w Excelu) ---
         final_leverage = max_leverage_from_api
         required_margin = notional_value / final_leverage
         target_qty = notional_value / entry_price
