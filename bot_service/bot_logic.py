@@ -4,7 +4,7 @@ import logging
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_DOWN
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 from google.cloud.firestore_v1.document import DocumentSnapshot
 from pydantic import ValidationError
@@ -31,8 +31,7 @@ from bot_service.bybit_executor import (
 
 logger = logging.getLogger(__name__)
 
-
-def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecutor, alert_id: str = 'N/A') -> tuple[Optional[str], Optional[Decimal]]:
+def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecutor, alert_id: str = 'N/A') -> Tuple[Optional[str], Optional[Decimal]]:
     """
     Przygotowuje i składa zlecenie, implementując precyzyjną strategię zarządzania ryzykiem.
     - Maksymalna Strata (Ryzyko): 2.50 USDT
