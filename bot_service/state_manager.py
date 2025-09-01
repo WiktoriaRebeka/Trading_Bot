@@ -1,19 +1,65 @@
 # Lokalizacja: bot_service/state_manager.py
 
+# bot_service/state_manager.py
+
 import logging
-from typing import Optional
-from typing import Iterable, Dict, Any, List
+from typing import Optional, Iterable, Dict, Any, List
 from datetime import datetime, timezone
 from google.cloud import firestore
 from google.cloud.firestore_v1.document import DocumentSnapshot
+from google.cloud.firestore_v1.transaction import Transaction
+from google.cloud.firestore_v1.base_query import FieldFilter
+import requests
 
 from shared_lib.firebase_client import get_db
 from shared_lib import constants
 from shared_lib.models import AlertData, OpenTradeData, AnalyzedTradeData
+
 logger = logging.getLogger(__name__)
 
 def _get_db() -> firestore.Client:
     return get_db()
+
+# --- NOWA, BEZPIECZNA FUNKCJA DO POBIERANIA ALERTÓW ---
+
+@firestore.transactional
+def _get_and_lock_alerts_transactional(transaction: Transaction, alerts_ref):
+    """
+    W ramach transakcji pobiera nieprzetworzone alerty i natychmiast
+    oznacza je jako 'processing', aby zapobiec podwójnemu przetwarzaniu.
+    """
+    # Zakładamy, że webhook dodaje pole 'status' z wartością 'new'
+    query = alerts_ref.where(filter=FieldFilter("status", "==", "new"))
+    new_alerts_snapshot = list(query.stream(transaction=transaction))
+    
+    if not new_alerts_snapshot:
+        return []
+
+    alerts_to_process = []
+    for doc_snapshot in new_alerts_snapshot:
+        transaction.update(doc_snapshot.reference, {"status": "processing"})
+        alert_data = doc_snapshot.to_dict()
+        alert_data['id'] = doc_snapshot.id
+        alerts_to_process.append(alert_data)
+        
+    logger.info(f"[TRANSACTION] Pomyślnie pobrano i zablokowano {len(alerts_to_process)} alertów.")
+    return alerts_to_process
+
+def get_and_lock_new_alerts() -> List[Dict[str, Any]]:
+    """
+    Publiczna funkcja do atomowego pobierania i blokowania nowych alertów.
+    """
+    try:
+        db = get_db()
+        # Upewnij się, że w constants.py masz zdefiniowane: ALERTS_COLLECTION = "alerts"
+        alerts_ref = db.collection(constants.ALERTS_COLLECTION)
+        processed_alerts = _get_and_lock_alerts_transactional(db.transaction(), alerts_ref)
+        return processed_alerts
+    except Exception as e:
+        logger.critical(f"Krytyczny błąd podczas transakcji pobierania i blokowania alertów: {e}", exc_info=True)
+        return []
+
+# --- ISTNIEJĄCE FUNKCJE ---
 
 def get_all_active_setups() -> Iterable[DocumentSnapshot]:
     return _get_db().collection(constants.SETUP_COLLECTION).stream()
@@ -26,17 +72,14 @@ def update_setup_after_price_reset(symbol: str):
 def get_all_open_trades() -> Iterable[DocumentSnapshot]:
     return _get_db().collection(constants.TRADE_COLLECTION).stream()
 
-
 def create_open_trade(trade_id: str, symbol: str, direction: str, ob_type: str, entry_price: float, sl_price: float, tp_price: float, alert_data: AlertData, bybit_order_id: str):
     db = _get_db()
     transaction = db.transaction()
     
     @firestore.transactional
-  
     def _create_trade_in_transaction(transaction, trade_id, symbol, direction, ob_type, entry_price, sl_price, tp_price, alert_data, bybit_order_id):
         trade_doc_ref = db.collection(constants.TRADE_COLLECTION).document(trade_id)
         setup_doc_ref = db.collection(constants.SETUP_COLLECTION).document(symbol)
-        
         
         setup_snapshot = setup_doc_ref.get(transaction=transaction)
         if not setup_snapshot.exists:
@@ -46,7 +89,6 @@ def create_open_trade(trade_id: str, symbol: str, direction: str, ob_type: str, 
             
         timestamp_utc = datetime.now(timezone.utc)
         
-       
         new_trade = OpenTradeData(
             trade_id=trade_id, 
             symbol=symbol, 
@@ -63,7 +105,6 @@ def create_open_trade(trade_id: str, symbol: str, direction: str, ob_type: str, 
         
         transaction.set(trade_doc_ref, new_trade.model_dump())
         
-        
         update_data = {
             "is_position_open_on_this_setup": True,
             "entry_attempts": firestore.Increment(1)
@@ -72,7 +113,6 @@ def create_open_trade(trade_id: str, symbol: str, direction: str, ob_type: str, 
         logger.info(f"[{symbol}][{trade_id}] Transakcja przygotowana: utworzenie pozycji (z Bybit ID: {bybit_order_id}) i aktualizacja setupu.")
 
     try:
-       
         _create_trade_in_transaction(transaction, trade_id, symbol, direction, ob_type, entry_price, sl_price, tp_price, alert_data, bybit_order_id)
         logger.info(f"[{symbol}][{trade_id}] SUKCES. Transakcja atomowa zakończona.")
     except Exception as e:
