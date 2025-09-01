@@ -42,17 +42,15 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
     logger.info(f"[{symbol}] --- Rozpoczynam kalkulację ryzyka dla alertu {alert_id} ---")
 
     try:
-        # === KROK 1: ZABEZPIECZENIA I POBRANIE DANYCH ===
+        # === KROK 1: POBRANIE DANYCH ===
+        # Usunięto stąd sprawdzanie has_open_position, ponieważ jest ono teraz w logice nadrzędnej.
         
-        if bybit_executor.has_open_position(symbol):
-            logger.warning(f"[{symbol}] Zlecenie odrzucone. Wykryto już istniejącą pozycję na tym symbolu.")
-            return None, None
-
         instrument_info = bybit_executor.get_instrument_info(symbol)
         if not instrument_info:
             logger.error(f"[{symbol}] Nie udało się pobrać informacji o instrumencie. Przerywam.")
             return None, None
 
+        # ... reszta funkcji pozostaje bez zmian ...
         tick_size = Decimal(instrument_info.get('tick_size'))
         qty_step = Decimal(instrument_info.get('qty_step'))
         min_order_qty = Decimal(instrument_info.get('min_order_qty'))
