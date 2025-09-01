@@ -229,14 +229,23 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executo
         except Exception as e:
             logger.critical(f"[{symbol}] Nieoczekiwany błąd w głównej pętli alertu {alert_id}: {e}", exc_info=True)
 
-def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSnapshot], bybit_executor: BybitExecutor):
-    if not active_setups: return
-    logger.info(f"Sprawdzam {len(active_setups)} aktywnych setupów.")
-    for setup_doc in active_setups:
-        symbol = setup_doc.id
+def _handle_setups(klines_data: Dict[str, Kline], active_setups_docs: List[Dict[str, Any]], bybit_executor: BybitExecutor):
+    if not active_setups_docs: return
+    
+    # Zmieniono log, aby odzwierciedlał nową strukturę
+    logger.info(f"Sprawdzam {len(active_setups_docs)} aktywnych setupów (z głównej pętli logiki).")
+    
+    for setup_doc in active_setups_docs:
+        # Zmiana: Pobieramy symbol bezpośrednio ze słownika
+        symbol = setup_doc.get('alert_data', {}).get('symbol')
+        if not symbol:
+            continue
+            
         try:
-            setup = SetupData.model_validate(setup_doc.to_dict())
+            # Zmiana: Walidujemy bezpośrednio słownik
+            setup = SetupData.model_validate(setup_doc)
             if setup.is_position_open_on_this_setup: continue
+            
             latest_kline = klines_data.get(symbol)
             if not latest_kline: continue
             
@@ -256,6 +265,7 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
                               (direction == 'SHORT' and latest_kline.high >= entry_level)
             
             if entry_triggered:
+                # ... reszta logiki tej funkcji pozostaje bez zmian ...
                 closed_result, close_price = None, None
                 if direction == 'LONG':
                     if latest_kline.low <= sl_price: closed_result, close_price = "LOSE", sl_price
@@ -353,18 +363,26 @@ def finalize_trade(trade: OpenTradeData, closed_result: str, close_price: float)
         state_manager.create_analyzed_trade(trade)
 
            
-def _handle_manage_open_trades(klines_data: Dict[str, Kline], open_trades: List[DocumentSnapshot]):
-    if not open_trades: return
-    logger.info(f"Zarządzam {len(open_trades)} otwartymi pozycjami.")
-    for trade_doc in open_trades:
-        trade_id = trade_doc.id
+def _handle_manage_open_trades(klines_data: Dict[str, Kline], open_trades_docs: List[Dict[str, Any]]):
+    if not open_trades_docs: return
+    
+    logger.info(f"Zarządzam {len(open_trades_docs)} otwartymi pozycjami (z głównej pętli logiki).")
+    
+    for trade_doc in open_trades_docs:
+        # Zmiana: Pobieramy trade_id bezpośrednio ze słownika
+        trade_id = trade_doc.get('trade_id')
+        if not trade_id:
+            continue
+            
         try:
-            trade = OpenTradeData.model_validate(trade_doc.to_dict())
+            # Zmiana: Walidujemy bezpośrednio słownik
+            trade = OpenTradeData.model_validate(trade_doc)
             latest_kline = klines_data.get(trade.symbol)
             if not latest_kline:
                 logger.warning(f"[{trade_id}] Brak danych kline dla {trade.symbol}. Pomijam.")
                 continue
             
+            # ... reszta logiki tej funkcji pozostaje bez zmian ...
             closed_result, close_price = None, None
             if trade.direction == 'LONG':
                 if latest_kline.low <= trade.sl_price: closed_result, close_price = "LOSE", trade.sl_price
@@ -388,19 +406,27 @@ def _handle_manage_open_trades(klines_data: Dict[str, Kline], open_trades: List[
         except Exception as e:
             logger.error(f"Nieoczekiwany błąd podczas monitorowania pozycji {trade_id}: {e}", exc_info=True)
 
-def _handle_post_mortem_analysis(analyzed_trades: List[DocumentSnapshot], klines_data: Dict[str, Kline]):
-    if not analyzed_trades:
+def _handle_post_mortem_analysis(klines_data: Dict[str, Kline], analyzed_trades_docs: List[Dict[str, Any]]):
+    if not analyzed_trades_docs:
         return
-    logger.info(f"[ANALIZA DUCHA] Rozpoczynam analizę dla {len(analyzed_trades)} 'duchów'.")
-    for trade_doc in analyzed_trades:
-        trade_id = trade_doc.id
+        
+    logger.info(f"[ANALIZA DUCHA] Rozpoczynam analizę dla {len(analyzed_trades_docs)} 'duchów' (z głównej pętli logiki).")
+    
+    for trade_doc in analyzed_trades_docs:
+        # Zmiana: Pobieramy trade_id bezpośrednio ze słownika
+        trade_id = trade_doc.get('trade_id')
+        if not trade_id:
+            continue
+            
         try:
-            analysis_trade = AnalyzedTradeData.model_validate(trade_doc.to_dict())
+            # Zmiana: Walidujemy bezpośrednio słownik
+            analysis_trade = AnalyzedTradeData.model_validate(trade_doc)
             symbol = analysis_trade.symbol
             latest_kline = klines_data.get(symbol)
             if not latest_kline:
                 continue
 
+            # ... reszta logiki tej funkcji pozostaje bez zmian ...
             current_extreme = analysis_trade.last_known_extreme_price
             new_extreme = current_extreme
             if analysis_trade.direction == 'LONG' and latest_kline.high > current_extreme:
@@ -444,36 +470,60 @@ def _handle_post_mortem_analysis(analyzed_trades: List[DocumentSnapshot], klines
             logger.error(f"[ANALIZA DUCHA][{trade_id}] Błąd: {e}", exc_info=True)
 
 def run_trading_logic(bybit_executor: BybitExecutor):
-    logger.info("Rozpoczynam główną pętlę logiki (tryb: tylko monitorowanie).")
+    logger.info("--- ROZPOCZYNAM GŁÓWNĄ PĘTLĘ LOGIKI ---")
     
+    # 1. Zbierz wszystkie symbole, którymi musimy się zająć
     symbols_to_watch = set(get_symbols_to_watch_from_config())
-    active_setups = list(state_manager.get_all_active_setups())
-    open_trades_docs = list(state_manager.get_all_open_trades())
-    analyzed_trades_docs = list(state_manager.get_all_analyzed_trades())
+    active_setups = {doc.id: doc.to_dict() for doc in state_manager.get_all_active_setups()}
+    open_trades = {doc.to_dict()['symbol']: doc.to_dict() for doc in state_manager.get_all_open_trades()}
+    analyzed_trades = {doc.to_dict()['symbol']: doc.to_dict() for doc in state_manager.get_all_analyzed_trades()}
 
-    for doc in active_setups:
-        if data := doc.to_dict(): symbols_to_watch.add(data.get('alert_data', {}).get('symbol'))
-    for doc in open_trades_docs:
-        if data := doc.to_dict(): symbols_to_watch.add(data.get('symbol'))
-    for doc in analyzed_trades_docs:
-        if data := doc.to_dict(): symbols_to_watch.add(data.get('symbol'))
-        
+    symbols_to_watch.update(active_setups.keys(), open_trades.keys(), analyzed_trades.keys())
     valid_symbols = {s for s in symbols_to_watch if isinstance(s, str) and s}
+
     if not valid_symbols:
         logger.info("Brak symboli do monitorowania. Kończę cykl.")
         return
-        
-    klines_data_from_cache = state_manager.get_latest_klines_from_cache(list(valid_symbols))
-    if not klines_data_from_cache:
-        logger.warning("Nie udało się pobrać danych z cache'u klines.")
-        return
-        
+
+    # 2. Pobierz świeże dane rynkowe dla wszystkich symboli
     klines_data = {
-        symbol: Kline.model_validate(data) for symbol, data in klines_data_from_cache.items()
+        symbol: Kline.model_validate(data) 
+        for symbol, data in state_manager.get_latest_klines_from_cache(list(valid_symbols)).items()
     }
-    
-    _handle_setups(klines_data, active_setups, bybit_executor)
-    _handle_post_mortem_analysis(analyzed_trades_docs, klines_data)
-    _handle_manage_open_trades(klines_data, open_trades_docs)
-    
-    logger.info("Zakończono główną pętlę logiki.")
+
+    # 3. Przetwórz każdy symbol indywidualnie zgodnie z nową logiką
+    for symbol in valid_symbols:
+        try:
+            latest_kline = klines_data.get(symbol)
+            if not latest_kline:
+                continue
+
+            # === GŁÓWNA LOGIKA DECYZYJNA ===
+
+            # KROK 1: Czy jest AKTYWNA POZYCJA na giełdzie?
+            if bybit_executor.has_open_position(symbol):
+                logger.info(f"[{symbol}] Wykryto aktywną pozycję na giełdzie.")
+                trade_doc = open_trades.get(symbol)
+                if trade_doc:
+                    # Jeśli mamy pozycję na giełdzie i w bazie, to monitorujemy ją
+                    _handle_manage_open_trades(klines_data, [trade_doc])
+                else:
+                    # Jeśli mamy pozycję na giełdzie, ale nie w bazie - to jest błąd synchronizacji.
+                    # Dla bezpieczeństwa nic nie robimy, czekamy na ręczną interwencję lub następny cykl.
+                    logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Wykryto pozycję na giełdzie, ale brak jej w bazie 'open_trades'!")
+                
+                # Niezależnie od wszystkiego, jeśli jest pozycja, nie robimy nic więcej z tym symbolem.
+                continue
+
+            # KROK 2: Jeśli nie ma aktywnej pozycji, sprawdzamy czy jest "duch" do analizy
+            if symbol in analyzed_trades:
+                _handle_post_mortem_analysis(klines_data, [analyzed_trades[symbol]])
+
+            # KROK 3: Jeśli nie ma aktywnej pozycji, sprawdzamy czy jest setup do wejścia
+            if symbol in active_setups:
+                _handle_setups(klines_data, [active_setups[symbol]], bybit_executor)
+
+        except Exception as e:
+            logger.error(f"[{symbol}] Nieoczekiwany błąd podczas przetwarzania symbolu: {e}", exc_info=True)
+
+    logger.info("--- ZAKOŃCZONO GŁÓWNĄ PĘTLĘ LOGIKI ---")
