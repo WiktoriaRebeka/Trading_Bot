@@ -494,14 +494,13 @@ def run_trading_logic(bybit_executor: BybitExecutor):
     
     # 1. Zbierz wszystkie symbole, którymi musimy się zająć
     symbols_to_watch = set(get_symbols_to_watch_from_config())
-    active_setups = {doc.id: doc.to_dict() for doc in state_manager.get_all_active_setups()}
-    
-    # Poprawka: Upewnijmy się, że kluczem jest symbol, a nie trade_id
-    open_trades_list = list(state_manager.get_all_open_trades())
-    open_trades = {doc.to_dict()['symbol']: doc.to_dict() for doc in open_trades_list}
-    
-    analyzed_trades_list = list(state_manager.get_all_analyzed_trades())
-    analyzed_trades = {doc.to_dict()['symbol']: doc.to_dict() for doc in analyzed_trades_list}
+    active_setups_docs = list(state_manager.get_all_active_setups())
+    open_trades_docs = list(state_manager.get_all_open_trades())
+    analyzed_trades_docs = list(state_manager.get_all_analyzed_trades())
+
+    active_setups = {doc.id: doc.to_dict() for doc in active_setups_docs}
+    open_trades = {doc.to_dict()['symbol']: doc.to_dict() for doc in open_trades_docs}
+    analyzed_trades = {doc.to_dict()['symbol']: doc.to_dict() for doc in analyzed_trades_docs}
 
     symbols_to_watch.update(active_setups.keys(), open_trades.keys(), analyzed_trades.keys())
     valid_symbols = {s for s in symbols_to_watch if isinstance(s, str) and s}
@@ -530,8 +529,6 @@ def run_trading_logic(bybit_executor: BybitExecutor):
                 logger.info(f"[{symbol}] Wykryto aktywną pozycję na giełdzie.")
                 trade_doc = open_trades.get(symbol)
                 if trade_doc:
-                    # Jeśli mamy pozycję na giełdzie i w bazie, to monitorujemy ją
-                    # === KRYTYCZNA POPRAWKA: Dodano brakujący argument 'bybit_executor' ===
                     _handle_manage_open_trades(klines_data, [trade_doc], bybit_executor)
                 else:
                     logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Wykryto pozycję na giełdzie, ale brak jej w bazie 'open_trades'!")
@@ -540,10 +537,8 @@ def run_trading_logic(bybit_executor: BybitExecutor):
 
             # KROK 2: Jeśli nie ma aktywnej pozycji, sprawdzamy czy jest "duch" do analizy
             if symbol in analyzed_trades:
-                # Zmieniamy sposób przekazywania danych, aby pasował do poprawionej funkcji
-                trade_to_analyze = next((t for t in analyzed_trades_list if t.get('symbol') == symbol), None)
-                if trade_to_analyze:
-                    _handle_post_mortem_analysis(klines_data, [trade_to_analyze])
+                # === KRYTYCZNA POPRAWKA: Przekazujemy słownik, a nie DocumentSnapshot ===
+                _handle_post_mortem_analysis(klines_data, [analyzed_trades[symbol]])
 
             # KROK 3: Jeśli nie ma aktywnej pozycji, sprawdzamy czy jest setup do wejścia
             if symbol in active_setups:
