@@ -281,3 +281,30 @@ class BybitExecutor:
         except Exception as e:
             logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD podczas czyszczenia otwartych zleceň: {e}", exc_info=True)
             return False
+
+
+    def has_open_position(self, symbol: str) -> bool:
+        """
+        Sprawdza, czy istnieje jakakolwiek otwarta pozycja dla danego symbolu.
+        Zwraca True, jeśli pozycja istnieje, w przeciwnym razie False.
+        """
+        api_symbol = symbol.replace('.P', '')
+        endpoint = "/v5/position/list"
+        params = {
+            "category": "linear",
+            "symbol": api_symbol
+        }
+        try:
+            result = self._send_request("GET", endpoint, params=params)
+            if result and result.get('list'):
+                position_data = result['list'][0]
+                # Pole 'size' jest stringiem. Jeśli jest większe od "0", pozycja istnieje.
+                position_size = float(position_data.get("size", "0"))
+                if position_size > 0:
+                    logger.warning(f"[{symbol}] ZABEZPIECZENIE: Wykryto istniejącą pozycję o wielkości {position_size}. Blokuję nowe zlecenie.")
+                    return True
+            return False
+        except (RequestException, BybitAPIError) as e:
+            logger.error(f"[{symbol}] Błąd podczas sprawdzania otwartych pozycji: {e}")
+            # W przypadku błędu API, dla bezpieczeństwa zakładamy, że pozycja może istnieć.
+            return True

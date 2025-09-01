@@ -36,6 +36,7 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
     """
     Przygotowuje i składa zlecenie, aby CAŁKOWITE ryzyko (strata na cenie + opłaty)
     wynosiło ~2.50 USDT, a CAŁKOWITY zysk (zysk z ceny - opłaty) wynosił ~5.00 USDT.
+    Zawiera wielopoziomowe zabezpieczenia.
     """
     symbol = alert_data.symbol
     try:
@@ -43,7 +44,8 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
         
         # --- KROK 1: Pobierz dane i zdefiniuj stałe ---
         instrument_info = bybit_executor.get_instrument_info(symbol)
-        if not instrument_info: return None
+        if not instrument_info:
+            return None
         
         tick_size = instrument_info.get('tick_size')
         qty_step = instrument_info.get('qty_step')
@@ -52,21 +54,30 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
 
         TOTAL_RISK_USDT = 2.50
         TARGET_REWARD_USDT = 5.00
-        TAKER_FEE_RATE = 0.00055
-        MIN_SL_DISTANCE_PERCENT = 0.001
+        TAKER_FEE_RATE = 0.00055  # Standardowa opłata Taker na Bybit (0.055%)
+        MIN_SL_DISTANCE_PERCENT = 0.001 # Filtr 0.1%
 
         # --- KROK 2: Oblicz procentowe koszty i zastosuj filtr SL ---
         entry_price = alert_data.entry
         sl_price = alert_data.sl
 
-        if entry_price <= 0: return None
+        if entry_price <= 0:
+            logger.error(f"[{symbol}] Cena wejścia jest nieprawidłowa.")
+            return None
         sl_distance_percentage = abs(entry_price - sl_price) / entry_price
-        if sl_distance_percentage == 0: return None
-
-        if sl_distance_percentage < MIN_SL_DISTANCE_PERCENT:
-            logger.warning(f"[{symbol}] Zlecenie odrzucone. Odległość SL ({sl_distance_percentage:.4%}) < minimum.")
+        if sl_distance_percentage == 0:
+            logger.error(f"[{symbol}] Odległość SL wynosi zero.")
             return None
 
+        # Zabezpieczenie 1: Filtr minimalnej odległości SL
+        if sl_distance_percentage < MIN_SL_DISTANCE_PERCENT:
+            logger.warning(
+                f"[{symbol}] Zlecenie odrzucone. Odległość SL ({sl_distance_percentage:.4%}) "
+                f"< minimum ({MIN_SL_DISTANCE_PERCENT:.4%}). Zbyt duże ryzyko poślizgu."
+            )
+            return None
+
+        # Sumujemy koszt ruchu ceny i podwójną opłatę transakcyjną
         total_cost_percentage = sl_distance_percentage + (TAKER_FEE_RATE * 2)
         
         # --- KROK 3: Oblicz docelową Wartość Nominalną ---
@@ -78,22 +89,16 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
         target_qty = notional_value / entry_price
         
         if target_qty < min_order_qty:
-            logger.warning(f"[{symbol}] Zlecenie odrzucone. Obliczona ilość ({target_qty:.8f}) < minimum.")
+            logger.warning(f"[{symbol}] Zlecenie odrzucone. Obliczona ilość ({target_qty:.8f}) < minimum giełdowe ({min_order_qty}).")
             return None
         
         formatted_qty = format_quantity(target_qty, qty_step)
         
-        # --- KROK 5: DYNAMICZNE OBLICZANIE TAKE PROFIT ---
-        # Chcemy, aby: Zysk z Ceny - Opłaty = 5.00 USDT
-        # Co oznacza, że: Zysk z Ceny = 5.00 USDT + Opłaty
-        
+        # --- KROK 5: Dynamiczne obliczanie Take Profit ---
         estimated_fees = notional_value * TAKER_FEE_RATE * 2
         target_reward_from_price = TARGET_REWARD_USDT + estimated_fees
-        
-        # Przeliczamy zysk w USDT na procentową zmianę ceny
         reward_distance_percentage = target_reward_from_price / notional_value
         
-        # Obliczamy finalną cenę Take Profit
         if alert_data.direction == "LONG":
             final_tp_price = entry_price * (1 + reward_distance_percentage)
         else: # SHORT
@@ -102,23 +107,29 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
         # --- Logi weryfikacyjne ---
         expected_price_loss = notional_value * sl_distance_percentage
         total_expected_loss = expected_price_loss + estimated_fees
-        
         expected_price_reward = notional_value * reward_distance_percentage
         total_expected_reward = expected_price_reward - estimated_fees
 
         logger.info(f"[{symbol}] [Finalne Parametry] Docelowy Margin: ~{required_margin:.2f} USDT, Dźwignia: {int(final_leverage)}x.")
         logger.info(f"[{symbol}] [Finalne Zlecenie] Wartość Nominalna: ~{notional_value:.2f} USDT, Ilość (Qty): {formatted_qty} {symbol.replace('USDT.P', '')}.")
-        logger.info(f"[{symbol}] [Weryfikacja Ryzyka] Całkowita oczekiwana strata: ~{total_expected_loss:.2f} USDT (Cel: {TOTAL_RISK_USDT:.2f} USDT).")
+        logger.info(f"[{symbol}] [Weryfikacja Ryzyka] Oczekiwana strata na cenie: ~{expected_price_loss:.2f} USDT, Szacowane opłaty: ~{expected_fees:.2f} USDT.")
+        logger.info(f"[{symbol}] [SUMA] Całkowita oczekiwana strata: ~{total_expected_loss:.2f} USDT (Cel: {TOTAL_RISK_USDT:.2f} USDT).")
         logger.info(f"[{symbol}] [Weryfikacja Zysku] Całkowity oczekiwany zysk: ~{total_expected_reward:.2f} USDT (Cel: {TARGET_REWARD_USDT:.2f} USDT).")
 
-        # --- KROK 6: Złóż zlecenie z dynamicznie obliczonym TP ---
+        # --- KROK 6: OSTATECZNA WERYFIKACJA I ZŁOŻENIE ZLECENIA ---
+        
+        # Zabezpieczenie 2: Ostateczne sprawdzenie, czy nie ma już otwartej pozycji
+        if bybit_executor.has_open_position(symbol):
+            logger.critical(f"[{symbol}] KRYTYCZNE ZABEZPIECZENIE: Próba otwarcia nowego zlecenia, mimo że pozycja już istnieje. Anulowano.")
+            return None
+
         order_params = {
             "symbol": symbol,
             "side": alert_data.direction,
             "price": format_price(alert_data.entry, tick_size),
             "qty": formatted_qty,
             "leverage": str(int(final_leverage)),
-            "takeProfit": format_price(final_tp_price, tick_size), # Używamy naszej obliczonej ceny
+            "takeProfit": format_price(final_tp_price, tick_size),
             "stopLoss": format_price(alert_data.sl, tick_size)
         }
         return bybit_executor.place_limit_order(order_params)
