@@ -149,6 +149,8 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executo
         return
     logger.info(f"Rozpoczynam przetwarzanie {len(newly_fetched_alerts)} nowych alertów.")
     
+    db = get_db() # Pobieramy instancję bazy danych na początku
+
     for alert_dict in newly_fetched_alerts:
         alert_id = alert_dict.get('id', 'N/A')
         symbol = "N/A"
@@ -156,37 +158,59 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executo
             alert_data = AlertData.model_validate(alert_dict)
             symbol = alert_data.symbol
 
-            # === KROK A: Sprawdź, czy na giełdzie jest już AKTYWNA POZYCJA ===
-            if bybit_executor.has_open_position(symbol):
-                logger.info(f"[{symbol}] Wykryto aktywną pozycję. Ignoruję nowy alert {alert_id}, aby nie zakłócać istniejącej transakcji.")
-                continue # Przejdź do następnego alertu
+            # === ATOMOWA OPERACJA SPRAWDZENIA I PRZETWORZENIA ALERTU ===
+            transaction = db.transaction()
+            setup_ref = db.collection(constants.SETUP_COLLECTION).document(symbol)
 
-            # === KROK B: Sprawdź, czy alert nie jest DUPLIKATEM ===
-            existing_setup = state_manager.get_active_setup(symbol)
-            if existing_setup:
-                setup_alert_data = existing_setup.get('alert_data', {})
-                if (alert_data.entry == setup_alert_data.get('entry') and
-                    alert_data.sl == setup_alert_data.get('sl')):
-                    logger.info(f"[{symbol}] Odrzucono zduplikowany alert (identyczne entry/sl). Alert ID: {alert_id}.")
-                    continue # Przejdź do następnego alertu
+            @firestore.transactional
+            def _process_alert_transaction(transaction, alert_data):
+                # KROK 1: Sprawdzamy wewnątrz transakcji, czy na giełdzie jest już AKTYWNA POZYCJA
+                if bybit_executor.has_open_position(alert_data.symbol):
+                    logger.warning(f"[{alert_data.symbol}] ZABEZPIECZENIE GIEŁDOWE: Wykryto aktywną pozycję. Ignoruję alert {alert_id}.")
+                    return "SKIP_HAS_POSITION"
 
-            # === KROK C: Jeśli to nowy setup, wyczyść STARE ZLECENIA OCZEKUJĄCE ===
-            logger.info(f"--- [{symbol}][Alert: {alert_id}] Wykryto nowy, unikalny setup. Rozpoczynam cykl wejścia. ---")
-            
-            if not bybit_executor.cancel_all_open_orders_for_symbol(symbol):
-                logger.critical(f"[{symbol}] Nie udało się wyczyścić zleceń oczekujących na giełdzie. Przerywam przetwarzanie alertu dla bezpieczeństwa.")
+                # KROK 2: Sprawdzamy, czy alert nie jest duplikatem tego, co już mamy w bazie
+                setup_snapshot = setup_ref.get(transaction=transaction)
+                if setup_snapshot.exists:
+                    existing_setup = setup_snapshot.to_dict()
+                    # Porównujemy timestamp, bo jest unikalny dla każdego sygnału z TradingView
+                    if existing_setup.get('alert_data', {}).get('timestamp') == alert_data.timestamp:
+                        logger.info(f"[{alert_data.symbol}] Alert {alert_id} jest już przetwarzany lub został przetworzony. Ignoruję.")
+                        return "SKIP_DUPLICATE"
+                
+                # KROK 3: Jeśli to nowy, unikalny setup, czyścimy pole
+                logger.info(f"--- [{alert_data.symbol}][Alert: {alert_id}] Wykryto nowy, unikalny setup. Rozpoczynam cykl wejścia. ---")
+                
+                # Anulujemy stare zlecenia OCZEKUJĄCE
+                if not bybit_executor.cancel_all_open_orders_for_symbol(alert_data.symbol):
+                    raise RuntimeError("Nie udało się wyczyścić zleceń oczekujących na giełdzie.")
+
+                # Usuwamy stary wpis z 'open_trades' (jeśli istniał dla zlecenia oczekującego)
+                open_trade_for_symbol = state_manager.get_open_trade_by_symbol(alert_data.symbol)
+                if open_trade_for_symbol:
+                    trade_id_to_delete = open_trade_for_symbol.get('trade_id')
+                    logger.info(f"[{alert_data.symbol}] Usuwam stary wpis zlecenia oczekującego {trade_id_to_delete} z bazy.")
+                    db.collection(constants.TRADE_COLLECTION).document(trade_id_to_delete).delete()
+
+                # KROK 4: Tworzymy/nadpisujemy setup nowymi danymi w ramach tej samej transakcji
+                new_setup_data = {
+                    "alert_data": alert_data.model_dump(by_alias=True),
+                    "is_position_open_on_this_setup": False,
+                    "is_reset_needed_after_loss": False,
+                    "entry_attempts": 0,
+                    "updated_at": firestore.SERVER_TIMESTAMP
+                }
+                transaction.set(setup_ref, new_setup_data)
+                return "PROCEED"
+
+            # Uruchamiamy transakcję
+            result = _process_alert_transaction(transaction, alert_data)
+
+            # Jeśli transakcja zwróciła sygnał do pominięcia, przechodzimy do następnego alertu
+            if result != "PROCEED":
                 continue
 
-            # Usuwamy stary wpis z 'open_trades' (jeśli istniał dla zlecenia oczekującego)
-            existing_trade_doc = state_manager.get_open_trade_by_symbol(symbol)
-            if existing_trade_doc:
-                trade_id_in_db = existing_trade_doc.get('trade_id')
-                logger.info(f"[{symbol}] Synchronizacja stanu: usuwam stary wpis {trade_id_in_db} (dla zlecenia oczekującego) z bazy danych.")
-                state_manager.delete_open_trade(trade_id_in_db)
-
-            # === KROK D: Stwórz nowy setup i złóż nowe zlecenie ===
-            state_manager.create_setup_from_alert(alert_data)
-
+            # === Złóż nowe zlecenie (tylko jeśli transakcja dała zielone światło) ===
             logger.info(f"[{symbol}] Giełda i baza danych są czyste. Składam nowe zlecenie.")
             order_id, new_tp_price = _prepare_and_place_order(alert_data, bybit_executor, alert_id)
 
