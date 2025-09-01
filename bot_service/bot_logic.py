@@ -157,21 +157,36 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executo
         try:
             alert_data = AlertData.model_validate(alert_dict)
             symbol = alert_data.symbol
-            
-            logger.info(f"--- [{symbol}][Alert: {alert_id}] Rozpoczynam pełny cykl przetwarzania ---")
 
+            # === KROK A: Sprawdź, czy na giełdzie jest już AKTYWNA POZYCJA ===
+            if bybit_executor.has_open_position(symbol):
+                logger.info(f"[{symbol}] Wykryto aktywną pozycję. Ignoruję nowy alert {alert_id}, aby nie zakłócać istniejącej transakcji.")
+                continue # Przejdź do następnego alertu
+
+            # === KROK B: Sprawdź, czy alert nie jest DUPLIKATEM ===
+            existing_setup = state_manager.get_active_setup(symbol)
+            if existing_setup:
+                setup_alert_data = existing_setup.get('alert_data', {})
+                if (alert_data.entry == setup_alert_data.get('entry') and
+                    alert_data.sl == setup_alert_data.get('sl')):
+                    logger.info(f"[{symbol}] Odrzucono zduplikowany alert (identyczne entry/sl). Alert ID: {alert_id}.")
+                    continue # Przejdź do następnego alertu
+
+            # === KROK C: Jeśli to nowy setup, wyczyść STARE ZLECENIA OCZEKUJĄCE ===
+            logger.info(f"--- [{symbol}][Alert: {alert_id}] Wykryto nowy, unikalny setup. Rozpoczynam cykl wejścia. ---")
+            
             if not bybit_executor.cancel_all_open_orders_for_symbol(symbol):
-                logger.critical(f"[{symbol}] Nie udało się wyczyścić zleceń na giełdzie. Przerywam przetwarzanie alertu dla bezpieczeństwa.")
+                logger.critical(f"[{symbol}] Nie udało się wyczyścić zleceń oczekujących na giełdzie. Przerywam przetwarzanie alertu dla bezpieczeństwa.")
                 continue
 
+            # Usuwamy stary wpis z 'open_trades' (jeśli istniał dla zlecenia oczekującego)
             existing_trade_doc = state_manager.get_open_trade_by_symbol(symbol)
             if existing_trade_doc:
                 trade_id_in_db = existing_trade_doc.get('trade_id')
-                logger.info(f"[{symbol}] Synchronizacja stanu: usuwam stary wpis {trade_id_in_db} z bazy danych.")
-                db = get_db()
-                transaction = db.transaction()
-                state_manager.close_trade_transactional(transaction, trade_id_in_db, symbol, is_loss=False)
+                logger.info(f"[{symbol}] Synchronizacja stanu: usuwam stary wpis {trade_id_in_db} (dla zlecenia oczekującego) z bazy danych.")
+                state_manager.delete_open_trade(trade_id_in_db)
 
+            # === KROK D: Stwórz nowy setup i złóż nowe zlecenie ===
             state_manager.create_setup_from_alert(alert_data)
 
             logger.info(f"[{symbol}] Giełda i baza danych są czyste. Składam nowe zlecenie.")
