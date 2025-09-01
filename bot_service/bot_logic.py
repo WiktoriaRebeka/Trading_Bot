@@ -3,7 +3,7 @@
 import logging
 import uuid
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN
 from typing import Any, Dict, List
 
 from google.cloud.firestore_v1.document import DocumentSnapshot
@@ -32,92 +32,120 @@ from bot_service.bybit_executor import (
 logger = logging.getLogger(__name__)
 
 
-def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecutor, alert_id: str = 'N/A'):
+def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecutor, alert_id: str = 'N/A') -> tuple[Optional[str], Optional[Decimal]]:
     """
-    Przygotowuje i składa zlecenie, implementując logikę stałego ryzyka 2.50 USDT,
-    uwzględniając opłaty transakcyjne i filtr minimalnej odległości SL.
+    Przygotowuje i składa zlecenie, implementując precyzyjną strategię zarządzania ryzykiem.
+    - Maksymalna Strata (Ryzyko): 2.50 USDT
+    - Minimalny Zysk (Nagroda): 5.00 USDT
+    Zwraca krotkę (order_id, take_profit_price) w przypadku sukcesu lub (None, None) w przypadku porażki.
     """
     symbol = alert_data.symbol
+    logger.info(f"[{symbol}] --- Rozpoczynam kalkulację ryzyka dla alertu {alert_id} ---")
+
     try:
-        logger.info(f"[{symbol}] --- Rozpoczynam kalkulację ryzyka dla alertu {alert_id} ---")
+        # === KROK 1: ZABEZPIECZENIA I POBRANIE DANYCH ===
         
-        # --- KROK 1: Pobierz dane i zdefiniuj stałe (jak w Excelu) ---
+        if bybit_executor.has_open_position(symbol):
+            logger.warning(f"[{symbol}] Zlecenie odrzucone. Wykryto już istniejącą pozycję na tym symbolu.")
+            return None, None
+
         instrument_info = bybit_executor.get_instrument_info(symbol)
         if not instrument_info:
-            return None
+            logger.error(f"[{symbol}] Nie udało się pobrać informacji o instrumencie. Przerywam.")
+            return None, None
+
+        tick_size = Decimal(instrument_info.get('tick_size'))
+        qty_step = Decimal(instrument_info.get('qty_step'))
+        min_order_qty = Decimal(instrument_info.get('min_order_qty'))
         
-        tick_size = instrument_info.get('tick_size')
-        qty_step = instrument_info.get('qty_step')
-        min_order_qty = instrument_info.get('min_order_qty')
-        max_leverage_from_api = float(instrument_info.get('max_leverage', 1.0))
+        entry_price = Decimal(str(alert_data.entry))
+        sl_price = Decimal(str(alert_data.sl))
 
-        TOTAL_RISK_USDT = 2.50
-        TAKER_FEE_RATE = 0.00055  # Opłata Taker 0.055%
-        MIN_SL_DISTANCE_PERCENT = 0.0005 # Filtr 0.05%
+        TARGET_RISK_USDT = Decimal("2.50")
+        TARGET_REWARD_USDT = Decimal("5.00")
+        TAKER_FEE_RATE = Decimal("0.00055")
+        MIN_SL_DISTANCE_PERCENT = Decimal("0.0005")
 
-        # --- KROK 2: Oblicz procentowe koszty (jak w Excelu) ---
-        entry_price = alert_data.entry
-        sl_price = alert_data.sl
+        # === KROK 2: WALIDACJA I OBLICZENIE STRATY ===
 
         if entry_price <= 0:
-            logger.error(f"[{symbol}] Cena wejścia jest nieprawidłowa.")
-            return None
+            logger.error(f"[{symbol}] Cena wejścia jest nieprawidłowa: {entry_price}. Przerywam.")
+            return None, None
+            
         sl_distance_percentage = abs(entry_price - sl_price) / entry_price
         if sl_distance_percentage == 0:
-            logger.error(f"[{symbol}] Odległość SL wynosi zero.")
-            return None
+            logger.error(f"[{symbol}] Odległość SL wynosi zero. Przerywam.")
+            return None, None
 
-        # Zastosuj filtr
         if sl_distance_percentage < MIN_SL_DISTANCE_PERCENT:
             logger.warning(
                 f"[{symbol}] Zlecenie odrzucone. Odległość SL ({sl_distance_percentage:.4%}) "
-                f"< minimum ({MIN_SL_DISTANCE_PERCENT:.4%})."
+                f"jest mniejsza niż wymagane minimum ({MIN_SL_DISTANCE_PERCENT:.4%})."
             )
-            return None
+            return None, None
 
-        # Sumujemy koszt ruchu ceny i podwójną opłatę transakcyjną (za wejście i wyjście)
         total_cost_percentage = sl_distance_percentage + (TAKER_FEE_RATE * 2)
-        
-        # --- KROK 3: Oblicz docelową Wartość Nominalną (jak w Excelu) ---
-        # To jest serce logiki: Dzielimy cel (2.50 USDT) przez całkowity koszt procentowy
-        notional_value = TOTAL_RISK_USDT / total_cost_percentage
-        
-        # --- KROK 4: Oblicz finalne parametry zlecenia (jak w Excelu) ---
-        final_leverage = max_leverage_from_api
-        required_margin = notional_value / final_leverage
+
+        # === KROK 3: DYNAMICZNE OBLICZANIE WIELKOŚCI POZYCJI ===
+
+        notional_value = TARGET_RISK_USDT / total_cost_percentage
         target_qty = notional_value / entry_price
         
         if target_qty < min_order_qty:
-            logger.warning(f"[{symbol}] Zlecenie odrzucone. Obliczona ilość ({target_qty:.8f}) < minimum giełdowe ({min_order_qty}).")
-            return None
+            logger.warning(f"[{symbol}] Zlecenie odrzucone. Obliczona ilość ({target_qty}) < minimum giełdowe ({min_order_qty}).")
+            return None, None
         
-        formatted_qty = format_quantity(target_qty, qty_step)
+        formatted_qty = target_qty.quantize(qty_step, rounding=ROUND_DOWN)
         
-        # --- Logi weryfikacyjne ---
+        if formatted_qty <= 0:
+            logger.error(f"[{symbol}] Po zaokrągleniu ilość (qty) wynosi zero. Zwiększ ryzyko lub wybierz inny setup.")
+            return None, None
+
+        # === KROK 4: DYNAMICZNE OBLICZANIE POZIOMU TAKE PROFIT ===
+
+        estimated_fees_usdt = notional_value * TAKER_FEE_RATE * 2
+        target_gross_profit_usdt = TARGET_REWARD_USDT + estimated_fees_usdt
+        price_change_for_tp = target_gross_profit_usdt / formatted_qty
+        
+        if alert_data.direction == "LONG":
+            take_profit_price = entry_price + price_change_for_tp
+        else:
+            take_profit_price = entry_price - price_change_for_tp
+
+        # === KROK 5: FINALIZACJA I ZŁOŻENIE ZLECENIA ===
+
         expected_price_loss = notional_value * sl_distance_percentage
-        expected_fees = notional_value * TAKER_FEE_RATE * 2
-        total_expected_loss = expected_price_loss + expected_fees
+        total_expected_loss = expected_price_loss + estimated_fees_usdt
+        logger.info(f"[{symbol}] [Weryfikacja Ryzyka] Oczekiwana strata na cenie: ~{expected_price_loss:.4f} USDT. Szacowane opłaty: ~{estimated_fees_usdt:.4f} USDT.")
+        logger.info(f"[{symbol}] [SUMA] Całkowita oczekiwana strata: ~{total_expected_loss:.4f} USDT (Cel: {TARGET_RISK_USDT} USDT).")
+        
+        expected_price_gain = notional_value * (abs(take_profit_price - entry_price) / entry_price)
+        total_expected_profit = expected_price_gain - estimated_fees_usdt
+        logger.info(f"[{symbol}] [Weryfikacja Zysku] Oczekiwany zysk na cenie: ~{expected_price_gain:.4f} USDT. Szacowane opłaty: ~{estimated_fees_usdt:.4f} USDT.")
+        logger.info(f"[{symbol}] [SUMA] Całkowity oczekiwany zysk: ~{total_expected_profit:.4f} USDT (Cel: {TARGET_REWARD_USDT} USDT).")
 
-        logger.info(f"[{symbol}] [Finalne Parametry] Docelowy Margin: ~{required_margin:.2f} USDT, Dźwignia: {int(final_leverage)}x.")
-        logger.info(f"[{symbol}] [Finalne Zlecenie] Wartość Nominalna: ~{notional_value:.2f} USDT, Ilość (Qty): {formatted_qty} {symbol.replace('USDT.P', '')}.")
-        logger.info(f"[{symbol}] [Weryfikacja Ryzyka] Oczekiwana strata na cenie: ~{expected_price_loss:.2f} USDT, Szacowane opłaty: ~{expected_fees:.2f} USDT.")
-        logger.info(f"[{symbol}] [SUMA] Całkowita oczekiwana strata: ~{total_expected_loss:.2f} USDT (Cel: {TOTAL_RISK_USDT:.2f} USDT).")
-
-        # --- KROK 5: Złóż zlecenie ---
         order_params = {
             "symbol": symbol,
             "side": alert_data.direction,
-            "price": format_price(alert_data.entry, tick_size),
-            "qty": formatted_qty,
-            "leverage": str(int(final_leverage)),
-            "takeProfit": format_price(alert_data.tp_2_0, tick_size),
-            "stopLoss": format_price(alert_data.sl, tick_size)
+            "price": format_price(float(entry_price), str(tick_size)),
+            "qty": str(formatted_qty),
+            "leverage": str(int(instrument_info.get('max_leverage', 1.0))),
+            "takeProfit": format_price(float(take_profit_price), str(tick_size)),
+            "stopLoss": format_price(float(sl_price), str(tick_size))
         }
-        return bybit_executor.place_limit_order(order_params)
+        
+        logger.info(f"[{symbol}] [Finalne Zlecenie] Wartość Nominalna: ~{notional_value:.2f} USDT, Ilość (Qty): {formatted_qty}.")
+        
+        order_id = bybit_executor.place_limit_order(order_params)
+        
+        if order_id:
+            return order_id, take_profit_price
+        else:
+            return None, None
 
     except Exception as e:
-        logger.critical(f"[{symbol}] Nieoczekiwany błąd w logice przygotowywania zlecenia dla alertu {alert_id}: {e}", exc_info=True)
-        return None
+        logger.critical(f"[{symbol}] Nieoczekiwany, krytyczny błąd w logice przygotowywania zlecenia dla alertu {alert_id}: {e}", exc_info=True)
+        return None, None
 
 def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executor: BybitExecutor):
     if not newly_fetched_alerts:
@@ -148,16 +176,17 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executo
             state_manager.create_setup_from_alert(alert_data)
 
             logger.info(f"[{symbol}] Giełda i baza danych są czyste. Składam nowe zlecenie.")
-            order_id = _prepare_and_place_order(alert_data, bybit_executor, alert_id)
+            order_id, new_tp_price = _prepare_and_place_order(alert_data, bybit_executor, alert_id)
 
-            if order_id:
+            if order_id and new_tp_price:
                 trade_id = str(uuid.uuid4())
                 state_manager.create_open_trade(
                     trade_id=trade_id, symbol=symbol, direction=alert_data.direction,
                     ob_type="New Alert", entry_price=alert_data.entry, sl_price=alert_data.sl,
-                    tp_price=alert_data.tp_2_0, alert_data=alert_data, bybit_order_id=order_id
+                    tp_price=float(new_tp_price), 
+                    alert_data=alert_data, bybit_order_id=order_id
                 )
-                logger.info(f"[{symbol}][Alert: {alert_id}] SUKCES. Zlecenie {order_id} złożone i zapisane.")
+                logger.info(f"[{symbol}][Alert: {alert_id}] SUKCES. Zlecenie {order_id} złożone i zapisane z TP={new_tp_price:.4f}.")
             else:
                 logger.error(f"[{symbol}][Alert: {alert_id}] PORAŻKA. Nie udało się złożyć nowego zlecenia.")
 
@@ -221,13 +250,15 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups: List[DocumentSn
                         logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD TRANSAKCJI: {ex}", exc_info=True)
                 else:
                     logger.info(f"--- [DECYZJA: WEJŚCIE {ob_type}] --- [{symbol}] | Cena: {entry_level} | Rozpoczynam proces składania zlecenia.")
-                    order_id = _prepare_and_place_order(setup.alert_data, bybit_executor)
-                    if order_id:
+                    order_id, new_tp_price = _prepare_and_place_order(setup.alert_data, bybit_executor)
+                    
+                    if order_id and new_tp_price:
                         trade_id = str(uuid.uuid4())
                         logger.info(f"[{symbol}] Zlecenie pomyślnie wysłane. Tworzę dokument w open_trades z trade_id: {trade_id} i bybit_order_id: {order_id}")
                         state_manager.create_open_trade(
                             trade_id=trade_id, symbol=symbol, direction=direction, ob_type=ob_type,
-                            entry_price=entry_level, sl_price=sl_price, tp_price=tp_price,
+                            entry_price=entry_level, sl_price=sl_price, 
+                            tp_price=float(new_tp_price),
                             alert_data=setup.alert_data, bybit_order_id=order_id
                         )
                     else:
