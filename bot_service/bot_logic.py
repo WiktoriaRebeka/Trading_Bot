@@ -35,8 +35,7 @@ logger = logging.getLogger(__name__)
 def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecutor, alert_id: str = 'N/A'):
     """
     Przygotowuje i składa zlecenie, aby CAŁKOWITE ryzyko (strata na cenie + opłaty)
-    wynosiło ~2.50 USDT, a CAŁKOWITY zysk (zysk z ceny - opłaty) wynosił ~5.00 USDT.
-    Zawiera wielopoziomowe zabezpieczenia.
+    wynosiło MAKSYMALNIE ~2.50 USDT, a CAŁKOWITY zysk (zysk z ceny - opłaty) wynosił MINIMALNIE ~5.00 USDT.
     """
     symbol = alert_data.symbol
     try:
@@ -44,43 +43,37 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
         
         # --- KROK 1: Pobierz dane i zdefiniuj stałe ---
         instrument_info = bybit_executor.get_instrument_info(symbol)
-        if not instrument_info:
-            return None
+        if not instrument_info: return None
         
         tick_size = instrument_info.get('tick_size')
         qty_step = instrument_info.get('qty_step')
         min_order_qty = instrument_info.get('min_order_qty')
         max_leverage_from_api = float(instrument_info.get('max_leverage', 1.0))
 
+        # Definiujemy nasze cele i najgorszy scenariusz dla opłat
         TOTAL_RISK_USDT = 2.50
         TARGET_REWARD_USDT = 5.00
-        TAKER_FEE_RATE = 0.00055  # Standardowa opłata Taker na Bybit (0.055%)
+        TAKER_FEE_RATE = 0.00055  # Zakładamy czarny scenariusz: 0.055% Taker Fee
         MIN_SL_DISTANCE_PERCENT = 0.001 # Filtr 0.1%
 
         # --- KROK 2: Oblicz procentowe koszty i zastosuj filtr SL ---
         entry_price = alert_data.entry
         sl_price = alert_data.sl
 
-        if entry_price <= 0:
-            logger.error(f"[{symbol}] Cena wejścia jest nieprawidłowa.")
-            return None
+        if entry_price <= 0: return None
         sl_distance_percentage = abs(entry_price - sl_price) / entry_price
-        if sl_distance_percentage == 0:
-            logger.error(f"[{symbol}] Odległość SL wynosi zero.")
-            return None
+        if sl_distance_percentage == 0: return None
 
-        # Zabezpieczenie 1: Filtr minimalnej odległości SL
         if sl_distance_percentage < MIN_SL_DISTANCE_PERCENT:
-            logger.warning(
-                f"[{symbol}] Zlecenie odrzucone. Odległość SL ({sl_distance_percentage:.4%}) "
-                f"< minimum ({MIN_SL_DISTANCE_PERCENT:.4%}). Zbyt duże ryzyko poślizgu."
-            )
+            logger.warning(f"[{symbol}] Zlecenie odrzucone. Odległość SL ({sl_distance_percentage:.4%}) < minimum.")
             return None
 
-        # Sumujemy koszt ruchu ceny i podwójną opłatę transakcyjną
+        # Sumujemy koszt ruchu ceny i PODWÓJNĄ opłatę (za wejście i wyjście)
         total_cost_percentage = sl_distance_percentage + (TAKER_FEE_RATE * 2)
         
-        # --- KROK 3: Oblicz docelową Wartość Nominalną ---
+        # --- KROK 3: Oblicz docelową Wartość Nominalną (GWARANCJA RYZYKA) ---
+        # Dzielimy nasz MAKSYMALNY akceptowalny koszt (2.50 USDT) przez CAŁKOWITY koszt procentowy.
+        # To daje nam taką wartość nominalną, przy której suma straty z ceny i opłat wyniesie dokładnie 2.50 USDT.
         notional_value = TOTAL_RISK_USDT / total_cost_percentage
         
         # --- KROK 4: Oblicz finalne parametry zlecenia ---
@@ -89,16 +82,20 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
         target_qty = notional_value / entry_price
         
         if target_qty < min_order_qty:
-            logger.warning(f"[{symbol}] Zlecenie odrzucone. Obliczona ilość ({target_qty:.8f}) < minimum giełdowe ({min_order_qty}).")
+            logger.warning(f"[{symbol}] Zlecenie odrzucone. Obliczona ilość ({target_qty:.8f}) < minimum.")
             return None
         
         formatted_qty = format_quantity(target_qty, qty_step)
         
-        # --- KROK 5: Dynamiczne obliczanie Take Profit ---
+        # --- KROK 5: Oblicz cenę Take Profit (GWARANCJA ZYSKU) ---
+        # Aby zysk NETTO wyniósł 5.00 USDT, zysk BRUTTO (z ceny) musi pokryć 5.00 USDT ORAZ opłaty.
         estimated_fees = notional_value * TAKER_FEE_RATE * 2
         target_reward_from_price = TARGET_REWARD_USDT + estimated_fees
+        
+        # Przeliczamy ten wymagany zysk brutto w USDT na procentową zmianę ceny
         reward_distance_percentage = target_reward_from_price / notional_value
         
+        # Obliczamy finalną cenę Take Profit, która zrealizuje ten cel
         if alert_data.direction == "LONG":
             final_tp_price = entry_price * (1 + reward_distance_percentage)
         else: # SHORT
@@ -112,17 +109,10 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
 
         logger.info(f"[{symbol}] [Finalne Parametry] Docelowy Margin: ~{required_margin:.2f} USDT, Dźwignia: {int(final_leverage)}x.")
         logger.info(f"[{symbol}] [Finalne Zlecenie] Wartość Nominalna: ~{notional_value:.2f} USDT, Ilość (Qty): {formatted_qty} {symbol.replace('USDT.P', '')}.")
-        logger.info(f"[{symbol}] [Weryfikacja Ryzyka] Oczekiwana strata na cenie: ~{expected_price_loss:.2f} USDT, Szacowane opłaty: ~{expected_fees:.2f} USDT.")
-        logger.info(f"[{symbol}] [SUMA] Całkowita oczekiwana strata: ~{total_expected_loss:.2f} USDT (Cel: {TOTAL_RISK_USDT:.2f} USDT).")
-        logger.info(f"[{symbol}] [Weryfikacja Zysku] Całkowity oczekiwany zysk: ~{total_expected_reward:.2f} USDT (Cel: {TARGET_REWARD_USDT:.2f} USDT).")
+        logger.info(f"[{symbol}] [Weryfikacja Ryzyka] Całkowita oczekiwana strata: ~{total_expected_loss:.2f} USDT (Cel: MAKSYMALNIE {TOTAL_RISK_USDT:.2f} USDT).")
+        logger.info(f"[{symbol}] [Weryfikacja Zysku] Całkowity oczekiwany zysk: ~{total_expected_reward:.2f} USDT (Cel: MINIMALNIE {TARGET_REWARD_USDT:.2f} USDT).")
 
-        # --- KROK 6: OSTATECZNA WERYFIKACJA I ZŁOŻENIE ZLECENIA ---
-        
-        # Zabezpieczenie 2: Ostateczne sprawdzenie, czy nie ma już otwartej pozycji
-        if bybit_executor.has_open_position(symbol):
-            logger.critical(f"[{symbol}] KRYTYCZNE ZABEZPIECZENIE: Próba otwarcia nowego zlecenia, mimo że pozycja już istnieje. Anulowano.")
-            return None
-
+        # --- KROK 6: Złóż zlecenie ---
         order_params = {
             "symbol": symbol,
             "side": alert_data.direction,
