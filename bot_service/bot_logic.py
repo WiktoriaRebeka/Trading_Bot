@@ -54,7 +54,7 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
         TOTAL_RISK_USDT = 2.50
         TARGET_REWARD_USDT = 5.00
         TAKER_FEE_RATE = 0.00055  # Zakładamy czarny scenariusz: 0.055% Taker Fee
-        MIN_SL_DISTANCE_PERCENT = 0.001 # Filtr 0.1%
+        MIN_SL_DISTANCE_PERCENT = 0.0005 # Filtr 0.05%
 
         # --- KROK 2: Oblicz procentowe koszty i zastosuj filtr SL ---
         entry_price = alert_data.entry
