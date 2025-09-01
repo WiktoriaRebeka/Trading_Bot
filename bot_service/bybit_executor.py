@@ -252,34 +252,36 @@ class BybitExecutor:
             logger.error(f"[{symbol}] Błąd sieciowy podczas sprawdzania statusu zlecenia {order_id}: {e}")
             return None
 
-# Lokalizacja: bot_service/bybit_executor.py (dodać nową metodę w klasie BybitExecutor)
+
 
     def cancel_all_open_orders_for_symbol(self, symbol: str) -> bool:
         """
-        Pobiera wszystkie aktywne (niezrealizowane) zlecenia dla danego symbolu i anuluje je.
-        Zwraca True, jeśli na koniec operacji nie ma żadnych otwartych zleceň.
+        Anuluje WSZYSTKIE aktywne zlecenia (głównie Limit) dla danego symbolu za pomocą jednego wywołania API.
         """
         api_symbol = symbol.replace('.P', '')
-        logger.warning(f"[{symbol}] Rozpoczynam procedurę czyszczenia: anulowanie WSZYSTKICH otwartych zleceń.")
+        logger.warning(f"[{symbol}] Rozpoczynam procedurę czyszczenia: anulowanie oczekujących zleceń za pomocą 'cancel-all'.")
         try:
-            params = {"category": "linear", "symbol": api_symbol}
-            result = self._send_request("GET", "/v5/order/realtime", params=params)
+            payload = {"category": "linear", "symbol": api_symbol}
+            result = self._send_request("POST", "/v5/order/cancel-all", params=payload)
             
-            open_orders = result.get('list', [])
-            if not open_orders:
-                logger.info(f"[{symbol}] Brak otwartych zleceń na giełdzie. Pole jest czyste.")
+            if 'list' in result:
+                cancelled_orders = result.get('list', [])
+                if cancelled_orders:
+                    logger.info(f"[{symbol}] Pomyślnie wysłano polecenie anulowania dla {len(cancelled_orders)} zleceń.")
+                else:
+                    logger.info(f"[{symbol}] Brak otwartych zleceń do anulowania.")
                 return True
-
-            logger.warning(f"[{symbol}] Znaleziono {len(open_orders)} otwartych zleceń na giełdzie. Anuluję wszystkie.")
-            for order in open_orders:
-                order_id = order.get("orderId")
-                if order_id:
-                    self.cancel_order(symbol, order_id)
-            
-            return True
-
+            else:
+                logger.error(f"[{symbol}] API Bybit nie zwróciło oczekiwanej listy po próbie anulowania zleceń. Odpowiedź: {result}")
+                return False
+        except BybitAPIError as e:
+            if "Order does not exist" in e.ret_msg:
+                 logger.info(f"[{symbol}] Brak otwartych zleceń do anulowania (API zwróciło 'Order does not exist').")
+                 return True
+            logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD API podczas czyszczenia otwartych zleceň: {e}", exc_info=True)
+            return False
         except Exception as e:
-            logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD podczas czyszczenia otwartych zleceň: {e}", exc_info=True)
+            logger.critical(f"[{symbol}] Nieoczekiwany błąd podczas czyszczenia otwartych zleceň: {e}", exc_info=True)
             return False
 
 
@@ -308,3 +310,36 @@ class BybitExecutor:
             logger.error(f"[{symbol}] Błąd podczas sprawdzania otwartych pozycji: {e}")
             # W przypadku błędu API, dla bezpieczeństwa zakładamy, że pozycja może istnieć.
             return True
+
+    def get_last_closed_pnl(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """
+        Pobiera dane o ostatniej zamkniętej pozycji dla danego symbolu.
+        Zwraca słownik z kluczowymi danymi lub None w przypadku błędu.
+        """
+        api_symbol = symbol.replace('.P', '')
+        endpoint = "/v5/position/closed-pnl"
+        params = {
+            "category": "linear",
+            "symbol": api_symbol,
+            "limit": 1  # Chcemy tylko ostatnią pozycję
+        }
+        logger.info(f"[{symbol}] Pobieranie danych o zrealizowanym P&L dla ostatniej zamkniętej pozycji...")
+        try:
+            result = self._send_request("GET", endpoint, params=params)
+            if result and result.get('list'):
+                pnl_data = result['list'][0]
+                
+                # Konwertujemy kluczowe dane na odpowiednie typy
+                return {
+                    "avg_entry_price": float(pnl_data.get("avgEntryPrice", 0.0)),
+                    "avg_exit_price": float(pnl_data.get("avgExitPrice", 0.0)),
+                    "closed_pnl": float(pnl_data.get("closedPnl", 0.0)),
+                    "qty": float(pnl_data.get("qty", 0.0)),
+                    "order_id": pnl_data.get("orderId"), # ID zlecenia wejścia
+                    "updated_time": int(pnl_data.get("updatedTime", 0)), # Timestamp zamknięcia w ms
+                }
+            logger.warning(f"[{symbol}] Nie znaleziono historii zamkniętych pozycji w Bybit.")
+            return None
+        except (RequestException, BybitAPIError) as e:
+            logger.error(f"[{symbol}] Błąd podczas pobierania zrealizowanego P&L: {e}")
+            return None

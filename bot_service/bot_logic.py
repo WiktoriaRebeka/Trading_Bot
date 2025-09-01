@@ -23,6 +23,7 @@ from shared_lib.models import (
 )
 
 from bot_service import state_manager
+from bot_service.pnl_logger import log_realized_trade
 from bot_service.bigquery_logger import log_trade_to_bigquery
 from bot_service.bybit_executor import (
     BybitAPIError,
@@ -337,64 +338,82 @@ def _calculate_rr_analytics(entry_price: float, sl_price: float, extreme_price: 
 
 def finalize_trade(trade: OpenTradeData, closed_result: str, close_price: float):
     logger.info(f"--- [FINALIZACJA] --- [{trade.symbol}] | ID: {trade.trade_id} | Wynik: {closed_result}")
-    if closed_result == "LOSE":
-        logger.info(f"[{trade.trade_id}] Pozycja przegrana. Analiza historyczna i zapis do BigQuery.")
-        end_time_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-        historical_klines = state_manager.get_historical_klines(trade.symbol, trade.opened_at_ms, end_time_ms)
-        extreme_price = trade.entry_price
-        if historical_klines:
-            if trade.direction == 'LONG':
-                extreme_price = max(k['high'] for k in historical_klines)
-            elif trade.direction == 'SHORT':
-                extreme_price = min(k['low'] for k in historical_klines)
-        analytics_data = _calculate_rr_analytics(trade.entry_price, trade.sl_price, extreme_price, trade.direction)
-        bq_data = {
-            "trade_id": trade.trade_id, 
-            "timestamp_entry": trade.opened_at_iso,
-            "timestamp_close": datetime.now(timezone.utc).isoformat(), 
-            "symbol": trade.symbol,
-            "direction": trade.direction.upper(), 
-            "main_result": "LOSE", 
-            "ob_type": trade.ob_type
-        }
-        bq_data.update(analytics_data)
-        log_trade_to_bigquery(bq_data)
-    elif closed_result == "WIN":
+    
+    # ZMIANA: Usunęliśmy całą logikę logowania "LOSE" do BigQuery.
+    # Teraz ta funkcja odpowiada tylko za tworzenie "duchów" dla wygranych.
+    
+    if closed_result == "WIN":
         logger.info(f"[{trade.trade_id}] Pozycja wygrana. Tworzę 'ducha' do dalszej analizy.")
         state_manager.create_analyzed_trade(trade)
 
            
-def _handle_manage_open_trades(klines_data: Dict[str, Kline], open_trades_docs: List[Dict[str, Any]]):
+def _handle_manage_open_trades(klines_data: Dict[str, Kline], open_trades_docs: List[Dict[str, Any]], bybit_executor: BybitExecutor):
     if not open_trades_docs: return
     
     logger.info(f"Zarządzam {len(open_trades_docs)} otwartymi pozycjami (z głównej pętli logiki).")
     
     for trade_doc in open_trades_docs:
-        # Zmiana: Pobieramy trade_id bezpośrednio ze słownika
         trade_id = trade_doc.get('trade_id')
         if not trade_id:
             continue
             
         try:
-            # Zmiana: Walidujemy bezpośrednio słownik
             trade = OpenTradeData.model_validate(trade_doc)
             latest_kline = klines_data.get(trade.symbol)
             if not latest_kline:
                 logger.warning(f"[{trade_id}] Brak danych kline dla {trade.symbol}. Pomijam.")
                 continue
             
-            # ... reszta logiki tej funkcji pozostaje bez zmian ...
-            closed_result, close_price = None, None
+            closed_result, close_price, close_reason = None, None, None
             if trade.direction == 'LONG':
-                if latest_kline.low <= trade.sl_price: closed_result, close_price = "LOSE", trade.sl_price
-                elif latest_kline.high >= trade.tp_price: closed_result, close_price = "WIN", trade.tp_price
+                if latest_kline.low <= trade.sl_price: 
+                    closed_result, close_price, close_reason = "LOSE", trade.sl_price, "STOP_LOSS"
+                elif latest_kline.high >= trade.tp_price: 
+                    closed_result, close_price, close_reason = "WIN", trade.tp_price, "TAKE_PROFIT"
             elif trade.direction == 'SHORT':
-                if latest_kline.high >= trade.sl_price: closed_result, close_price = "LOSE", trade.sl_price
-                elif latest_kline.low <= trade.tp_price: closed_result, close_price = "WIN", trade.tp_price
+                if latest_kline.high >= trade.sl_price: 
+                    closed_result, close_price, close_reason = "LOSE", trade.sl_price, "STOP_LOSS"
+                elif latest_kline.low <= trade.tp_price: 
+                    closed_result, close_price, close_reason = "WIN", trade.tp_price, "TAKE_PROFIT"
             
             if closed_result:
                 logger.info(f"--- [DECYZJA: ZAMKNIĘCIE] --- [{trade.symbol}] | ID: {trade_id} | Wynik: {closed_result}")
+                
+                # === NOWA LOGIKA LOGOWANIA RZECZYWISTEGO P&L ===
+                pnl_data_from_bybit = bybit_executor.get_last_closed_pnl(trade.symbol)
+                
+                if pnl_data_from_bybit:
+                    real_pnl = pnl_data_from_bybit['closed_pnl']
+                    
+                    # Obliczamy rzeczywiste R:R
+                    planned_risk_usdt = 2.50 # Nasze stałe ryzyko
+                    realized_rr = 0.0
+                    if closed_result == "WIN" and planned_risk_usdt > 0:
+                        realized_rr = real_pnl / planned_risk_usdt
+                    
+                    bq_pnl_data = {
+                        "trade_id": trade.trade_id,
+                        "bybit_order_id": trade.bybit_order_id,
+                        "symbol": trade.symbol,
+                        "direction": trade.direction,
+                        "entry_price_planned": trade.entry_price,
+                        "stop_loss_price": trade.sl_price,
+                        "realized_pnl_usdt": real_pnl,
+                        "commission_usdt": None, # Endpoint P&L nie podaje prowizji, można zostawić None
+                        "final_result": closed_result,
+                        "realized_rr": round(realized_rr, 4),
+                        "timestamp_entry": datetime.fromtimestamp(trade.opened_at_ms / 1000, tz=timezone.utc),
+                        "timestamp_close": datetime.fromtimestamp(pnl_data_from_bybit['updated_time'] / 1000, tz=timezone.utc),
+                        "close_reason": close_reason,
+                    }
+                    log_realized_trade(bq_pnl_data)
+                else:
+                    logger.error(f"[{trade_id}] Nie udało się pobrać danych P&L z Bybit. Pomijam logowanie do nowej tabeli.")
+
+                # Stara logika finalizacji (dla "duchów" i czyszczenia stanu)
                 finalize_trade(trade, closed_result, close_price)
+                
+                # Transakcyjne zamknięcie stanu w naszej bazie
                 try:
                     db = get_db()
                     transaction = db.transaction()
