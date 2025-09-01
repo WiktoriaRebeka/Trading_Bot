@@ -7,6 +7,7 @@ from decimal import Decimal, ROUND_DOWN
 from typing import Any, Dict, List, Optional, Tuple
 
 from google.cloud.firestore_v1.document import DocumentSnapshot
+from google.cloud import firestore
 from pydantic import ValidationError
 from requests.exceptions import RequestException
 
