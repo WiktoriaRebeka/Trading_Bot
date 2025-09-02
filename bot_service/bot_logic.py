@@ -33,118 +33,84 @@ from bot_service.bybit_executor import (
 
 logger = logging.getLogger(__name__)
 
-def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecutor, alert_id: str = 'N/A') -> Tuple[Optional[str], Optional[Decimal]]:
-    """
-    Przygotowuje i składa zlecenie, implementując precyzyjną strategię zarządzania ryzykiem.
-    - Maksymalna Strata (Ryzyko): 2.50 USDT
-    - Minimalny Zysk (Nagroda): 5.00 USDT
-    Zwraca krotkę (order_id, take_profit_price) w przypadku sukcesu lub (None, None) w przypadku porażki.
-    """
+def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecutor, alert_id: str = 'N/A') -> Tuple[Optional[str], Optional[Decimal], Optional[Decimal]]:
     symbol = alert_data.symbol
     logger.info(f"[{symbol}] --- Rozpoczynam kalkulację ryzyka dla alertu {alert_id} ---")
-
     try:
-        # === KROK 1: POBRANIE DANYCH ===
-        # Usunięto stąd sprawdzanie has_open_position, ponieważ jest ono teraz w logice nadrzędnej.
-        
         instrument_info = bybit_executor.get_instrument_info(symbol)
         if not instrument_info:
-            logger.error(f"[{symbol}] Nie udało się pobrać informacji o instrumencie. Przerywam.")
-            return None, None
-
-        # ... reszta funkcji pozostaje bez zmian ...
+            return None, None, None
+            
         tick_size = Decimal(instrument_info.get('tick_size'))
         qty_step = Decimal(instrument_info.get('qty_step'))
-        min_order_qty = Decimal(instrument_info.get('min_order_qty'))
         
-        entry_price = Decimal(str(alert_data.entry))
+        entry_price_from_alert = Decimal(str(alert_data.entry))
         sl_price = Decimal(str(alert_data.sl))
+
+        # --- NOWY BEZPIECZNIK: Bufor Wejścia (Entry Buffer) ---
+        ENTRY_BUFFER_PERCENT = Decimal("0.0001") # 0.01%
+        if alert_data.direction == "LONG":
+            final_entry_price = entry_price_from_alert * (1 + ENTRY_BUFFER_PERCENT)
+        else: # SHORT
+            final_entry_price = entry_price_from_alert * (1 - ENTRY_BUFFER_PERCENT)
+        
+        # Musimy sformatować cenę wejścia do prawidłowego kroku, tak jak inne ceny
+        final_entry_price = Decimal(format_price(float(final_entry_price), str(tick_size)))
+        logger.info(f"[{symbol}] Cena wejścia z alertu: {entry_price_from_alert}. Zastosowano bufor. Finalna cena zlecenia: {final_entry_price}")
+        # --- KONIEC BEZPIECZNIKA ---
+
+        if (alert_data.direction == "LONG" and sl_price >= final_entry_price) or \
+           (alert_data.direction == "SHORT" and sl_price <= final_entry_price):
+            logger.error(f"[{symbol}] BŁĄD WALIDACJI: Nielogiczny poziom SL ({sl_price}) względem finalnej ceny wejścia ({final_entry_price}). Zlecenie odrzucone.")
+            return None, None, None
 
         TARGET_RISK_USDT = Decimal("2.50")
         TARGET_REWARD_USDT = Decimal("5.00")
         TAKER_FEE_RATE = Decimal("0.00055")
-        MIN_SL_DISTANCE_PERCENT = Decimal("0.0005")
 
-        # === KROK 2: WALIDACJA I OBLICZENIE STRATY ===
-
-        if entry_price <= 0:
-            logger.error(f"[{symbol}] Cena wejścia jest nieprawidłowa: {entry_price}. Przerywam.")
-            return None, None
-            
-        sl_distance_percentage = abs(entry_price - sl_price) / entry_price
+        sl_distance_percentage = abs(final_entry_price - sl_price) / final_entry_price
         if sl_distance_percentage == 0:
-            logger.error(f"[{symbol}] Odległość SL wynosi zero. Przerywam.")
-            return None, None
-
-        if sl_distance_percentage < MIN_SL_DISTANCE_PERCENT:
-            logger.warning(
-                f"[{symbol}] Zlecenie odrzucone. Odległość SL ({sl_distance_percentage:.4%}) "
-                f"jest mniejsza niż wymagane minimum ({MIN_SL_DISTANCE_PERCENT:.4%})."
-            )
-            return None, None
-
+            return None, None, None
+            
         total_cost_percentage = sl_distance_percentage + (TAKER_FEE_RATE * 2)
-
-        # === KROK 3: DYNAMICZNE OBLICZANIE WIELKOŚCI POZYCJI ===
-
-        notional_value = TARGET_RISK_USDT / total_cost_percentage
-        target_qty = notional_value / entry_price
+        ideal_notional_value = TARGET_RISK_USDT / total_cost_percentage
+        target_qty = ideal_notional_value / final_entry_price
         
+        min_order_qty = Decimal(instrument_info.get('min_order_qty'))
         if target_qty < min_order_qty:
-            logger.warning(f"[{symbol}] Zlecenie odrzucone. Obliczona ilość ({target_qty}) < minimum giełdowe ({min_order_qty}).")
-            return None, None
-        
+            return None, None, None
+            
         formatted_qty = target_qty.quantize(qty_step, rounding=ROUND_DOWN)
-        
         if formatted_qty <= 0:
-            logger.error(f"[{symbol}] Po zaokrągleniu ilość (qty) wynosi zero. Zwiększ ryzyko lub wybierz inny setup.")
-            return None, None
-
-        # === KROK 4: DYNAMICZNE OBLICZANIE POZIOMU TAKE PROFIT ===
-
-        estimated_fees_usdt = notional_value * TAKER_FEE_RATE * 2
-        target_gross_profit_usdt = TARGET_REWARD_USDT + estimated_fees_usdt
+            return None, None, None
+            
+        actual_notional_value = formatted_qty * final_entry_price
+        actual_fees_usdt = actual_notional_value * TAKER_FEE_RATE * 2
+        target_gross_profit_usdt = TARGET_REWARD_USDT + actual_fees_usdt
         price_change_for_tp = target_gross_profit_usdt / formatted_qty
         
         if alert_data.direction == "LONG":
-            take_profit_price = entry_price + price_change_for_tp
+            take_profit_price = final_entry_price + price_change_for_tp
         else:
-            take_profit_price = entry_price - price_change_for_tp
-
-        # === KROK 5: FINALIZACJA I ZŁOŻENIE ZLECENIA ===
-
-        expected_price_loss = notional_value * sl_distance_percentage
-        total_expected_loss = expected_price_loss + estimated_fees_usdt
-        logger.info(f"[{symbol}] [Weryfikacja Ryzyka] Oczekiwana strata na cenie: ~{expected_price_loss:.4f} USDT. Szacowane opłaty: ~{estimated_fees_usdt:.4f} USDT.")
-        logger.info(f"[{symbol}] [SUMA] Całkowita oczekiwana strata: ~{total_expected_loss:.4f} USDT (Cel: {TARGET_RISK_USDT} USDT).")
-        
-        expected_price_gain = notional_value * (abs(take_profit_price - entry_price) / entry_price)
-        total_expected_profit = expected_price_gain - estimated_fees_usdt
-        logger.info(f"[{symbol}] [Weryfikacja Zysku] Oczekiwany zysk na cenie: ~{expected_price_gain:.4f} USDT. Szacowane opłaty: ~{estimated_fees_usdt:.4f} USDT.")
-        logger.info(f"[{symbol}] [SUMA] Całkowity oczekiwany zysk: ~{total_expected_profit:.4f} USDT (Cel: {TARGET_REWARD_USDT} USDT).")
-
+            take_profit_price = final_entry_price - price_change_for_tp
+            
         order_params = {
-            "symbol": symbol,
-            "side": alert_data.direction,
-            "price": format_price(float(entry_price), str(tick_size)),
-            "qty": str(formatted_qty),
-            "leverage": str(int(instrument_info.get('max_leverage', 1.0))),
-            "takeProfit": format_price(float(take_profit_price), str(tick_size)),
-            "stopLoss": format_price(float(sl_price), str(tick_size))
+            "symbol": symbol, "side": alert_data.direction, "price": str(final_entry_price),
+            "qty": str(formatted_qty), "leverage": str(int(instrument_info.get('max_leverage', 1.0))),
+            "takeProfit": format_price(float(take_profit_price), str(tick_size)), "stopLoss": format_price(float(sl_price), str(tick_size))
         }
         
-        logger.info(f"[{symbol}] [Finalne Zlecenie] Wartość Nominalna: ~{notional_value:.2f} USDT, Ilość (Qty): {formatted_qty}.")
-        
+        logger.info(f"[{symbol}] [Finalne Zlecenie] Wartość Nominalna: ~{actual_notional_value:.2f} USDT, Ilość (Qty): {formatted_qty}.")
         order_id = bybit_executor.place_limit_order(order_params)
         
         if order_id:
-            return order_id, take_profit_price
+            return order_id, take_profit_price, sl_price
         else:
-            return None, None
-
+            return None, None, None
+            
     except Exception as e:
-        logger.critical(f"[{symbol}] Nieoczekiwany, krytyczny błąd w logice przygotowywania zlecenia dla alertu {alert_id}: {e}", exc_info=True)
-        return None, None
+        logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD w _prepare_and_place_order dla alertu {alert_id}: {e}", exc_info=True)
+        return None, None, None
 
 def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executor: BybitExecutor):
     if not newly_fetched_alerts:
