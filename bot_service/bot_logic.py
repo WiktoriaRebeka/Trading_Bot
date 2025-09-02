@@ -489,62 +489,81 @@ def _handle_post_mortem_analysis(klines_data: Dict[str, Kline], analyzed_trades_
         except Exception as e: 
             logger.error(f"[ANALIZA DUCHA][{trade_id}] Błąd: {e}", exc_info=True)
 
-def run_trading_logic(bybit_executor: BybitExecutor):
-    logger.info("--- ROZPOCZYNAM GŁÓWNĄ PĘTLĘ LOGIKI ---")
+def _handle_manage_open_trades(klines_data: Dict[str, Kline], open_trades_docs: List[Dict[str, Any]], bybit_executor: BybitExecutor):
+    if not open_trades_docs: return
     
-    # 1. Zbierz wszystkie symbole, którymi musimy się zająć
-    symbols_to_watch = set(get_symbols_to_watch_from_config())
-    active_setups_docs = list(state_manager.get_all_active_setups())
-    open_trades_docs = list(state_manager.get_all_open_trades())
-    analyzed_trades_docs = list(state_manager.get_all_analyzed_trades())
-
-    active_setups = {doc.id: doc.to_dict() for doc in active_setups_docs}
-    open_trades = {doc.to_dict()['symbol']: doc.to_dict() for doc in open_trades_docs}
-    analyzed_trades = {doc.to_dict()['symbol']: doc.to_dict() for doc in analyzed_trades_docs}
-
-    symbols_to_watch.update(active_setups.keys(), open_trades.keys(), analyzed_trades.keys())
-    valid_symbols = {s for s in symbols_to_watch if isinstance(s, str) and s}
-
-    if not valid_symbols:
-        logger.info("Brak symboli do monitorowania. Kończę cykl.")
-        return
-
-    # 2. Pobierz świeże dane rynkowe dla wszystkich symboli
-    klines_data = {
-        symbol: Kline.model_validate(data) 
-        for symbol, data in state_manager.get_latest_klines_from_cache(list(valid_symbols)).items()
-    }
-
-    # 3. Przetwórz każdy symbol indywidualnie zgodnie z nową logiką
-    for symbol in valid_symbols:
+    logger.info(f"Zarządzam {len(open_trades_docs)} otwartymi pozycjami (z głównej pętli logiki).")
+    
+    for trade_doc in open_trades_docs:
+        trade_id = trade_doc.get('trade_id')
+        if not trade_id:
+            continue
+            
         try:
-            latest_kline = klines_data.get(symbol)
+            trade = OpenTradeData.model_validate(trade_doc)
+            latest_kline = klines_data.get(trade.symbol)
             if not latest_kline:
+                logger.warning(f"[{trade_id}] Brak danych kline dla {trade.symbol}. Pomijam.")
                 continue
-
-            # === GŁÓWNA LOGIKA DECYZYJNA ===
-
-            # KROK 1: Czy jest AKTYWNA POZYCJA na giełdzie?
-            if bybit_executor.has_open_position(symbol):
-                logger.info(f"[{symbol}] Wykryto aktywną pozycję na giełdzie.")
-                trade_doc = open_trades.get(symbol)
-                if trade_doc:
-                    _handle_manage_open_trades(klines_data, [trade_doc], bybit_executor)
-                else:
-                    logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Wykryto pozycję na giełdzie, ale brak jej w bazie 'open_trades'!")
+            
+            closed_result, close_price, close_reason = None, None, None
+            if trade.direction == 'LONG':
+                if latest_kline.low <= trade.sl_price: 
+                    closed_result, close_price, close_reason = "LOSE", trade.sl_price, "STOP_LOSS"
+                elif latest_kline.high >= trade.tp_price: 
+                    closed_result, close_price, close_reason = "WIN", trade.tp_price, "TAKE_PROFIT"
+            elif trade.direction == 'SHORT':
+                if latest_kline.high >= trade.sl_price: 
+                    closed_result, close_price, close_reason = "LOSE", trade.sl_price, "STOP_LOSS"
+                elif latest_kline.low <= trade.tp_price: 
+                    closed_result, close_price, close_reason = "WIN", trade.tp_price, "TAKE_PROFIT"
+            
+            if closed_result:
+                logger.info(f"--- [DECYZJA: ZAMKNIĘCIE] --- [{trade.symbol}] | ID: {trade_id} | Wynik: {closed_result}")
                 
-                continue
+                # === NOWA LOGIKA LOGOWANIA RZECZYWISTEGO P&L ===
+                logger.info(f"[{trade_id}] Pozycja oznaczona jako zamknięta. Próbuję pobrać dane P&L z Bybit...")
+                pnl_data_from_bybit = bybit_executor.get_last_closed_pnl(trade.symbol)
+                
+                if pnl_data_from_bybit:
+                    logger.info(f"[{trade_id}] Pomyślnie pobrano dane P&L z Bybit: {pnl_data_from_bybit}")
+                    real_pnl = pnl_data_from_bybit['closed_pnl']
+                    
+                    planned_risk_usdt = 2.50
+                    realized_rr = 0.0
+                    if closed_result == "WIN" and planned_risk_usdt > 0:
+                        realized_rr = real_pnl / planned_risk_usdt
+                    
+                    bq_pnl_data = {
+                        "trade_id": trade.trade_id,
+                        "bybit_order_id": trade.bybit_order_id,
+                        "symbol": trade.symbol,
+                        "direction": trade.direction,
+                        "entry_price_planned": trade.entry_price,
+                        "stop_loss_price": trade.sl_price,
+                        "realized_pnl_usdt": real_pnl,
+                        "commission_usdt": None,
+                        "final_result": closed_result,
+                        "realized_rr": round(realized_rr, 4),
+                        "timestamp_entry": datetime.fromtimestamp(trade.opened_at_ms / 1000, tz=timezone.utc),
+                        "timestamp_close": datetime.fromtimestamp(pnl_data_from_bybit['updated_time'] / 1000, tz=timezone.utc),
+                        "close_reason": close_reason,
+                    }
+                    logger.info(f"[{trade_id}] Przygotowano dane do zapisu w BigQuery. Wywołuję pnl_logger...")
+                    log_realized_trade(bq_pnl_data)
+                else:
+                    logger.error(f"[{trade_id}] KRYTYCZNY BŁĄD: Nie udało się pobrać danych P&L z Bybit! Zapis do tabeli 'realized_trades_pnl' nie zostanie wykonany.")
 
-            # KROK 2: Jeśli nie ma aktywnej pozycji, sprawdzamy czy jest "duch" do analizy
-            if symbol in analyzed_trades:
-                # === KRYTYCZNA POPRAWKA: Przekazujemy słownik, a nie DocumentSnapshot ===
-                _handle_post_mortem_analysis(klines_data, [analyzed_trades[symbol]])
-
-            # KROK 3: Jeśli nie ma aktywnej pozycji, sprawdzamy czy jest setup do wejścia
-            if symbol in active_setups:
-                _handle_setups(klines_data, [active_setups[symbol]], bybit_executor)
-
+                finalize_trade(trade, closed_result, close_price)
+                
+                try:
+                    db = get_db()
+                    transaction = db.transaction()
+                    state_manager.close_trade_transactional(transaction, trade.trade_id, trade.symbol, is_loss=(closed_result == "LOSE"))
+                    logger.info(f"[{trade_id}] Transakcja zamknięcia pozycji zakończona.")
+                except Exception as ex:
+                    logger.critical(f"[{trade_id}] KRYTYCZNY BŁĄD TRANSAKCJI ZAMKNIĘCIA: {ex}", exc_info=True)
+        except ValidationError as e:
+            logger.error(f"Błąd walidacji danych otwartej pozycji {trade_id}: {e}")
         except Exception as e:
-            logger.error(f"[{symbol}] Nieoczekiwany błąd podczas przetwarzania symbolu: {e}", exc_info=True)
-
-    logger.info("--- ZAKOŃCZONO GŁÓWNĄ PĘTLĘ LOGIKI ---")
+            logger.error(f"Nieoczekiwany błąd podczas monitorowania pozycji {trade_id}: {e}", exc_info=True)
