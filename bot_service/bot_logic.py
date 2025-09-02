@@ -35,72 +35,72 @@ logger = logging.getLogger(__name__)
 
 def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecutor, alert_id: str = 'N/A') -> Tuple[Optional[str], Optional[Decimal], Optional[Decimal]]:
     symbol = alert_data.symbol
-    logger.info(f"[{symbol}] --- Rozpoczynam kalkulację ryzyka dla alertu {alert_id} ---")
+    logger.info(f"[{symbol}] --- ROZPOCZYNAM PRZYGOTOWANIE ZLECENIA (PROSTA LOGIKA) ---")
     try:
+        # --- ETAP 1: POBIERANIE DANYCH I WALIDACJA ---
         instrument_info = bybit_executor.get_instrument_info(symbol)
         if not instrument_info:
+            logger.error(f"[{symbol}] BŁĄD: Nie udało się pobrać informacji o instrumencie.")
             return None, None, None
             
         tick_size = Decimal(instrument_info.get('tick_size'))
         qty_step = Decimal(instrument_info.get('qty_step'))
+        max_leverage = Decimal(instrument_info.get('max_leverage', '1'))
         
-        entry_price_from_alert = Decimal(str(alert_data.entry))
+        entry_price = Decimal(str(alert_data.entry))
         sl_price = Decimal(str(alert_data.sl))
-
-        # --- NOWY BEZPIECZNIK: Bufor Wejścia (Entry Buffer) ---
-        ENTRY_BUFFER_PERCENT = Decimal("0.0001") # 0.01%
-        if alert_data.direction == "LONG":
-            final_entry_price = entry_price_from_alert * (1 + ENTRY_BUFFER_PERCENT)
-        else: # SHORT
-            final_entry_price = entry_price_from_alert * (1 - ENTRY_BUFFER_PERCENT)
+        take_profit_price = Decimal(str(alert_data.tp_2_0))
         
-        # Musimy sformatować cenę wejścia do prawidłowego kroku, tak jak inne ceny
-        final_entry_price = Decimal(format_price(float(final_entry_price), str(tick_size)))
-        logger.info(f"[{symbol}] Cena wejścia z alertu: {entry_price_from_alert}. Zastosowano bufor. Finalna cena zlecenia: {final_entry_price}")
-        # --- KONIEC BEZPIECZNIKA ---
+        logger.info(f"[{symbol}] Dane z alertu: Entry={entry_price}, SL={sl_price}, TP (z tp_2_0)={take_profit_price}")
 
-        if (alert_data.direction == "LONG" and sl_price >= final_entry_price) or \
-           (alert_data.direction == "SHORT" and sl_price <= final_entry_price):
-            logger.error(f"[{symbol}] BŁĄD WALIDACJI: Nielogiczny poziom SL ({sl_price}) względem finalnej ceny wejścia ({final_entry_price}). Zlecenie odrzucone.")
+        # Walidacja logiki SL
+        if (alert_data.direction == "LONG" and sl_price >= entry_price) or \
+           (alert_data.direction == "SHORT" and sl_price <= entry_price):
+            logger.error(f"[{symbol}] BŁĄD WALIDACJI: Nielogiczny poziom SL. Zlecenie odrzucone.")
             return None, None, None
 
-        TARGET_RISK_USDT = Decimal("2.50")
-        TARGET_REWARD_USDT = Decimal("5.00")
-        TAKER_FEE_RATE = Decimal("0.00055")
+        # --- NOWY FILTR: Minimalna odległość SL 0.2% ---
+        MIN_SL_DISTANCE_PERCENT = Decimal("0.002") # 0.2%
 
-        sl_distance_percentage = abs(final_entry_price - sl_price) / final_entry_price
-        if sl_distance_percentage == 0:
+        if entry_price <= 0:
+            logger.error(f"[{symbol}] BŁĄD KRYTYCZNY: Cena wejścia jest zerowa lub ujemna. Przerywam.")
             return None, None, None
-            
-        total_cost_percentage = sl_distance_percentage + (TAKER_FEE_RATE * 2)
-        ideal_notional_value = TARGET_RISK_USDT / total_cost_percentage
-        target_qty = ideal_notional_value / final_entry_price
+
+        sl_distance_percentage = abs(entry_price - sl_price) / entry_price
         
-        min_order_qty = Decimal(instrument_info.get('min_order_qty'))
-        if target_qty < min_order_qty:
+        if sl_distance_percentage < MIN_SL_DISTANCE_PERCENT:
+            logger.warning(
+                f"[{symbol}] Zlecenie odrzucone. Odległość SL ({sl_distance_percentage:.4%}) "
+                f"jest mniejsza niż wymagane minimum ({MIN_SL_DISTANCE_PERCENT:.4%})."
+            )
             return None, None, None
-            
+        
+        logger.info(f"[{symbol}] Walidacja odległości SL ({sl_distance_percentage:.4%}) zakończona pomyślnie.")
+        # --- KONIEC FILTRA ---
+
+        # --- ETAP 2: OBLICZANIE WIELKOŚCI POZYCJI (TWOJA METODA) ---
+        MARGIN_PER_TRADE = Decimal("10.00") # Stały kapitał 10 USDT na transakcję
+        
+        notional_value = MARGIN_PER_TRADE * max_leverage
+        target_qty = notional_value / entry_price
         formatted_qty = target_qty.quantize(qty_step, rounding=ROUND_DOWN)
+
         if formatted_qty <= 0:
+            logger.error(f"[{symbol}] BŁĄD: Obliczona ilość (qty) jest zerowa lub ujemna. Przerywam.")
             return None, None, None
-            
-        actual_notional_value = formatted_qty * final_entry_price
-        actual_fees_usdt = actual_notional_value * TAKER_FEE_RATE * 2
-        target_gross_profit_usdt = TARGET_REWARD_USDT + actual_fees_usdt
-        price_change_for_tp = target_gross_profit_usdt / formatted_qty
         
-        if alert_data.direction == "LONG":
-            take_profit_price = final_entry_price + price_change_for_tp
-        else:
-            take_profit_price = final_entry_price - price_change_for_tp
-            
+        logger.info(f"[{symbol}] Obliczenia Qty: Kapitał={MARGIN_PER_TRADE} USDT * Lewar={max_leverage}x -> Wartość Nominalna={notional_value:.2f} USDT -> Ilość={formatted_qty}")
+
+        # --- ETAP 3: WYSŁANIE ZLECENIA ---
         order_params = {
-            "symbol": symbol, "side": alert_data.direction, "price": str(final_entry_price),
-            "qty": str(formatted_qty), "leverage": str(int(instrument_info.get('max_leverage', 1.0))),
+            "symbol": symbol, "side": alert_data.direction, "price": format_price(float(entry_price), str(tick_size)),
+            "qty": str(formatted_qty), "leverage": str(int(max_leverage)),
             "takeProfit": format_price(float(take_profit_price), str(tick_size)), "stopLoss": format_price(float(sl_price), str(tick_size))
         }
         
-        logger.info(f"[{symbol}] [Finalne Zlecenie] Wartość Nominalna: ~{actual_notional_value:.2f} USDT, Ilość (Qty): {formatted_qty}.")
+        logger.info(f"[{symbol}] --- FINALNE PARAMETRY WYSYŁANE DO BYBIT ---")
+        logger.info(f"[{symbol}] {order_params}")
+        
         order_id = bybit_executor.place_limit_order(order_params)
         
         if order_id:
