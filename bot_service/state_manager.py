@@ -1,12 +1,11 @@
 import logging
 from typing import Optional, Iterable, Dict, Any, List
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from google.cloud import firestore
 from google.cloud.firestore_v1.document import DocumentSnapshot
 
 from shared_lib.firebase_client import get_db
 from shared_lib import constants
-# ZMIANA: Usunięto import 'AnalyzedTradeData'
 from shared_lib.models import AlertData, OpenTradeData
 
 logger = logging.getLogger(__name__)
@@ -169,3 +168,31 @@ def create_setup_from_alert(alert_data: AlertData):
     
     setup_doc_ref.set(new_setup_data)
     logger.info(f"[{alert_data.symbol}] Utworzono/zresetowano setup na podstawie nowego alertu.")
+
+def load_last_pnl_sync_timestamp() -> int:
+    """Odczytuje timestamp ostatniej synchronizacji P&L z Firestore."""
+    db = get_db()
+    doc_ref = db.collection(constants.BOT_CONFIG_COLLECTION).document("pnl_sync_state")
+    try:
+        doc = doc_ref.get()
+        if doc.exists:
+            ts = doc.get("last_sync_timestamp_ms")
+            if ts:
+                logger.info(f"[PNL_SYNC] Odczytano ostatni timestamp synchronizacji P&L: {ts}")
+                return ts
+    except Exception as e:
+        logger.error(f"[PNL_SYNC] Błąd odczytu timestampu P&L: {e}")
+    
+    fallback_ts = int((datetime.now(timezone.utc) - timedelta(days=1)).timestamp() * 1000)
+    logger.warning(f"[PNL_SYNC] Brak timestampu P&L, używam wartości domyślnej: {fallback_ts}")
+    return fallback_ts
+
+def save_last_pnl_sync_timestamp(timestamp_ms: int):
+    """Zapisuje nowy timestamp ostatniej synchronizacji P&L."""
+    db = get_db()
+    doc_ref = db.collection(constants.BOT_CONFIG_COLLECTION).document("pnl_sync_state")
+    try:
+        doc_ref.set({"last_sync_timestamp_ms": timestamp_ms}, merge=True)
+        logger.info(f"[PNL_SYNC] Zapisano nowy timestamp synchronizacji P&L: {timestamp_ms}")
+    except Exception as e:
+        logger.error(f"[PNL_SYNC] Błąd zapisu timestampu P&L: {e}")

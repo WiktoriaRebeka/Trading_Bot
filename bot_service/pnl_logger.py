@@ -12,6 +12,7 @@ REALIZED_TRADES_TABLE_REF = "trading-bot-463318.trading_analytics.realized_trade
 def initialize_pnl_logger() -> bool:
     """
     Inicjalizuje klienta BigQuery specjalnie dla PNL Loggera.
+    Sprawdza, czy tabela docelowa istnieje.
     Zwraca True w przypadku sukcesu.
     """
     global bigquery_client
@@ -42,7 +43,7 @@ def log_realized_trade(trade_pnl_data: Dict[str, Any]):
     Zapisuje dane o zrealizowanej transakcji do dedykowanej tabeli P&L w BigQuery.
     """
     trade_id = trade_pnl_data.get('trade_id', 'N/A')
-    logger.info(f"[PNL_LOGGER][{trade_id}] Rozpoczynam zapis zrealizowanego P&L do BigQuery.")
+    logger.info(f"[PNL_LOGGER][{trade_id}] Rozpoczynam zapis zrealizowanego P&L do tabeli '{REALIZED_TRADES_TABLE_REF}'.")
     
     try:
         client = get_pnl_bigquery_client()
@@ -50,17 +51,19 @@ def log_realized_trade(trade_pnl_data: Dict[str, Any]):
         logger.error(f"[PNL_LOGGER][{trade_id}] Nie można zalogować transakcji: {e}")
         return
 
+    # Prosta walidacja, aby upewnić się, że mamy kluczowe dane.
     required_keys = ['trade_id', 'symbol', 'realized_pnl_usdt', 'final_result']
     if not all(key in trade_pnl_data for key in required_keys):
-        logger.error(f"[PNL_LOGGER][{trade_id}] Brak kluczowych danych do zapisu. Pomijam.")
+        logger.error(f"[PNL_LOGGER][{trade_id}] Otrzymano niekompletne dane do zapisu P&L. Pomijam. Dane: {trade_pnl_data}")
         return
 
     try:
         rows_to_insert = [trade_pnl_data]
         errors = client.insert_rows_json(REALIZED_TRADES_TABLE_REF, rows_to_insert)
+        
         if not errors:
             logger.info(f"[PNL_LOGGER][{trade_id}] SUKCES! Pomyślnie zapisano zrealizowany P&L.")
         else:
-            logger.error(f"[PNL_LOGGER][{trade_id}] Błąd podczas wstawiania wierszy P&L: {errors}")
+            logger.error(f"[PNL_LOGGER][{trade_id}] Błąd podczas wstawiania wierszy P&L do BigQuery: {errors}")
     except Exception as e:
-        logger.error(f"[PNL_LOGGER][{trade_id}] Krytyczny błąd podczas zapisu P&L: {e}", exc_info=True)
+        logger.error(f"[PNL_LOGGER][{trade_id}] Krytyczny, nieoczekiwany błąd podczas zapisu P&L: {e}", exc_info=True)

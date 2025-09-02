@@ -3,14 +3,11 @@ import uuid
 from flask import Flask, jsonify
 from typing import Optional, Tuple
 
-from bot_service.pnl_logger import initialize_pnl_logger
-
 from shared_lib.config_loader import load_config
 from shared_lib.firebase_client import initialize_firebase
 from shared_lib.config import config 
-# ZMIANA: Usunięto import starego loggera
-# from bot_service.bigquery_logger import initialize_bigquery 
-from bot_service.bot_logic import process_new_alerts, run_trading_logic
+from bot_service.pnl_logger import initialize_pnl_logger
+from bot_service.bot_logic import process_new_alerts, run_trading_logic, sync_pnl_history
 from bot_service.fetch_from_firestore import (
     load_last_processed_timestamp, 
     fetch_new_alerts_since, 
@@ -20,7 +17,6 @@ from bot_service.fetch_from_firestore import (
 logger = logging.getLogger(__name__)
 
 def initialize_trading_services() -> Tuple[bool, Optional['BybitExecutor']]:
-    # Ta funkcja jest poprawna i pozostaje bez zmian
     from bot_service.bybit_executor import BybitExecutor
     logger.info("Inicjalizacja usług tradingowych...")
     try:
@@ -49,14 +45,12 @@ def initialize_app_services(app: Flask):
         load_config()
         
         firebase_ok = initialize_firebase()
-        # ZMIANA: Wywołujemy nową funkcję inicjalizującą
         pnl_logger_ok = initialize_pnl_logger()
         trading_services_ok, executor = initialize_trading_services()
         
         if executor:
             app.config['BYBIT_EXECUTOR'] = executor
        
-        # ZMIANA: Dodano 'pnl_logger_ok' do warunku
         if firebase_ok and pnl_logger_ok and trading_services_ok:
             app.config['INITIALIZATION_SUCCESS'] = True
             logger.info("Wszystkie kluczowe usługi zainicjalizowane. Aplikacja gotowa do startu.")
@@ -71,7 +65,6 @@ def initialize_app_services(app: Flask):
             logger.critical(f"Krytyczny błąd podczas inicjalizacji. Powód: {final_reason}")
 
 def register_endpoints(app: Flask):
-    # Ta funkcja jest poprawna i pozostaje bez zmian
     @app.route('/')
     def health_check():
         return "Trading Bot Service is running.", 200
@@ -100,6 +93,7 @@ def register_endpoints(app: Flask):
             return jsonify({"status": "error", "message": "BybitExecutor not initialized"}), 500
 
         try:
+            # Krok 1: Przetwarzanie nowych alertów (otwieranie nowych pozycji)
             last_ts = load_last_processed_timestamp()
             new_alerts, new_ts = fetch_new_alerts_since(last_ts)
             if new_alerts:
@@ -108,7 +102,11 @@ def register_endpoints(app: Flask):
                 if new_ts and new_ts > last_ts:
                     save_last_processed_timestamp(new_ts)
             
+            # Krok 2: Zarządzanie istniejącymi setupami i pozycjami
             run_trading_logic(bybit_executor)
+
+            # Krok 3: Synchronizacja historii P&L z Bybit (nasz "księgowy")
+            sync_pnl_history(bybit_executor)
 
             logger.info("--- ZAKOŃCZENIE CYKLU BOTA ---", extra={"json_fields": {"cycle_id": cycle_id, "status": "success"}})
             return jsonify({"status": "success", "cycle_id": cycle_id}), 200
