@@ -567,3 +567,65 @@ def _handle_manage_open_trades(klines_data: Dict[str, Kline], open_trades_docs: 
             logger.error(f"Błąd walidacji danych otwartej pozycji {trade_id}: {e}")
         except Exception as e:
             logger.error(f"Nieoczekiwany błąd podczas monitorowania pozycji {trade_id}: {e}", exc_info=True)
+
+
+def run_trading_logic(bybit_executor: BybitExecutor):
+    logger.info("--- ROZPOCZYNAM GŁÓWNĄ PĘTLĘ LOGIKI ---")
+    
+    # 1. Zbierz wszystkie symbole i ich dane od razu jako słowniki
+    symbols_to_watch = set(get_symbols_to_watch_from_config())
+    active_setups_docs = list(state_manager.get_all_active_setups())
+    open_trades_docs = list(state_manager.get_all_open_trades())
+    analyzed_trades_docs = list(state_manager.get_all_analyzed_trades())
+
+    active_setups = {doc.id: doc.to_dict() for doc in active_setups_docs}
+    open_trades = {doc.to_dict()['symbol']: doc.to_dict() for doc in open_trades_docs}
+    analyzed_trades = {doc.to_dict()['symbol']: doc.to_dict() for doc in analyzed_trades_docs}
+
+    symbols_to_watch.update(active_setups.keys(), open_trades.keys(), analyzed_trades.keys())
+    valid_symbols = {s for s in symbols_to_watch if isinstance(s, str) and s}
+
+    if not valid_symbols:
+        logger.info("Brak symboli do monitorowania. Kończę cykl.")
+        return
+
+    # 2. Pobierz świeże dane rynkowe
+    klines_data = {
+        symbol: Kline.model_validate(data) 
+        for symbol, data in state_manager.get_latest_klines_from_cache(list(valid_symbols)).items()
+    }
+
+    # 3. Przetwórz każdy symbol indywidualnie
+    for symbol in valid_symbols:
+        try:
+            latest_kline = klines_data.get(symbol)
+            if not latest_kline:
+                continue
+
+            # === GŁÓWNA LOGIKA DECYZYJNA ===
+
+            # KROK 1: Czy jest AKTYWNA POZYCJA na giełdzie?
+            if bybit_executor.has_open_position(symbol):
+                logger.info(f"[{symbol}] Wykryto aktywną pozycję na giełdzie.")
+                trade_data = open_trades.get(symbol)
+                if trade_data:
+                    # === KRYTYCZNA POPRAWKA: Dodano brakujący argument 'bybit_executor' ===
+                    _handle_manage_open_trades(klines_data, [trade_data], bybit_executor)
+                else:
+                    logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Wykryto pozycję na giełdzie, ale brak jej w bazie 'open_trades'!")
+                continue
+
+            # KROK 2: Jeśli nie ma aktywnej pozycji, sprawdzamy "ducha"
+            analyzed_trade_data = analyzed_trades.get(symbol)
+            if analyzed_trade_data:
+                _handle_post_mortem_analysis(klines_data, [analyzed_trade_data])
+
+            # KROK 3: Jeśli nie ma aktywnej pozycji, sprawdzamy setup
+            setup_data = active_setups.get(symbol)
+            if setup_data:
+                _handle_setups(klines_data, [setup_data], bybit_executor)
+
+        except Exception as e:
+            logger.error(f"[{symbol}] Nieoczekiwany błąd podczas przetwarzania symbolu: {e}", exc_info=True)
+
+    logger.info("--- ZAKOŃCZONO GŁÓWNĄ PĘTLĘ LOGIKI ---")
