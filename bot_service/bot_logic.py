@@ -39,31 +39,24 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
         min_order_qty = Decimal(instrument_info.get('min_order_qty'))
         
         entry_price = Decimal(str(alert_data.entry))
-        sl_price_from_alert = Decimal(str(alert_data.sl))
+        sl_price = Decimal(str(alert_data.sl))
         
-        price_distance = abs(entry_price - sl_price_from_alert)
-        
+        # --- KLUCZOWA ZMIANA: Twarda walidacja SL zamiast autokorekty ---
         if alert_data.direction == "LONG":
-            corrected_sl_price = entry_price - price_distance
-            if corrected_sl_price >= entry_price:
-                logger.error(f"[{symbol}] Błąd logiki SL dla LONG. Cena SL ({corrected_sl_price}) musi być niższa niż cena wejścia ({entry_price}). Przerywam.")
+            if sl_price >= entry_price:
+                logger.error(f"[{symbol}] Zlecenie odrzucone. Dla pozycji LONG, cena SL ({sl_price}) musi być niższa niż cena wejścia ({entry_price}).")
                 return None, None, None
         elif alert_data.direction == "SHORT":
-            corrected_sl_price = entry_price + price_distance
-            if corrected_sl_price <= entry_price:
-                logger.error(f"[{symbol}] Błąd logiki SL dla SHORT. Cena SL ({corrected_sl_price}) musi być wyższa niż cena wejścia ({entry_price}). Przerywam.")
+            if sl_price <= entry_price:
+                logger.error(f"[{symbol}] Zlecenie odrzucone. Dla pozycji SHORT, cena SL ({sl_price}) musi być wyższa niż cena wejścia ({entry_price}).")
                 return None, None, None
         else:
             logger.error(f"[{symbol}] Nieznany kierunek pozycji: {alert_data.direction}. Przerywam.")
             return None, None, None
-        
-        sl_price = corrected_sl_price
-        logger.info(f"[{symbol}] Poziom SL z alertu: {sl_price_from_alert}. Skorygowany, poprawny poziom SL: {sl_price}")
+        # --- KONIEC ZMIANY ---
 
         TARGET_RISK_USDT = Decimal("2.50")
-        TARGET_REWARD_USDT = Decimal("5.00")
         TAKER_FEE_RATE = Decimal("0.00055")
-        MIN_SL_DISTANCE_PERCENT = Decimal("0.0005")
 
         if entry_price <= 0:
             logger.error(f"[{symbol}] Cena wejścia jest nieprawidłowa: {entry_price}. Przerywam.")
@@ -72,13 +65,6 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
         sl_distance_percentage = abs(entry_price - sl_price) / entry_price
         if sl_distance_percentage == 0:
             logger.error(f"[{symbol}] Odległość SL wynosi zero. Przerywam.")
-            return None, None, None
-            
-        if sl_distance_percentage < MIN_SL_DISTANCE_PERCENT:
-            logger.warning(
-                f"[{symbol}] Zlecenie odrzucone. Odległość SL ({sl_distance_percentage:.4%}) "
-                f"jest mniejsza niż wymagane minimum ({MIN_SL_DISTANCE_PERCENT:.4%})."
-            )
             return None, None, None
             
         total_cost_percentage = sl_distance_percentage + (TAKER_FEE_RATE * 2)
@@ -94,15 +80,8 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
             logger.error(f"[{symbol}] Po zaokrągleniu ilość (qty) wynosi zero. Zwiększ ryzyko lub wybierz inny setup.")
             return None, None, None
             
-        actual_notional_value = formatted_qty * entry_price
-        actual_fees_usdt = actual_notional_value * TAKER_FEE_RATE * 2
-        target_gross_profit_usdt = TARGET_REWARD_USDT + actual_fees_usdt
-        price_change_for_tp = target_gross_profit_usdt / formatted_qty
-        
-        if alert_data.direction == "LONG":
-            take_profit_price = entry_price + price_change_for_tp
-        else:
-            take_profit_price = entry_price - price_change_for_tp
+        take_profit_price = Decimal(str(alert_data.tp_2_0))
+        logger.info(f"[{symbol}] Używam poziomu TP z alertu (tp_2_0): {take_profit_price}")
             
         order_params = {
             "symbol": symbol, "side": alert_data.direction, "price": format_price(float(entry_price), str(tick_size)),
@@ -110,10 +89,12 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
             "takeProfit": format_price(float(take_profit_price), str(tick_size)), "stopLoss": format_price(float(sl_price), str(tick_size))
         }
         
+        actual_notional_value = formatted_qty * entry_price
         logger.info(f"[{symbol}] [Finalne Zlecenie] Wartość Nominalna: ~{actual_notional_value:.2f} USDT, Ilość (Qty): {formatted_qty}.")
         order_id = bybit_executor.place_limit_order(order_params)
         
         if order_id:
+            # Zwracamy oryginalny, ale poprawnie zwalidowany sl_price
             return order_id, take_profit_price, sl_price
         else:
             return None, None, None
