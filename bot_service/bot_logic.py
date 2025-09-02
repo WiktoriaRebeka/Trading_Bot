@@ -236,7 +236,9 @@ def run_trading_logic(bybit_executor: BybitExecutor):
 
             if entry_triggered:
                 logger.info(f"--- [DECYZJA: PONOWNE WEJŚCIE] --- [{symbol}] | Cena: {entry_level} | Przekazuję do ponownego przetworzenia.")
-                alert_data_dict = setup.alert_data.model_dump()
+                # --- KLUCZOWA ZMIANA ---
+                alert_data_dict = setup.alert_data.model_dump(by_alias=True)
+                # --- KONIEC ZMIANY ---
                 alert_data_dict['id'] = f"re-entry-{setup_doc.id}"
                 alerts_to_reprocess.append(alert_data_dict)
 
