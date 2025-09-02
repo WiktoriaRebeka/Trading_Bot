@@ -59,8 +59,8 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
             logger.error(f"[{symbol}] BŁĄD WALIDACJI: Nielogiczny poziom SL. Zlecenie odrzucone.")
             return None, None, None
 
-        # --- NOWY FILTR: Minimalna odległość SL 0.1% ---
-        MIN_SL_DISTANCE_PERCENT = Decimal("0.001") # 0.1%
+        # --- NOWY FILTR: Minimalna odległość SL 0.2% ---
+        MIN_SL_DISTANCE_PERCENT = Decimal("0.002") # 0.2%
 
         if entry_price <= 0:
             logger.error(f"[{symbol}] BŁĄD KRYTYCZNY: Cena wejścia jest zerowa lub ujemna. Przerywam.")

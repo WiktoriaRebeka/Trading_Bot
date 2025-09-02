@@ -1,19 +1,18 @@
-# Lokalizacja: collector_service/data_collector.py
-
 import logging
 import asyncio
 import aiohttp
 from typing import List, Dict, Any, Optional
 
 from shared_lib import constants
-from shared_lib.firebase_client import get_db, get_symbols_to_watch_from_config
+from shared_lib.firebase_client import get_db
 
 logger = logging.getLogger(__name__)
 
 async def _fetch_kline_for_symbol(session: aiohttp.ClientSession, symbol: str, cycle_id: str) -> Optional[Dict[str, Any]]:
-    """Pobiera najnowszą świecę dla danego symbolu, logując z cycle_id."""
+    """Pobiera najnowszą, zamkniętą świecę 5-minutową dla danego symbolu."""
     api_symbol = symbol.replace('.P', '')
-    params = {"category": "linear", "symbol": api_symbol, "interval": "1", "limit": 2}
+    # --- ZMIANA: Zawsze prosimy o 2 świece, aby mieć pewność, że bierzemy ostatnią zamkniętą ---
+    params = {"category": "linear", "symbol": api_symbol, "interval": "5", "limit": 2}
     max_retries = 3
     
     log_extra = {"json_fields": {"cycle_id": cycle_id, "symbol": symbol}}
@@ -27,14 +26,22 @@ async def _fetch_kline_for_symbol(session: aiohttp.ClientSession, symbol: str, c
                 data = await response.json()
                 if data.get("retCode") == 0 and data.get("result") and data["result"].get("list"):
                     kline_list = data["result"]["list"]
-                    target_kline = kline_list[1] if len(kline_list) > 1 else kline_list[0]
-                    return {
-                        "symbol": symbol, 
-                        "high": float(target_kline[2]), 
-                        "low": float(target_kline[3]), 
-                        "close": float(target_kline[4]), 
-                        "timestamp": int(target_kline[0]) # 
-                    }
+                    
+                    # --- KLUCZOWA ZMIANA: Logika wyboru świecy ---
+                    # Bierzemy przedostatnią świecę (indeks 1), która jest ostatnią w pełni zamkniętą.
+                    # Jeśli API zwróci tylko jedną, logujemy ostrzeżenie, ale jej nie używamy.
+                    if len(kline_list) > 1:
+                        target_kline = kline_list[1] # Zawsze bierzemy przedostatnią
+                        return {
+                            "symbol": symbol, 
+                            "high": float(target_kline[2]), 
+                            "low": float(target_kline[3]), 
+                            "close": float(target_kline[4]), 
+                            "timestamp": int(target_kline[0])
+                        }
+                    else:
+                        logger.warning(f"API Bybit zwróciło tylko jedną świecę (prawdopodobnie bieżącą). Pomijam zapis, aby zapewnić spójność danych.", extra=log_extra)
+                        return None # Nie zwracamy nic, jeśli nie mamy pewności
                 else:
                     logger.warning(f"API Bybit zwróciło błąd: {data.get('retMsg', 'Brak wiadomości')}", extra=log_extra)
         except Exception as e:
@@ -54,6 +61,7 @@ async def get_latest_klines_for_all_symbols(symbols_to_watch: List[str], cycle_i
         return {}
         
     async with aiohttp.ClientSession() as session:
+        # --- ZMIANA: Usunięto import, który nie jest już potrzebny w tej funkcji ---
         tasks = [_fetch_kline_for_symbol(session, symbol, cycle_id) for symbol in symbols_to_watch]
         results = await asyncio.gather(*tasks, return_exceptions=True)
     
@@ -92,6 +100,9 @@ async def run_data_collection_cycle(cycle_id: str) -> (str, int):
     Główna funkcja cyklu kolektora: pobiera listę symboli, pobiera dla nich dane
     i zapisuje je do cache'u w Firestore.
     """
+    # --- ZMIANA: Usunięto import, który nie jest już potrzebny w tej funkcji ---
+    from shared_lib.firebase_client import get_symbols_to_watch_from_config
+    
     log_extra = {"json_fields": {"cycle_id": cycle_id}}
     
     symbols_to_watch = get_symbols_to_watch_from_config()
