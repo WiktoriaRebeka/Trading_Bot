@@ -1,6 +1,6 @@
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from decimal import Decimal, ROUND_DOWN
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -24,9 +24,6 @@ from bot_service.bybit_executor import BybitExecutor
 logger = logging.getLogger(__name__)
 
 def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecutor, alert_id: str = 'N/A') -> Tuple[Optional[str], Optional[Decimal]]:
-    """
-    Przygotowuje i składa zlecenie, implementując precyzyjną strategię zarządzania ryzykiem.
-    """
     symbol = alert_data.symbol
     logger.info(f"[{symbol}] --- Rozpoczynam kalkulację ryzyka dla alertu {alert_id} ---")
     try:
@@ -155,8 +152,6 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups_docs: List[Dict[
             if not latest_kline: continue
             direction = setup.alert_data.direction
             entry_level = setup.alert_data.entry
-            sl_price = setup.alert_data.sl
-            tp_price = setup.alert_data.tp
             if setup.is_reset_needed_after_loss:
                 if (direction == 'LONG' and latest_kline.high > entry_level) or \
                    (direction == 'SHORT' and latest_kline.low < entry_level):
@@ -166,38 +161,20 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups_docs: List[Dict[
             entry_triggered = (direction == 'LONG' and latest_kline.low <= entry_level) or \
                               (direction == 'SHORT' and latest_kline.high >= entry_level)
             if entry_triggered:
-                closed_result, close_price = None, None
-                if direction == 'LONG':
-                    if latest_kline.low <= sl_price: closed_result, close_price = "LOSE", sl_price
-                    elif latest_kline.high >= tp_price: closed_result, close_price = "WIN", tp_price
-                elif direction == 'SHORT':
-                    if latest_kline.high >= sl_price: closed_result, close_price = "LOSE", sl_price
-                    elif latest_kline.low <= tp_price: closed_result, close_price = "WIN", tp_price
                 ob_type = "Fresh OB" if setup.entry_attempts == 0 else "Used OB"
-                if closed_result:
+                logger.info(f"--- [DECYZJA: WEJŚCIE {ob_type}] --- [{symbol}] | Cena: {entry_level} | Rozpoczynam proces składania zlecenia.")
+                order_id, new_tp_price = _prepare_and_place_order(setup.alert_data, bybit_executor)
+                if order_id and new_tp_price:
                     trade_id = str(uuid.uuid4())
-                    logger.info(f"--- [WEJŚCIE I ZAMKNIĘCIE W 1 MIN] --- [{symbol}] | Wynik: {closed_result} | ID: {trade_id}")
-                    finalize_trade(None, closed_result, close_price)
-                    try:
-                        db = get_db()
-                        transaction = db.transaction()
-                        state_manager.update_setup_after_immediate_close_transactional(transaction, symbol, is_loss=(closed_result == "LOSE"))
-                    except Exception as ex:
-                        logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD TRANSAKCJI: {ex}", exc_info=True)
+                    logger.info(f"[{symbol}] Zlecenie pomyślnie wysłane. Tworzę dokument w open_trades z trade_id: {trade_id} i bybit_order_id: {order_id}")
+                    state_manager.create_open_trade(
+                        trade_id=trade_id, symbol=symbol, direction=direction, ob_type=ob_type,
+                        entry_price=entry_level, sl_price=setup.alert_data.sl, 
+                        tp_price=float(new_tp_price),
+                        alert_data=setup.alert_data, bybit_order_id=order_id
+                    )
                 else:
-                    logger.info(f"--- [DECYZJA: WEJŚCIE {ob_type}] --- [{symbol}] | Cena: {entry_level} | Rozpoczynam proces składania zlecenia.")
-                    order_id, new_tp_price = _prepare_and_place_order(setup.alert_data, bybit_executor)
-                    if order_id and new_tp_price:
-                        trade_id = str(uuid.uuid4())
-                        logger.info(f"[{symbol}] Zlecenie pomyślnie wysłane. Tworzę dokument w open_trades z trade_id: {trade_id} i bybit_order_id: {order_id}")
-                        state_manager.create_open_trade(
-                            trade_id=trade_id, symbol=symbol, direction=direction, ob_type=ob_type,
-                            entry_price=entry_level, sl_price=sl_price, 
-                            tp_price=float(new_tp_price),
-                            alert_data=setup.alert_data, bybit_order_id=order_id
-                        )
-                    else:
-                        logger.error(f"[{symbol}] Nie udało się uzyskać ID zlecenia od Bybit.")
+                    logger.error(f"[{symbol}] Nie udało się uzyskać ID zlecenia od Bybit.")
         except ValidationError as e:
             logger.error(f"Błąd walidacji danych setupu dla {symbol}: {e}")
         except Exception as e:
@@ -205,8 +182,7 @@ def _handle_setups(klines_data: Dict[str, Kline], active_setups_docs: List[Dict[
 
 def finalize_trade(trade: Optional[OpenTradeData], closed_result: str, close_price: float):
     """
-    Funkcja-zaślepka. Wcześniej tworzyła 'ducha'. Teraz nie robi nic.
-    Logika P&L została przeniesiona do _handle_manage_open_trades.
+    Funkcja-zaślepka. Logika P&L została przeniesiona do sync_pnl_history.
     """
     symbol = trade.symbol if trade else "N/A"
     trade_id = trade.trade_id if trade else "N/A"
@@ -225,62 +201,81 @@ def _handle_manage_open_trades(klines_data: Dict[str, Kline], open_trades_docs: 
             if not latest_kline:
                 logger.warning(f"[{trade_id}] Brak danych kline dla {trade.symbol}. Pomijam.")
                 continue
-            closed_result, close_price, close_reason = None, None, None
-            if trade.direction == 'LONG':
-                if latest_kline.low <= trade.sl_price: 
-                    closed_result, close_price, close_reason = "LOSE", trade.sl_price, "STOP_LOSS"
-                elif latest_kline.high >= trade.tp_price: 
-                    closed_result, close_price, close_reason = "WIN", trade.tp_price, "TAKE_PROFIT"
-            elif trade.direction == 'SHORT':
-                if latest_kline.high >= trade.sl_price: 
-                    closed_result, close_price, close_reason = "LOSE", trade.sl_price, "STOP_LOSS"
-                elif latest_kline.low <= trade.tp_price: 
-                    closed_result, close_price, close_reason = "WIN", trade.tp_price, "TAKE_PROFIT"
-            if closed_result:
-                logger.info(f"--- [DECYZJA: ZAMKNIĘCIE] --- [{trade.symbol}] | ID: {trade_id} | Wynik: {closed_result}")
-                logger.info(f"[{trade_id}] Pozycja oznaczona jako zamknięta. Próbuję pobrać dane P&L z Bybit...")
-                pnl_data_from_bybit = bybit_executor.get_last_closed_pnl(trade.symbol)
-                if pnl_data_from_bybit:
-                    logger.info(f"[{trade_id}] Pomyślnie pobrano dane P&L z Bybit: {pnl_data_from_bybit}")
-                    real_pnl = pnl_data_from_bybit['closed_pnl']
-                    planned_risk_usdt = 2.50
-                    realized_rr = 0.0
-                    if closed_result == "WIN" and planned_risk_usdt > 0:
-                        realized_rr = real_pnl / planned_risk_usdt
-                    bq_pnl_data = {
-                        "trade_id": trade.trade_id, "bybit_order_id": trade.bybit_order_id, "symbol": trade.symbol,
-                        "direction": trade.direction, "entry_price_planned": trade.entry_price, "stop_loss_price": trade.sl_price,
-                        "realized_pnl_usdt": real_pnl, "commission_usdt": None, "final_result": closed_result,
-                        "realized_rr": round(realized_rr, 4), "timestamp_entry": datetime.fromtimestamp(trade.opened_at_ms / 1000, tz=timezone.utc),
-                        "timestamp_close": datetime.fromtimestamp(pnl_data_from_bybit['updated_time'] / 1000, tz=timezone.utc),
-                        "close_reason": close_reason,
-                    }
-                    logger.info(f"[{trade_id}] Przygotowano dane do zapisu w BigQuery. Wywołuję pnl_logger...")
-                    log_realized_trade(bq_pnl_data)
-                else:
-                    logger.error(f"[{trade_id}] KRYTYCZNY BŁĄD: Nie udało się pobrać danych P&L z Bybit! Zapis do tabeli 'realized_trades_pnl' nie zostanie wykonany.")
-                finalize_trade(trade, closed_result, close_price)
-                try:
-                    db = get_db()
-                    transaction = db.transaction()
-                    state_manager.close_trade_transactional(transaction, trade.trade_id, trade.symbol, is_loss=(closed_result == "LOSE"))
-                    logger.info(f"[{trade_id}] Transakcja zamknięcia pozycji zakończona.")
-                except Exception as ex:
-                    logger.critical(f"[{trade_id}] KRYTYCZNY BŁĄD TRANSAKCJI ZAMKNIĘCIA: {ex}", exc_info=True)
+            
+            # Ta funkcja już nie podejmuje decyzji o zamknięciu.
+            # Zostawiamy ją pustą, ponieważ prawdziwe zamknięcie jest obsługiwane przez sync_pnl_history.
+            # W przyszłości można tu dodać logikę np. przesuwania SL.
+            pass
+
         except ValidationError as e:
             logger.error(f"Błąd walidacji danych otwartej pozycji {trade_id}: {e}")
         except Exception as e:
             logger.error(f"Nieoczekiwany błąd podczas monitorowania pozycji {trade_id}: {e}", exc_info=True)
 
+def sync_pnl_history(bybit_executor: BybitExecutor):
+    logger.info("--- ROZPOCZĘCIE CYKLU SYNCHRONIZACJI P&L ---")
+    
+    all_trades_in_db_docs = list(state_manager.get_all_open_trades())
+    all_trades_in_db = [doc.to_dict() for doc in all_trades_in_db_docs]
+    symbols_to_check = {trade['symbol'] for trade in all_trades_in_db}
+    
+    if not symbols_to_check:
+        logger.info("Brak otwartych transakcji w bazie do synchronizacji P&L. Kończę synchronizację.")
+        return
+
+    last_sync_ts_ms = state_manager.load_last_pnl_sync_timestamp()
+    newest_processed_ts = last_sync_ts_ms
+
+    for symbol in symbols_to_check:
+        closed_positions = bybit_executor.get_closed_pnl_since(symbol, start_time_ms=last_sync_ts_ms)
+        
+        for position_data in closed_positions:
+            try:
+                real_pnl = float(position_data.get("closedPnl", 0.0))
+                closed_time_ms = int(position_data.get("updatedTime", 0))
+                
+                trade_in_db = next((t for t in all_trades_in_db if t.get('symbol') == symbol), None)
+                
+                if not trade_in_db:
+                    logger.warning(f"[{symbol}] Znaleziono zamkniętą pozycję w Bybit, ale brak jej odpowiednika w 'open_trades'. Może to być transakcja ręczna. Pomijam.")
+                    continue
+
+                final_result = "WIN" if real_pnl > 0 else "LOSE"
+                
+                planned_risk_usdt = 2.50
+                realized_rr = 0.0
+                if final_result == "WIN" and planned_risk_usdt > 0:
+                    realized_rr = real_pnl / planned_risk_usdt
+
+                bq_pnl_data = {
+                    "trade_id": trade_in_db['trade_id'], "bybit_order_id": trade_in_db['bybit_order_id'], "symbol": symbol,
+                    "direction": trade_in_db['direction'], "entry_price_planned": trade_in_db['entry_price'], "stop_loss_price": trade_in_db['sl_price'],
+                    "realized_pnl_usdt": real_pnl, "commission_usdt": None, "final_result": final_result,
+                    "realized_rr": round(realized_rr, 4), "timestamp_entry": datetime.fromtimestamp(trade_in_db['opened_at_ms'] / 1000, tz=timezone.utc),
+                    "timestamp_close": datetime.fromtimestamp(closed_time_ms / 1000, tz=timezone.utc),
+                    "close_reason": "CLOSED_ON_BYBIT",
+                }
+                
+                log_realized_trade(bq_pnl_data)
+                state_manager.delete_open_trade(trade_in_db['trade_id'])
+                
+                if closed_time_ms > newest_processed_ts:
+                    newest_processed_ts = closed_time_ms
+
+            except Exception as e:
+                logger.error(f"[{symbol}] Błąd podczas przetwarzania rekordu P&L: {e}", exc_info=True)
+
+    state_manager.save_last_pnl_sync_timestamp(newest_processed_ts)
+    logger.info("--- ZAKOŃCZONO CYKL SYNCHRONIZACJI P&L ---")
+
 def run_trading_logic(bybit_executor: BybitExecutor):
-    logger.info("--- ROZPOCZYNAM GŁÓWNĄ PĘTLĘ LOGIKI ---")
+    logger.info("--- ROZPOCZYNAM GŁÓWNĄ PĘTLĘ LOGIKI (TRYB UPROSZCZONY) ---")
     
-    symbols_to_watch = set(get_symbols_to_watch_from_config())
-    active_setups = {doc.id: doc.to_dict() for doc in state_manager.get_all_active_setups()}
-    open_trades = {doc.to_dict()['symbol']: doc.to_dict() for doc in list(state_manager.get_all_open_trades())}
+    active_setups_docs = list(state_manager.get_all_active_setups())
+    open_trades_docs = list(state_manager.get_all_open_trades())
     
-    symbols_to_watch.update(active_setups.keys(), open_trades.keys())
-    valid_symbols = {s for s in symbols_to_watch if isinstance(s, str) and s}
+    symbols_to_check = {doc.id for doc in active_setups_docs} | {doc.to_dict()['symbol'] for doc in open_trades_docs}
+    valid_symbols = {s for s in symbols_to_check if isinstance(s, str) and s}
 
     if not valid_symbols:
         logger.info("Brak symboli do monitorowania. Kończę cykl.")
@@ -293,24 +288,17 @@ def run_trading_logic(bybit_executor: BybitExecutor):
 
     for symbol in valid_symbols:
         try:
-            latest_kline = klines_data.get(symbol)
-            if not latest_kline:
-                continue
-
             if bybit_executor.has_open_position(symbol):
-                logger.info(f"[{symbol}] Wykryto aktywną pozycję na giełdzie.")
-                trade_data = open_trades.get(symbol)
-                if trade_data:
-                    _handle_manage_open_trades(klines_data, [trade_data], bybit_executor)
-                else:
-                    logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Wykryto pozycję na giełdzie, ale brak jej w bazie 'open_trades'!")
+                # Jeśli jest pozycja, nie robimy nic. 'sync_pnl_history' zajmie się jej rozliczeniem po zamknięciu.
+                logger.info(f"[{symbol}] Pozycja jest aktywna. Pomijam sprawdzanie setupu.")
                 continue
 
-            setup_data = active_setups.get(symbol)
-            if setup_data:
-                _handle_setups(klines_data, [setup_data], bybit_executor)
+            # Jeśli nie ma aktywnej pozycji, sprawdzamy, czy jest setup do wejścia.
+            setup_doc = next((doc for doc in active_setups_docs if doc.id == symbol), None)
+            if setup_doc:
+                _handle_setups(klines_data, [setup_doc.to_dict()], bybit_executor)
 
         except Exception as e:
-            logger.error(f"[{symbol}] Nieoczekiwany błąd podczas przetwarzania symbolu: {e}", exc_info=True)
+            logger.error(f"[{symbol}] Nieoczekiwany błąd podczas przetwarzania symbolu w run_trading_logic: {e}", exc_info=True)
 
     logger.info("--- ZAKOŃCZONO GŁÓWNĄ PĘTLĘ LOGIKI ---")
