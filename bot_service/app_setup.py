@@ -3,6 +3,8 @@ import uuid
 from flask import Flask, jsonify
 from typing import Optional, Tuple
 
+from bot_service.pnl_logger import initialize_pnl_logger
+
 from shared_lib.config_loader import load_config
 from shared_lib.firebase_client import initialize_firebase
 from shared_lib.config import config 
@@ -47,21 +49,22 @@ def initialize_app_services(app: Flask):
         load_config()
         
         firebase_ok = initialize_firebase()
-        # ZMIANA: Całkowicie usunięto inicjalizację starego BigQuery loggera
+        # ZMIANA: Wywołujemy nową funkcję inicjalizującą
+        pnl_logger_ok = initialize_pnl_logger()
         trading_services_ok, executor = initialize_trading_services()
         
         if executor:
             app.config['BYBIT_EXECUTOR'] = executor
        
-        # ZMIANA: Zaktualizowano warunek, usuwając 'bigquery_ok'
-        if firebase_ok and trading_services_ok:
+        # ZMIANA: Dodano 'pnl_logger_ok' do warunku
+        if firebase_ok and pnl_logger_ok and trading_services_ok:
             app.config['INITIALIZATION_SUCCESS'] = True
             logger.info("Wszystkie kluczowe usługi zainicjalizowane. Aplikacja gotowa do startu.")
         else:
             app.config['INITIALIZATION_SUCCESS'] = False
             reasons = []
             if not firebase_ok: reasons.append("Firebase failed")
-            # Usunięto sprawdzanie BigQuery
+            if not pnl_logger_ok: reasons.append("PNL Logger (BigQuery) failed")
             if not trading_services_ok: reasons.append("BybitExecutor failed")
             final_reason = ", ".join(reasons)
             app.config['INITIALIZATION_FAILURE_REASON'] = final_reason
