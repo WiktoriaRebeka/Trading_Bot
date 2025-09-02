@@ -5,7 +5,7 @@ import time
 import hmac
 import hashlib
 import json
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List 
 from urllib.parse import urlencode
 from decimal import Decimal, ROUND_DOWN
 import requests
