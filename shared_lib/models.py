@@ -22,7 +22,7 @@ class AlertData(BaseModel):
     tp_5_0: float
     
     class Config:
-        allow_population_by_field_name = True
+        populate_by_name = True  # ZMIANA Z 'allow_population_by_field_name'
         extra = 'ignore'
 
     @validator('direction', pre=True, always=True)
