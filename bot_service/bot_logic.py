@@ -2,7 +2,7 @@
 
 import logging
 import uuid
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from decimal import Decimal, ROUND_DOWN
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -10,7 +10,7 @@ from google.cloud import firestore
 from pydantic import ValidationError
 
 from shared_lib import constants
-from shared_lib.firebase_client import get_db, get_symbols_to_watch_from_config
+from shared_lib.firebase_client import get_db
 from shared_lib.leverage_calculator import format_price
 from shared_lib.models import (
     AlertData,
@@ -122,9 +122,12 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
         logger.critical(f"[{symbol}] Nieoczekiwany, krytyczny błąd w logice przygotowywania zlecenia dla alertu {alert_id}: {e}", exc_info=True)
         return None, None, None
 
-def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executor: BybitExecutor):
+def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executor: BybitExecutor, is_reprocessing: bool = False):
     if not newly_fetched_alerts: return
-    logger.info(f"Rozpoczynam przetwarzanie {len(newly_fetched_alerts)} nowych alertów.")
+    
+    log_message = f"Rozpoczynam ponowne przetwarzanie {len(newly_fetched_alerts)} alertów z aktywnych setupów." if is_reprocessing else f"Rozpoczynam przetwarzanie {len(newly_fetched_alerts)} nowych alertów."
+    logger.info(log_message)
+
     db = get_db()
     for alert_dict in newly_fetched_alerts:
         alert_id = alert_dict.get('id', 'N/A')
@@ -132,43 +135,54 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executo
         try:
             alert_data = AlertData.model_validate(alert_dict)
             symbol = alert_data.symbol
-            transaction = db.transaction()
-            setup_ref = db.collection(constants.SETUP_COLLECTION).document(symbol)
-            @firestore.transactional
-            def _process_alert_transaction(transaction, alert_data):
+            
+            # Dla ponownych wejść nie wykonujemy transakcji w Firestore, bo setup już istnieje
+            if is_reprocessing:
                 if bybit_executor.has_open_position(alert_data.symbol):
-                    logger.warning(f"[{alert_data.symbol}] ZABEZPIECZENIE GIEŁDOWE: Wykryto aktywną pozycję. Ignoruję alert {alert_id}.")
-                    return "SKIP_HAS_POSITION"
-                setup_snapshot = setup_ref.get(transaction=transaction)
-                if setup_snapshot.exists:
-                    existing_setup = setup_snapshot.to_dict()
-                    if existing_setup.get('alert_data', {}).get('timestamp') == alert_data.timestamp:
-                        logger.info(f"[{alert_data.symbol}] Alert {alert_id} jest już przetwarzany lub został przetworzony. Ignoruję.")
-                        return "SKIP_DUPLICATE"
-                logger.info(f"--- [{alert_data.symbol}][Alert: {alert_id}] Wykryto nowy, unikalny setup. Rozpoczynam cykl wejścia. ---")
+                    logger.warning(f"[{alert_data.symbol}] ZABEZPIECZENIE GIEŁDOWE: Wykryto aktywną pozycję. Ignoruję ponowne wejście.")
+                    continue
                 if not bybit_executor.cancel_all_open_orders_for_symbol(alert_data.symbol):
-                    raise RuntimeError("Nie udało się wyczyścić zleceń oczekujących na giełdzie.")
-                open_trade_for_symbol = state_manager.get_open_trade_by_symbol(alert_data.symbol)
-                if open_trade_for_symbol:
-                    trade_id_to_delete = open_trade_for_symbol.get('trade_id')
-                    logger.info(f"[{alert_data.symbol}] Usuwam stary wpis zlecenia oczekującego {trade_id_to_delete} z bazy.")
-                    db.collection(constants.TRADE_COLLECTION).document(trade_id_to_delete).delete()
-                new_setup_data = {
-                    "alert_data": alert_data.model_dump(by_alias=True), "is_position_open_on_this_setup": False,
-                    "is_reset_needed_after_loss": False, "entry_attempts": 0, "updated_at": firestore.SERVER_TIMESTAMP
-                }
-                transaction.set(setup_ref, new_setup_data)
-                return "PROCEED"
-            result = _process_alert_transaction(transaction, alert_data)
-            if result != "PROCEED": continue
+                    raise RuntimeError("Nie udało się wyczyścić zleceń oczekujących na giełdzie przed ponownym wejściem.")
+            else:
+                transaction = db.transaction()
+                setup_ref = db.collection(constants.SETUP_COLLECTION).document(symbol)
+                @firestore.transactional
+                def _process_alert_transaction(transaction, alert_data):
+                    if bybit_executor.has_open_position(alert_data.symbol):
+                        logger.warning(f"[{alert_data.symbol}] ZABEZPIECZENIE GIEŁDOWE: Wykryto aktywną pozycję. Ignoruję alert {alert_id}.")
+                        return "SKIP_HAS_POSITION"
+                    setup_snapshot = setup_ref.get(transaction=transaction)
+                    if setup_snapshot.exists:
+                        existing_setup = setup_snapshot.to_dict()
+                        if existing_setup.get('alert_data', {}).get('timestamp') == alert_data.timestamp:
+                            logger.info(f"[{alert_data.symbol}] Alert {alert_id} jest już przetwarzany lub został przetworzony. Ignoruję.")
+                            return "SKIP_DUPLICATE"
+                    logger.info(f"--- [{alert_data.symbol}][Alert: {alert_id}] Wykryto nowy, unikalny setup. Rozpoczynam cykl wejścia. ---")
+                    if not bybit_executor.cancel_all_open_orders_for_symbol(alert_data.symbol):
+                        raise RuntimeError("Nie udało się wyczyścić zleceń oczekujących na giełdzie.")
+                    open_trade_for_symbol = state_manager.get_open_trade_by_symbol(alert_data.symbol)
+                    if open_trade_for_symbol:
+                        trade_id_to_delete = open_trade_for_symbol.get('trade_id')
+                        logger.info(f"[{alert_data.symbol}] Usuwam stary wpis zlecenia oczekującego {trade_id_to_delete} z bazy.")
+                        db.collection(constants.TRADE_COLLECTION).document(trade_id_to_delete).delete()
+                    new_setup_data = {
+                        "alert_data": alert_data.model_dump(by_alias=True), "is_position_open_on_this_setup": False,
+                        "is_reset_needed_after_loss": False, "entry_attempts": 0, "updated_at": firestore.SERVER_TIMESTAMP
+                    }
+                    transaction.set(setup_ref, new_setup_data)
+                    return "PROCEED"
+                result = _process_alert_transaction(transaction, alert_data)
+                if result != "PROCEED": continue
+
             logger.info(f"[{symbol}] Giełda i baza danych są czyste. Składam nowe zlecenie.")
             
             order_id, new_tp_price, corrected_sl_price = _prepare_and_place_order(alert_data, bybit_executor, alert_id)
             
             if order_id and new_tp_price and corrected_sl_price:
                 trade_id = str(uuid.uuid4())
+                ob_type = "Re-entry" if is_reprocessing else "New Alert"
                 state_manager.create_open_trade(
-                    trade_id=trade_id, symbol=symbol, direction=alert_data.direction, ob_type="New Alert",
+                    trade_id=trade_id, symbol=symbol, direction=alert_data.direction, ob_type=ob_type,
                     entry_price=alert_data.entry, sl_price=float(corrected_sl_price), tp_price=float(new_tp_price), 
                     alert_data=alert_data, bybit_order_id=order_id
                 )
@@ -178,121 +192,66 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executo
         except Exception as e:
             logger.critical(f"[{symbol}] Nieoczekiwany błąd w głównej pętli alertu {alert_id}: {e}", exc_info=True)
 
-def _handle_setups(klines_data: Dict[str, Kline], active_setups_docs: List[Dict[str, Any]], bybit_executor: BybitExecutor):
-    if not active_setups_docs: return
-    logger.info(f"Sprawdzam {len(active_setups_docs)} aktywnych setupów (z głównej pętli logiki).")
+def run_trading_logic(bybit_executor: BybitExecutor):
+    logger.info("--- ROZPOCZYNAM GŁÓWNĄ PĘTLĘ LOGIKI ---")
+    
+    active_setups_docs = list(state_manager.get_all_active_setups())
+    if not active_setups_docs:
+        logger.info("Brak aktywnych setupów do monitorowania. Kończę pętlę logiki.")
+        return
+
+    symbols_with_setups = {doc.id for doc in active_setups_docs}
+    klines_data = {
+        symbol: Kline.model_validate(data) 
+        for symbol, data in state_manager.get_latest_klines_from_cache(list(symbols_with_setups)).items()
+    }
+    
+    alerts_to_reprocess = []
+
     for setup_doc in active_setups_docs:
-        symbol = setup_doc.get('alert_data', {}).get('symbol')
-        if not symbol: continue
+        symbol = setup_doc.id
         try:
-            setup = SetupData.model_validate(setup_doc)
-            if setup.is_position_open_on_this_setup: continue
+            setup = SetupData.model_validate(setup_doc.to_dict())
+            
+            if setup.is_position_open_on_this_setup or state_manager.get_open_trade_by_symbol(symbol):
+                continue
+
             latest_kline = klines_data.get(symbol)
-            if not latest_kline: continue
+            if not latest_kline:
+                logger.warning(f"[{symbol}] Brak danych kline dla aktywnego setupu. Pomijam.")
+                continue
+
             direction = setup.alert_data.direction
             entry_level = setup.alert_data.entry
+
             if setup.is_reset_needed_after_loss:
                 if (direction == 'LONG' and latest_kline.high > entry_level) or \
                    (direction == 'SHORT' and latest_kline.low < entry_level):
                     logger.info(f"[{symbol}] Warunek resetu ceny spełniony. Setup gotowy do nowego wejścia.")
                     state_manager.update_setup_after_price_reset(symbol)
                 continue
+
             entry_triggered = (direction == 'LONG' and latest_kline.low <= entry_level) or \
                               (direction == 'SHORT' and latest_kline.high >= entry_level)
+
             if entry_triggered:
-                ob_type = "Fresh OB" if setup.entry_attempts == 0 else "Used OB"
-                logger.info(f"--- [DECYZJA: WEJŚCIE {ob_type}] --- [{symbol}] | Cena: {entry_level} | Rozpoczynam proces składania zlecenia.")
-                order_id, new_tp_price = _prepare_and_place_order(setup.alert_data, bybit_executor)
-                if order_id and new_tp_price:
-                    trade_id = str(uuid.uuid4())
-                    logger.info(f"[{symbol}] Zlecenie pomyślnie wysłane. Tworzę dokument w open_trades z trade_id: {trade_id} i bybit_order_id: {order_id}")
-                    state_manager.create_open_trade(
-                        trade_id=trade_id, symbol=symbol, direction=direction, ob_type=ob_type,
-                        entry_price=entry_level, sl_price=setup.alert_data.sl, 
-                        tp_price=float(new_tp_price),
-                        alert_data=setup.alert_data, bybit_order_id=order_id
-                    )
-                else:
-                    logger.error(f"[{symbol}] Nie udało się uzyskać ID zlecenia od Bybit.")
+                logger.info(f"--- [DECYZJA: PONOWNE WEJŚCIE] --- [{symbol}] | Cena: {entry_level} | Przekazuję do ponownego przetworzenia.")
+                alert_data_dict = setup.alert_data.model_dump()
+                alert_data_dict['id'] = f"re-entry-{setup_doc.id}"
+                alerts_to_reprocess.append(alert_data_dict)
+
         except ValidationError as e:
             logger.error(f"Błąd walidacji danych setupu dla {symbol}: {e}")
         except Exception as e:
-            logger.error(f"Błąd podczas sprawdzania wejścia dla {symbol}: {e}", exc_info=True)
-
-def finalize_trade(trade: Optional[OpenTradeData], closed_result: str, close_price: float):
-    """
-    Funkcja-zaślepka. Logika P&L została przeniesiona do sync_pnl_history.
-    """
-    symbol = trade.symbol if trade else "N/A"
-    trade_id = trade.trade_id if trade else "N/A"
-    logger.info(f"--- [FINALIZACJA] --- [{symbol}] | ID: {trade_id} | Wynik: {closed_result}. Logika 'ducha' jest wyłączona.")
-    pass
-           
-def _handle_manage_open_trades(klines_data: Dict[str, Kline], open_trades_docs: List[Dict[str, Any]], bybit_executor: BybitExecutor):
-    if not open_trades_docs: return
-    logger.info(f"Zarządzam {len(open_trades_docs)} otwartymi pozycjami (z głównej pętli logiki).")
-    for trade_doc in open_trades_docs:
-        trade_id = trade_doc.get('trade_id')
-        if not trade_id: continue
-        try:
-            trade = OpenTradeData.model_validate(trade_doc)
-            latest_kline = klines_data.get(trade.symbol)
-            if not latest_kline:
-                logger.warning(f"[{trade_id}] Brak danych kline dla {trade.symbol}. Pomijam.")
-                continue
-            
-            # Ta funkcja już nie podejmuje decyzji o zamknięciu.
-            # Zostawiamy ją pustą, ponieważ prawdziwe zamknięcie jest obsługiwane przez sync_pnl_history.
-            # W przyszłości można tu dodać logikę np. przesuwania SL.
-            pass
-
-        except ValidationError as e:
-            logger.error(f"Błąd walidacji danych otwartej pozycji {trade_id}: {e}")
-        except Exception as e:
-            logger.error(f"Nieoczekiwany błąd podczas monitorowania pozycji {trade_id}: {e}", exc_info=True)
-
-def run_trading_logic(bybit_executor: BybitExecutor):
-    logger.info("--- ROZPOCZYNAM GŁÓWNĄ PĘTLĘ LOGIKI (TRYB UPROSZCZONY) ---")
-    
-    active_setups_docs = list(state_manager.get_all_active_setups())
-    open_trades_docs = list(state_manager.get_all_open_trades())
-    
-    symbols_to_check = {doc.id for doc in active_setups_docs} | {doc.to_dict()['symbol'] for doc in open_trades_docs}
-    valid_symbols = {s for s in symbols_to_check if isinstance(s, str) and s}
-
-    if not valid_symbols:
-        logger.info("Brak symboli do monitorowania. Kończę cykl.")
-        return
-
-    klines_data = {
-        symbol: Kline.model_validate(data) 
-        for symbol, data in state_manager.get_latest_klines_from_cache(list(valid_symbols)).items()
-    }
-
-    for symbol in valid_symbols:
-        try:
-            if bybit_executor.has_open_position(symbol):
-                # Jeśli jest pozycja, nie robimy nic. 'sync_pnl_history' zajmie się jej rozliczeniem po zamknięciu.
-                logger.info(f"[{symbol}] Pozycja jest aktywna. Pomijam sprawdzanie setupu.")
-                continue
-
-            # Jeśli nie ma aktywnej pozycji, sprawdzamy, czy jest setup do wejścia.
-            setup_doc = next((doc for doc in active_setups_docs if doc.id == symbol), None)
-            if setup_doc:
-                _handle_setups(klines_data, [setup_doc.to_dict()], bybit_executor)
-
-        except Exception as e:
             logger.error(f"[{symbol}] Nieoczekiwany błąd podczas przetwarzania symbolu w run_trading_logic: {e}", exc_info=True)
+
+    if alerts_to_reprocess:
+        logger.info(f"Znaleziono {len(alerts_to_reprocess)} setupów gotowych do ponownego wejścia. Uruchamiam dla nich logikę process_new_alerts.")
+        process_new_alerts(alerts_to_reprocess, bybit_executor, is_reprocessing=True)
 
     logger.info("--- ZAKOŃCZONO GŁÓWNĄ PĘTLĘ LOGIKI ---")
 
-
-
 def sync_pnl_history(bybit_executor: BybitExecutor):
-    """
-    Synchronizuje historię zamkniętych transakcji z Bybit i zapisuje je do BigQuery.
-    Działa jako niezależny "księgowy".
-    """
     logger.info("--- ROZPOCZĘCIE CYKLU SYNCHRONIZACJI P&L ---")
     
     all_trades_in_db_docs = list(state_manager.get_all_open_trades())
@@ -307,13 +266,11 @@ def sync_pnl_history(bybit_executor: BybitExecutor):
     newest_processed_ts = last_sync_ts_ms
 
     for symbol in symbols_to_check:
-        # Zwiększamy bufor o 1 sekundę, aby uniknąć problemów z precyzją timestampów
         closed_positions = bybit_executor.get_closed_pnl_since(symbol, start_time_ms=(last_sync_ts_ms - 1000))
         
         for position_data in closed_positions:
             try:
                 closed_time_ms = int(position_data.get("updatedTime", 0))
-                # Przetwarzamy tylko te pozycje, które są nowsze niż ostatnio zapisany timestamp
                 if closed_time_ms <= last_sync_ts_ms:
                     continue
 
@@ -353,7 +310,6 @@ def sync_pnl_history(bybit_executor: BybitExecutor):
             except Exception as e:
                 logger.error(f"[{symbol}] Błąd podczas przetwarzania rekordu P&L: {e}", exc_info=True)
 
-    # Zapisujemy nowy timestamp tylko wtedy, gdy faktycznie przetworzono nową transakcję
     if newest_processed_ts > last_sync_ts_ms:
         state_manager.save_last_pnl_sync_timestamp(newest_processed_ts)
         
