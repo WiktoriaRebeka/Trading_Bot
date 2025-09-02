@@ -33,56 +33,93 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
         if not instrument_info:
             logger.error(f"[{symbol}] Nie udało się pobrać informacji o instrumencie. Przerywam.")
             return None, None
+            
         tick_size = Decimal(instrument_info.get('tick_size'))
         qty_step = Decimal(instrument_info.get('qty_step'))
         min_order_qty = Decimal(instrument_info.get('min_order_qty'))
+        
         entry_price = Decimal(str(alert_data.entry))
-        sl_price = Decimal(str(alert_data.sl))
+        sl_price_from_alert = Decimal(str(alert_data.sl))
+        
+        price_distance = abs(entry_price - sl_price_from_alert)
+        
+        if alert_data.direction == "LONG":
+            corrected_sl_price = entry_price - price_distance
+            if corrected_sl_price >= entry_price:
+                logger.error(f"[{symbol}] Błąd logiki SL dla LONG. Cena SL ({corrected_sl_price}) musi być niższa niż cena wejścia ({entry_price}). Przerywam.")
+                return None, None
+        elif alert_data.direction == "SHORT":
+            corrected_sl_price = entry_price + price_distance
+            if corrected_sl_price <= entry_price:
+                logger.error(f"[{symbol}] Błąd logiki SL dla SHORT. Cena SL ({corrected_sl_price}) musi być wyższa niż cena wejścia ({entry_price}). Przerywam.")
+                return None, None
+        else:
+            logger.error(f"[{symbol}] Nieznany kierunek pozycji: {alert_data.direction}. Przerywam.")
+            return None, None
+        
+        sl_price = corrected_sl_price
+        logger.info(f"[{symbol}] Poziom SL z alertu: {sl_price_from_alert}. Skorygowany, poprawny poziom SL: {sl_price}")
+
         TARGET_RISK_USDT = Decimal("2.50")
         TARGET_REWARD_USDT = Decimal("5.00")
         TAKER_FEE_RATE = Decimal("0.00055")
         MIN_SL_DISTANCE_PERCENT = Decimal("0.0005")
+
         if entry_price <= 0:
             logger.error(f"[{symbol}] Cena wejścia jest nieprawidłowa: {entry_price}. Przerywam.")
             return None, None
+            
         sl_distance_percentage = abs(entry_price - sl_price) / entry_price
         if sl_distance_percentage == 0:
             logger.error(f"[{symbol}] Odległość SL wynosi zero. Przerywam.")
             return None, None
+            
         if sl_distance_percentage < MIN_SL_DISTANCE_PERCENT:
             logger.warning(
                 f"[{symbol}] Zlecenie odrzucone. Odległość SL ({sl_distance_percentage:.4%}) "
                 f"jest mniejsza niż wymagane minimum ({MIN_SL_DISTANCE_PERCENT:.4%})."
             )
             return None, None
+            
         total_cost_percentage = sl_distance_percentage + (TAKER_FEE_RATE * 2)
-        notional_value = TARGET_RISK_USDT / total_cost_percentage
-        target_qty = notional_value / entry_price
+        ideal_notional_value = TARGET_RISK_USDT / total_cost_percentage
+        target_qty = ideal_notional_value / entry_price
+        
         if target_qty < min_order_qty:
             logger.warning(f"[{symbol}] Zlecenie odrzucone. Obliczona ilość ({target_qty}) < minimum giełdowe ({min_order_qty}).")
             return None, None
+            
         formatted_qty = target_qty.quantize(qty_step, rounding=ROUND_DOWN)
         if formatted_qty <= 0:
             logger.error(f"[{symbol}] Po zaokrągleniu ilość (qty) wynosi zero. Zwiększ ryzyko lub wybierz inny setup.")
             return None, None
-        estimated_fees_usdt = notional_value * TAKER_FEE_RATE * 2
-        target_gross_profit_usdt = TARGET_REWARD_USDT + estimated_fees_usdt
+            
+        # --- KLUCZOWA ZMIANA: Obliczenia TP bazują na finalnej, rzeczywistej ilości ---
+        actual_notional_value = formatted_qty * entry_price
+        actual_fees_usdt = actual_notional_value * TAKER_FEE_RATE * 2
+        target_gross_profit_usdt = TARGET_REWARD_USDT + actual_fees_usdt
         price_change_for_tp = target_gross_profit_usdt / formatted_qty
+        # --- KONIEC ZMIANY ---
+        
         if alert_data.direction == "LONG":
             take_profit_price = entry_price + price_change_for_tp
         else:
             take_profit_price = entry_price - price_change_for_tp
+            
         order_params = {
             "symbol": symbol, "side": alert_data.direction, "price": format_price(float(entry_price), str(tick_size)),
             "qty": str(formatted_qty), "leverage": str(int(instrument_info.get('max_leverage', 1.0))),
             "takeProfit": format_price(float(take_profit_price), str(tick_size)), "stopLoss": format_price(float(sl_price), str(tick_size))
         }
-        logger.info(f"[{symbol}] [Finalne Zlecenie] Wartość Nominalna: ~{notional_value:.2f} USDT, Ilość (Qty): {formatted_qty}.")
+        
+        logger.info(f"[{symbol}] [Finalne Zlecenie] Wartość Nominalna: ~{actual_notional_value:.2f} USDT, Ilość (Qty): {formatted_qty}.")
         order_id = bybit_executor.place_limit_order(order_params)
+        
         if order_id:
             return order_id, take_profit_price
         else:
             return None, None
+            
     except Exception as e:
         logger.critical(f"[{symbol}] Nieoczekiwany, krytyczny błąd w logice przygotowywania zlecenia dla alertu {alert_id}: {e}", exc_info=True)
         return None, None
