@@ -27,11 +27,12 @@ logger = logging.getLogger(__name__)
 
 def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecutor, alert_id: str = 'N/A') -> Tuple[Optional[str], Optional[Decimal], Optional[Decimal]]:
     symbol = alert_data.symbol
-    logger.info(f"[{symbol}] --- Rozpoczynam kalkulację ryzyka dla alertu {alert_id} ---")
+    logger.info(f"[{symbol}] --- ETAP 1: Rozpoczęcie kalkulacji dla alertu {alert_id} ---")
     try:
+        # --- POBIERANIE DANYCH I WALIDACJA ---
         instrument_info = bybit_executor.get_instrument_info(symbol)
         if not instrument_info:
-            logger.error(f"[{symbol}] Nie udało się pobrać informacji o instrumencie. Przerywam.")
+            logger.error(f"[{symbol}] BŁĄD KRYTYCZNY: Nie udało się pobrać informacji o instrumencie. Przerywam.")
             return None, None, None
             
         tick_size = Decimal(instrument_info.get('tick_size'))
@@ -41,33 +42,42 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
         entry_price = Decimal(str(alert_data.entry))
         sl_price = Decimal(str(alert_data.sl))
         
-        # Twarda walidacja logiki SL
+        logger.info(f"[{symbol}] Dane wejściowe: Entry={entry_price}, SL={sl_price}, Kierunek={alert_data.direction}")
+
         if alert_data.direction == "LONG":
             if sl_price >= entry_price:
-                logger.error(f"[{symbol}] Zlecenie odrzucone. Dla pozycji LONG, cena SL ({sl_price}) musi być niższa niż cena wejścia ({entry_price}).")
+                logger.error(f"[{symbol}] BŁĄD WALIDACJI: Dla pozycji LONG, cena SL ({sl_price}) musi być niższa niż cena wejścia ({entry_price}). Zlecenie odrzucone.")
                 return None, None, None
         elif alert_data.direction == "SHORT":
             if sl_price <= entry_price:
-                logger.error(f"[{symbol}] Zlecenie odrzucone. Dla pozycji SHORT, cena SL ({sl_price}) musi być wyższa niż cena wejścia ({entry_price}).")
+                logger.error(f"[{symbol}] BŁĄD WALIDACJI: Dla pozycji SHORT, cena SL ({sl_price}) musi być wyższa niż cena wejścia ({entry_price}). Zlecenie odrzucone.")
                 return None, None, None
         else:
-            logger.error(f"[{symbol}] Nieznany kierunek pozycji: {alert_data.direction}. Przerywam.")
+            logger.error(f"[{symbol}] BŁĄD WALIDACJI: Nieznany kierunek pozycji: {alert_data.direction}. Przerywam.")
             return None, None, None
 
+        # --- OBLICZENIA RYZYKA I WIELKOŚCI POZYCJI ---
+        logger.info(f"[{symbol}] --- ETAP 2: Obliczanie wielkości pozycji dla ryzyka 2.50 USDT ---")
         TARGET_RISK_USDT = Decimal("2.50")
         TAKER_FEE_RATE = Decimal("0.00055")
 
         if entry_price <= 0:
-            logger.error(f"[{symbol}] Cena wejścia jest nieprawidłowa: {entry_price}. Przerywam.")
+            logger.error(f"[{symbol}] BŁĄD KRYTYCZNY: Cena wejścia jest nieprawidłowa: {entry_price}. Przerywam.")
             return None, None, None
             
         sl_distance_percentage = abs(entry_price - sl_price) / entry_price
         if sl_distance_percentage == 0:
-            logger.error(f"[{symbol}] Odległość SL wynosi zero. Przerywam.")
+            logger.error(f"[{symbol}] BŁĄD KRYTYCZNY: Odległość SL wynosi zero. Przerywam.")
             return None, None, None
+        
+        logger.info(f"[{symbol}] Obliczenia Ryzyka [1/3]: Odległość SL od wejścia = {sl_distance_percentage:.4%}")
             
         total_cost_percentage = sl_distance_percentage + (TAKER_FEE_RATE * 2)
+        logger.info(f"[{symbol}] Obliczenia Ryzyka [2/3]: Całkowity koszt (SL + 2x Fee) = {total_cost_percentage:.4%}")
+
         ideal_notional_value = TARGET_RISK_USDT / total_cost_percentage
+        logger.info(f"[{symbol}] Obliczenia Ryzyka [3/3]: Idealna wartość nominalna pozycji = {ideal_notional_value:.2f} USDT")
+
         target_qty = ideal_notional_value / entry_price
         
         if target_qty < min_order_qty:
@@ -76,13 +86,15 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
             
         formatted_qty = target_qty.quantize(qty_step, rounding=ROUND_DOWN)
         if formatted_qty <= 0:
-            logger.error(f"[{symbol}] Po zaokrągleniu ilość (qty) wynosi zero. Zwiększ ryzyko lub wybierz inny setup.")
+            logger.error(f"[{symbol}] BŁĄD KRYTYCZNY: Po zaokrągleniu ilość (qty) wynosi zero. Zwiększ ryzyko lub wybierz inny setup.")
             return None, None, None
-            
-        # --- KLUCZOWA ZMIANA: Użycie TP z alertu (tp_3_0) zamiast dynamicznej kalkulacji ---
+        
+        logger.info(f"[{symbol}] Finalna ilość (Qty) po zaokrągleniu do kroku '{qty_step}': {formatted_qty}")
+
+        # --- PRZYGOTOWANIE ZLECENIA ---
+        logger.info(f"[{symbol}] --- ETAP 3: Przygotowanie finalnych parametrów zlecenia ---")
         take_profit_price = Decimal(str(alert_data.tp_3_0))
-        logger.info(f"[{symbol}] Używam poziomu TP z alertu (tp_3_0): {take_profit_price}")
-        # --- KONIEC ZMIANY ---
+        logger.info(f"[{symbol}] Cel Take Profit pobrany z alertu (tp_3_0): {take_profit_price}")
             
         order_params = {
             "symbol": symbol, "side": alert_data.direction, "price": format_price(float(entry_price), str(tick_size)),
@@ -91,16 +103,21 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
         }
         
         actual_notional_value = formatted_qty * entry_price
-        logger.info(f"[{symbol}] [Finalne Zlecenie] Wartość Nominalna: ~{actual_notional_value:.2f} USDT, Ilość (Qty): {formatted_qty}.")
+        logger.info(f"[{symbol}] [PODSUMOWANIE] Wartość Nominalna: ~{actual_notional_value:.2f} USDT, Ilość (Qty): {formatted_qty}.")
+        
+        # --- WYSŁANIE ZLECENIA ---
+        logger.info(f"[{symbol}] --- ETAP 4: Wysyłanie zlecenia do Bybit ---")
         order_id = bybit_executor.place_limit_order(order_params)
         
         if order_id:
+            logger.info(f"[{symbol}] SUKCES: Zlecenie pomyślnie wysłane. Bybit Order ID: {order_id}")
             return order_id, take_profit_price, sl_price
         else:
+            logger.error(f"[{symbol}] PORAŻKA: Nie udało się wysłać zlecenia na giełdę.")
             return None, None, None
             
     except Exception as e:
-        logger.critical(f"[{symbol}] Nieoczekiwany, krytyczny błąd w logice przygotowywania zlecenia dla alertu {alert_id}: {e}", exc_info=True)
+        logger.critical(f"[{symbol}] KRYTYCZNY, NIEOCZEKIWANY BŁĄD w _prepare_and_place_order dla alertu {alert_id}: {e}", exc_info=True)
         return None, None, None
 
 def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executor: BybitExecutor, is_reprocessing: bool = False):
