@@ -270,13 +270,17 @@ def sync_pnl_history(bybit_executor: BybitExecutor):
     newest_processed_ts = last_sync_ts_ms
 
     for symbol in symbols_to_check:
-        closed_positions = bybit_executor.get_closed_pnl_since(symbol, start_time_ms=last_sync_ts_ms)
+        # Zwiększamy bufor o 1 sekundę, aby uniknąć problemów z precyzją timestampów
+        closed_positions = bybit_executor.get_closed_pnl_since(symbol, start_time_ms=(last_sync_ts_ms - 1000))
         
         for position_data in closed_positions:
             try:
-                real_pnl = float(position_data.get("closedPnl", 0.0))
                 closed_time_ms = int(position_data.get("updatedTime", 0))
-                
+                # Przetwarzamy tylko te pozycje, które są nowsze niż ostatnio zapisany timestamp
+                if closed_time_ms <= last_sync_ts_ms:
+                    continue
+
+                real_pnl = float(position_data.get("closedPnl", 0.0))
                 trade_in_db = next((t for t in all_trades_in_db if t.get('symbol') == symbol), None)
                 
                 if not trade_in_db:
@@ -288,19 +292,14 @@ def sync_pnl_history(bybit_executor: BybitExecutor):
                 
                 planned_risk_usdt = 2.50
                 realized_rr = 0.0
-                if planned_risk_usdt > 0: # Unikamy dzielenia przez zero
+                if planned_risk_usdt > 0:
                     realized_rr = real_pnl / planned_risk_usdt
 
                 bq_pnl_data = {
-                    "trade_id": trade_in_db['trade_id'],
-                    "bybit_order_id": trade_in_db['bybit_order_id'],
-                    "symbol": symbol,
-                    "direction": trade_in_db['direction'],
-                    "entry_price_planned": trade_in_db['entry_price'],
-                    "stop_loss_price": trade_in_db['sl_price'],
-                    "realized_pnl_usdt": real_pnl,
-                    "commission_usdt": None,
-                    "final_result": final_result,
+                    "trade_id": trade_in_db['trade_id'], "bybit_order_id": trade_in_db['bybit_order_id'],
+                    "symbol": symbol, "direction": trade_in_db['direction'],
+                    "entry_price_planned": trade_in_db['entry_price'], "stop_loss_price": trade_in_db['sl_price'],
+                    "realized_pnl_usdt": real_pnl, "commission_usdt": None, "final_result": final_result,
                     "realized_rr": round(realized_rr, 4),
                     "timestamp_entry": datetime.fromtimestamp(trade_in_db['opened_at_ms'] / 1000, tz=timezone.utc),
                     "timestamp_close": datetime.fromtimestamp(closed_time_ms / 1000, tz=timezone.utc),
@@ -308,13 +307,7 @@ def sync_pnl_history(bybit_executor: BybitExecutor):
                 }
                 
                 log_realized_trade(bq_pnl_data)
-
-                # --- KLUCZOWA ZMIANA ---
-                # Resetujemy stan setupu, aby umożliwić ponowne wejście w przyszłości.
                 state_manager.reset_setup_after_trade_close(symbol, is_loss=is_loss)
-                # -----------------------
-
-                # Po pomyślnym zapisie i resecie, usuwamy trade z naszej bazy 'open_trades'
                 state_manager.delete_open_trade(trade_in_db['trade_id'])
                 
                 if closed_time_ms > newest_processed_ts:
@@ -323,6 +316,7 @@ def sync_pnl_history(bybit_executor: BybitExecutor):
             except Exception as e:
                 logger.error(f"[{symbol}] Błąd podczas przetwarzania rekordu P&L: {e}", exc_info=True)
 
+    # Zapisujemy nowy timestamp tylko wtedy, gdy faktycznie przetworzono nową transakcję
     if newest_processed_ts > last_sync_ts_ms:
         state_manager.save_last_pnl_sync_timestamp(newest_processed_ts)
         
