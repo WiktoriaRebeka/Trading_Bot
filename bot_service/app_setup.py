@@ -1,5 +1,3 @@
-# Lokalizacja: bot_service/app_setup.py
-
 import logging
 import uuid
 from flask import Flask, jsonify
@@ -8,7 +6,8 @@ from typing import Optional, Tuple
 from shared_lib.config_loader import load_config
 from shared_lib.firebase_client import initialize_firebase
 from shared_lib.config import config 
-from bot_service.bigquery_logger import initialize_bigquery
+# ZMIANA: Usunięto import starego loggera
+# from bot_service.bigquery_logger import initialize_bigquery 
 from bot_service.bot_logic import process_new_alerts, run_trading_logic
 from bot_service.fetch_from_firestore import (
     load_last_processed_timestamp, 
@@ -19,22 +18,18 @@ from bot_service.fetch_from_firestore import (
 logger = logging.getLogger(__name__)
 
 def initialize_trading_services() -> Tuple[bool, Optional['BybitExecutor']]:
+    # Ta funkcja jest poprawna i pozostaje bez zmian
     from bot_service.bybit_executor import BybitExecutor
     logger.info("Inicjalizacja usług tradingowych...")
     try:
-        # === BARDZIEJ RYGORYSTYCZNE SPRAWDZANIE KLUCZY API ===
         api_key = config.BYBIT_API_KEY
         api_secret = config.BYBIT_API_SECRET
-
         if not api_key or not isinstance(api_key, str) or len(api_key.strip()) == 0:
-            # Ten log jednoznacznie wskaże problem z konfiguracją
             logger.critical("KRYTYCZNY BŁĄD KONFIGURACJI: BYBIT_API_KEY jest pusty lub nie został załadowany z Secret Manager.")
             raise ValueError("Klucz API Bybit jest pusty.")
-        
         if not api_secret or not isinstance(api_secret, str) or len(api_secret.strip()) == 0:
             logger.critical("KRYTYCZNY BŁĄD KONFIGURACJI: BYBIT_API_SECRET jest pusty lub nie został załadowany z Secret Manager.")
             raise ValueError("Sekret API Bybit jest pusty.")
-        
         executor_instance = BybitExecutor(
             api_key=api_key,
             api_secret=api_secret
@@ -42,7 +37,6 @@ def initialize_trading_services() -> Tuple[bool, Optional['BybitExecutor']]:
         logger.info("BybitExecutor pomyślnie zainicjalizowany.")
         return True, executor_instance
     except (RuntimeError, ValueError) as e:
-        # Log z góry będzie teraz bardziej szczegółowy
         logger.critical(f"Nie można zainicjalizować BybitExecutor: {e}")
         return False, None
 
@@ -53,26 +47,28 @@ def initialize_app_services(app: Flask):
         load_config()
         
         firebase_ok = initialize_firebase()
-        bigquery_ok = initialize_bigquery()
+        # ZMIANA: Całkowicie usunięto inicjalizację starego BigQuery loggera
         trading_services_ok, executor = initialize_trading_services()
         
         if executor:
             app.config['BYBIT_EXECUTOR'] = executor
        
-        if firebase_ok and bigquery_ok and trading_services_ok:
+        # ZMIANA: Zaktualizowano warunek, usuwając 'bigquery_ok'
+        if firebase_ok and trading_services_ok:
             app.config['INITIALIZATION_SUCCESS'] = True
             logger.info("Wszystkie kluczowe usługi zainicjalizowane. Aplikacja gotowa do startu.")
         else:
             app.config['INITIALIZATION_SUCCESS'] = False
             reasons = []
             if not firebase_ok: reasons.append("Firebase failed")
-            if not bigquery_ok: reasons.append("BigQuery failed")
+            # Usunięto sprawdzanie BigQuery
             if not trading_services_ok: reasons.append("BybitExecutor failed")
             final_reason = ", ".join(reasons)
             app.config['INITIALIZATION_FAILURE_REASON'] = final_reason
             logger.critical(f"Krytyczny błąd podczas inicjalizacji. Powód: {final_reason}")
 
 def register_endpoints(app: Flask):
+    # Ta funkcja jest poprawna i pozostaje bez zmian
     @app.route('/')
     def health_check():
         return "Trading Bot Service is running.", 200

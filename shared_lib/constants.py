@@ -18,5 +18,3 @@ BYBIT_API_URL_V5 = "https://api.bybit.com"
 
 
 BIGQUERY_PROJECT_ID = os.getenv("GCP_PROJECT", "trading-bot-463318")
-BIGQUERY_DATASET_ID = "trading_analytics"
-BIGQUERY_TABLE_ID = "trades_history"
