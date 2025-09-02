@@ -1,15 +1,15 @@
 # Lokalizacja: bot_service/state_manager.py
 
 import logging
-from typing import Optional, Iterable, Dict, Any, List
-from datetime import datetime, timezone, timedelta
+from typing import Optional
+from typing import Iterable, Dict, Any, List
+from datetime import datetime, timezone
 from google.cloud import firestore
 from google.cloud.firestore_v1.document import DocumentSnapshot
 
 from shared_lib.firebase_client import get_db
 from shared_lib import constants
-from shared_lib.models import AlertData, OpenTradeData
-
+from shared_lib.models import AlertData, OpenTradeData, AnalyzedTradeData
 logger = logging.getLogger(__name__)
 
 def _get_db() -> firestore.Client:
@@ -26,14 +26,17 @@ def update_setup_after_price_reset(symbol: str):
 def get_all_open_trades() -> Iterable[DocumentSnapshot]:
     return _get_db().collection(constants.TRADE_COLLECTION).stream()
 
+
 def create_open_trade(trade_id: str, symbol: str, direction: str, ob_type: str, entry_price: float, sl_price: float, tp_price: float, alert_data: AlertData, bybit_order_id: str):
     db = _get_db()
     transaction = db.transaction()
     
     @firestore.transactional
+  
     def _create_trade_in_transaction(transaction, trade_id, symbol, direction, ob_type, entry_price, sl_price, tp_price, alert_data, bybit_order_id):
         trade_doc_ref = db.collection(constants.TRADE_COLLECTION).document(trade_id)
         setup_doc_ref = db.collection(constants.SETUP_COLLECTION).document(symbol)
+        
         
         setup_snapshot = setup_doc_ref.get(transaction=transaction)
         if not setup_snapshot.exists:
@@ -43,6 +46,7 @@ def create_open_trade(trade_id: str, symbol: str, direction: str, ob_type: str, 
             
         timestamp_utc = datetime.now(timezone.utc)
         
+       
         new_trade = OpenTradeData(
             trade_id=trade_id, 
             symbol=symbol, 
@@ -59,6 +63,7 @@ def create_open_trade(trade_id: str, symbol: str, direction: str, ob_type: str, 
         
         transaction.set(trade_doc_ref, new_trade.model_dump())
         
+        
         update_data = {
             "is_position_open_on_this_setup": True,
             "entry_attempts": firestore.Increment(1)
@@ -67,11 +72,74 @@ def create_open_trade(trade_id: str, symbol: str, direction: str, ob_type: str, 
         logger.info(f"[{symbol}][{trade_id}] Transakcja przygotowana: utworzenie pozycji (z Bybit ID: {bybit_order_id}) i aktualizacja setupu.")
 
     try:
+       
         _create_trade_in_transaction(transaction, trade_id, symbol, direction, ob_type, entry_price, sl_price, tp_price, alert_data, bybit_order_id)
         logger.info(f"[{symbol}][{trade_id}] SUKCES. Transakcja atomowa zakończona.")
     except Exception as e:
         logger.error(f"[{symbol}][{trade_id}] BŁĄD TRANSAKCJI: {e}", exc_info=True)
         raise
+
+def get_all_analyzed_trades() -> Iterable[DocumentSnapshot]:
+    logger.info("[DIAGNOSTYKA DUCHA] Próba pobrania dokumentów z 'analyzed_trades'...")
+    try:
+        collection_ref = _get_db().collection(constants.ANALYZED_COLLECTION)
+        docs_stream = collection_ref.stream()
+        docs_list = list(docs_stream) 
+        logger.info(f"[DIAGNOSTYKA DUCHA] Pomyślnie pobrano {len(docs_list)} dokumentów z 'analyzed_trades'.")
+        return docs_list
+    except Exception as e:
+        logger.error(f"[DIAGNOSTYKA DUCHA] KRYTYCZNY BŁĄD podczas pobierania duchów: {e}", exc_info=True)
+        return []
+
+def create_analyzed_trade(trade_data: OpenTradeData):
+    """Tworzy 'ducha' dla transakcji WIN do analizy post-mortem."""
+    db = _get_db()
+    trade_id = trade_data.trade_id
+    
+    if not trade_id:
+        logger.error("[CREATE_GHOST] Otrzymano dane transakcji bez trade_id.")
+        return
+
+    logger.info(f"[CREATE_GHOST][{trade_id}] Rozpoczynam tworzenie 'ducha' dla transakcji WIN.")
+    
+    try:
+        doc_ref = db.collection(constants.ANALYZED_COLLECTION).document(trade_id)
+        
+        tp5_value = trade_data.alert_data_snapshot.get('tp_5_0')
+        
+        analysis_data = AnalyzedTradeData(
+            trade_id=trade_id,
+            symbol=trade_data.symbol,
+            direction=trade_data.direction,
+            ob_type=trade_data.ob_type,  # <-- DODANA LINIA
+            entry_price=trade_data.entry_price,
+            original_sl=trade_data.sl_price,
+            original_tp_5_0=float(tp5_value) if tp5_value is not None else None,
+            opened_at_ms=trade_data.opened_at_ms,
+            alert_data_snapshot=trade_data.alert_data_snapshot,
+            last_known_extreme_price=trade_data.tp_price,
+            last_analysis_timestamp_ms=int(datetime.now(timezone.utc).timestamp() * 1000),
+            achieved_tps=["rr_1_0_achieved"]
+        )
+        
+        doc_ref.set(analysis_data.model_dump())
+        logger.info(f"[CREATE_GHOST][{trade_id}] SUKCES! Utworzono 'ducha'.")
+
+    except Exception as e:
+        logger.error(f"[CREATE_GHOST][{trade_id}] KRYTYCZNY BŁĄD podczas tworzenia 'ducha': {e}", exc_info=True)
+
+def update_analyzed_trade_state(trade_id: str, new_extreme_price: float, new_timestamp_ms: int):
+    doc_ref = _get_db().collection(constants.ANALYZED_COLLECTION).document(trade_id)
+    update_data = {
+        "last_known_extreme_price": new_extreme_price,
+        "last_analysis_timestamp_ms": new_timestamp_ms
+    }
+    doc_ref.update(update_data)
+    logger.info(f"[{trade_id}] Zaktualizowano stan 'ducha'. Nowa cena: {new_extreme_price}")
+
+def remove_analyzed_trade(trade_id: str):
+    _get_db().collection(constants.ANALYZED_COLLECTION).document(trade_id).delete()
+    logger.info(f"[{trade_id}] Zakończono i usunięto 'ducha'.")
 
 def get_latest_klines_from_cache(symbols: Iterable[str]) -> Dict[str, Dict[str, Any]]:
     if not symbols: 
@@ -88,9 +156,13 @@ def get_latest_klines_from_cache(symbols: Iterable[str]) -> Dict[str, Dict[str, 
         chunk = unique_symbols[i:i + 30]
         if not chunk: continue
         try:
+            logger.debug(f"[KLINE_CACHE] Przetwarzam część: {chunk}")
             docs = db.collection(constants.LATEST_KLINES_COLLECTION).where("__name__", "in", chunk).stream()
+            chunk_results = 0
             for doc in docs:
                 klines_cache[doc.id] = doc.to_dict()
+                chunk_results += 1
+            logger.debug(f"[KLINE_CACHE] Pomyślnie pobrano {chunk_results} dokumentów dla tej części.")
         except Exception as e:
             logger.error(f"[KLINE_CACHE] KRYTYCZNY BŁĄD podczas pobierania danych dla części {chunk}: {e}", exc_info=True)
             continue
@@ -124,11 +196,60 @@ def close_trade_transactional(transaction, trade_id: str, symbol: str, is_loss: 
     transaction.update(setup_doc_ref, update_data)
     logger.info(f"[{trade_id}][{symbol}] Transakcja przygotowana: usunięcie pozycji i reset setupu.")
 
+
+def get_historical_klines(symbol: str, start_time_ms: int, end_time_ms: int) -> List[Dict[str, Any]]:
+    """
+    Pobiera historyczne świece 1-minutowe z API Bybit.
+    UWAGA: Ta funkcja wykonuje zapytanie sieciowe i nie korzysta z cache'u.
+    """
+    import requests 
+    
+    logger.info(f"[{symbol}] Pobieranie historii świec od {start_time_ms} do {end_time_ms}")
+    klines = []
+    api_symbol = symbol.replace('.P', '')
+    
+    params = {
+        "category": "linear",
+        "symbol": api_symbol,
+        "interval": "1",
+        "start": start_time_ms,
+        "end": end_time_ms,
+        "limit": 1000
+    }
+    try:
+
+        kline_endpoint = "/v5/market/kline"
+        full_url = constants.BYBIT_API_URL_V5 + kline_endpoint
+        response = requests.get(full_url, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        if data.get("retCode") == 0 and data.get("result") and data["result"].get("list"):
+           
+            kline_list = reversed(data["result"]["list"])
+            for k in kline_list:
+                klines.append({
+                    "timestamp": int(k[0]),
+                    "high": float(k[2]),
+                    "low": float(k[3])
+                })
+            logger.info(f"[{symbol}] Pomyślnie pobrano {len(klines)} historycznych świec.")
+            return klines
+        else:
+            logger.error(f"[{symbol}] Błąd API Bybit podczas pobierania historii: {data.get('retMsg')}")
+    except Exception as e:
+        logger.error(f"[{symbol}] Krytyczny błąd podczas pobierania historii świec: {e}", exc_info=True)
+        
+    return []
+
+# Należy dodać te dwie funkcje do pliku state_manager.py
+
 def get_open_trade_by_symbol(symbol: str) -> Optional[Dict[str, Any]]:
+    """Wyszukuje w kolekcji 'open_trades' dokument dla danego symbolu."""
     try:
         db = get_db()
         trades_ref = db.collection('open_trades').where('symbol', '==', symbol).limit(1).stream()
         for trade_doc in trades_ref:
+            # Zwracamy słownik, aby mieć dostęp do trade_id (które jest ID dokumentu)
             trade_data = trade_doc.to_dict()
             trade_data['trade_id'] = trade_doc.id
             return trade_data
@@ -138,6 +259,7 @@ def get_open_trade_by_symbol(symbol: str) -> Optional[Dict[str, Any]]:
         return None
 
 def delete_open_trade(trade_id: str):
+    """Usuwa dokument z kolekcji 'open_trades' na podstawie jego ID."""
     try:
         db = get_db()
         db.collection('open_trades').document(trade_id).delete()
@@ -145,7 +267,9 @@ def delete_open_trade(trade_id: str):
     except Exception as e:
         logger.error(f"Błąd podczas usuwania dokumentu zlecenia {trade_id}: {e}")
 
+
 def get_active_setup(symbol: str) -> Optional[Dict[str, Any]]:
+    """Pobiera pojedynczy dokument setupu na podstawie symbolu (ID dokumentu)."""
     try:
         doc_ref = _get_db().collection(constants.SETUP_COLLECTION).document(symbol)
         doc = doc_ref.get()
@@ -156,7 +280,13 @@ def get_active_setup(symbol: str) -> Optional[Dict[str, Any]]:
         logger.error(f"Błąd podczas pobierania aktywnego setupu dla {symbol}: {e}")
         return None
 
+# Lokalizacja: bot_service/state_manager.py (dodać nową funkcję)
+
 def create_setup_from_alert(alert_data: AlertData):
+    """
+    Tworzy nowy dokument w 'active_setups' na podstawie alertu.
+    Jeśli dokument już istnieje, nadpisuje go, resetując stan.
+    """
     db = _get_db()
     setup_doc_ref = db.collection(constants.SETUP_COLLECTION).document(alert_data.symbol)
     
@@ -168,54 +298,5 @@ def create_setup_from_alert(alert_data: AlertData):
         "updated_at": firestore.SERVER_TIMESTAMP
     }
     
-    setup_doc_ref.set(new_setup_data)
+    setup_doc_ref.set(new_setup_data) # Używamy set(), aby zagwarantować czysty start
     logger.info(f"[{alert_data.symbol}] Utworzono/zresetowano setup na podstawie nowego alertu.")
-
-def load_last_pnl_sync_timestamp() -> int:
-    """Odczytuje timestamp ostatniej synchronizacji P&L z Firestore."""
-    db = get_db()
-    doc_ref = db.collection(constants.BOT_CONFIG_COLLECTION).document("pnl_sync_state")
-    try:
-        doc = doc_ref.get()
-        if doc.exists:
-            ts = doc.get("last_sync_timestamp_ms")
-            if ts:
-                logger.info(f"[PNL_SYNC] Odczytano ostatni timestamp synchronizacji P&L: {ts}")
-                return ts
-    except Exception as e:
-        logger.error(f"[PNL_SYNC] Błąd odczytu timestampu P&L: {e}")
-    
-    fallback_ts = int((datetime.now(timezone.utc) - timedelta(days=1)).timestamp() * 1000)
-    logger.warning(f"[PNL_SYNC] Brak timestampu P&L, używam wartości domyślnej: {fallback_ts}")
-    return fallback_ts
-
-def save_last_pnl_sync_timestamp(timestamp_ms: int):
-    """Zapisuje nowy timestamp ostatniej synchronizacji P&L."""
-    db = get_db()
-    doc_ref = db.collection(constants.BOT_CONFIG_COLLECTION).document("pnl_sync_state")
-    try:
-        doc_ref.set({"last_sync_timestamp_ms": timestamp_ms}, merge=True)
-        logger.info(f"[PNL_SYNC] Zapisano nowy timestamp synchronizacji P&L: {timestamp_ms}")
-    except Exception as e:
-        logger.error(f"[PNL_SYNC] Błąd zapisu timestampu P&L: {e}")
-
-
-def reset_setup_after_trade_close(symbol: str, is_loss: bool):
-    """
-    Resetuje stan setupu po zamknięciu powiązanej z nim pozycji.
-    Kluczowe dla odblokowania możliwości ponownego handlu na danym symbolu.
-
-    Args:
-        symbol (str): Symbol, dla którego setup ma być zresetowany.
-        is_loss (bool): True, jeśli pozycja zakończyła się stratą.
-    """
-    try:
-        setup_doc_ref = _get_db().collection(constants.SETUP_COLLECTION).document(symbol)
-        update_data = {
-            "is_position_open_on_this_setup": False,
-            "is_reset_needed_after_loss": is_loss
-        }
-        setup_doc_ref.update(update_data)
-        logger.info(f"[{symbol}] SUKCES. Stan setupu został zresetowany po zamknięciu pozycji (is_loss: {is_loss}).")
-    except Exception as e:
-        logger.error(f"[{symbol}] KRYTYCZNY BŁĄD podczas resetowania stanu setupu: {e}", exc_info=True)

@@ -1,3 +1,5 @@
+# Lokalizacja: shared_lib/models.py
+
 from pydantic import BaseModel, Field, validator
 from typing import Optional, Dict, Any, List
 from datetime import datetime
@@ -59,7 +61,19 @@ class Kline(BaseModel):
     low: float
     close: float
 
-# USUNIĘTO MODEL 'AnalyzedTradeData'
+class AnalyzedTradeData(BaseModel):
+    trade_id: str
+    symbol: str
+    direction: str
+    ob_type: str
+    entry_price: float
+    original_sl: float
+    original_tp_5_0: Optional[float] = None
+    opened_at_ms: int
+    alert_data_snapshot: Dict[str, Any]
+    last_known_extreme_price: float
+    last_analysis_timestamp_ms: int
+    achieved_tps: List[str] = []
 
 class OrderData(BaseModel):
     symbol: str

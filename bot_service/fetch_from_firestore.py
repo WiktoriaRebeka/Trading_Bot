@@ -61,4 +61,3 @@ def fetch_new_alerts_since(last_ts_dt: datetime):
     except Exception as e:
         logger.error(f"[FETCHER_FIRESTORE_ERROR] Błąd podczas pobierania alertów: {e}", exc_info=True)
     return new_alerts_list, new_max_ts
-

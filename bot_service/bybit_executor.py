@@ -5,7 +5,7 @@ import time
 import hmac
 import hashlib
 import json
-from typing import Dict, Any, Optional, List 
+from typing import Dict, Any, Optional
 from urllib.parse import urlencode
 from decimal import Decimal, ROUND_DOWN
 import requests
@@ -311,28 +311,35 @@ class BybitExecutor:
             # W przypadku błędu API, dla bezpieczeństwa zakładamy, że pozycja może istnieć.
             return True
 
-    def get_closed_pnl_since(self, symbol: str, start_time_ms: int) -> List[Dict[str, Any]]:
+    def get_last_closed_pnl(self, symbol: str) -> Optional[Dict[str, Any]]:
         """
-        Pobiera historię zamkniętych pozycji dla danego symbolu od określonego czasu.
-        Zwraca listę słowników z danymi o P&L.
+        Pobiera dane o ostatniej zamkniętej pozycji dla danego symbolu.
+        Zwraca słownik z kluczowymi danymi lub None w przypadku błędu.
         """
         api_symbol = symbol.replace('.P', '')
         endpoint = "/v5/position/closed-pnl"
         params = {
             "category": "linear",
             "symbol": api_symbol,
-            "startTime": start_time_ms,
-            "limit": 50  # Maksymalna wartość dozwolona przez API
+            "limit": 1  # Chcemy tylko ostatnią pozycję
         }
-        logger.info(f"[{symbol}] Pobieranie historii P&L od timestampu {start_time_ms}...")
+        logger.info(f"[{symbol}] Pobieranie danych o zrealizowanym P&L dla ostatniej zamkniętej pozycji...")
         try:
             result = self._send_request("GET", endpoint, params=params)
             if result and result.get('list'):
-                pnl_list = result['list']
-                logger.info(f"[{symbol}] Pomyślnie pobrano {len(pnl_list)} rekordów P&L.")
-                # Zwracamy listę w odwróconej kolejności, aby przetwarzać od najstarszych do najnowszych
-                return list(reversed(pnl_list))
-            return []
+                pnl_data = result['list'][0]
+                
+                # Konwertujemy kluczowe dane na odpowiednie typy
+                return {
+                    "avg_entry_price": float(pnl_data.get("avgEntryPrice", 0.0)),
+                    "avg_exit_price": float(pnl_data.get("avgExitPrice", 0.0)),
+                    "closed_pnl": float(pnl_data.get("closedPnl", 0.0)),
+                    "qty": float(pnl_data.get("qty", 0.0)),
+                    "order_id": pnl_data.get("orderId"), # ID zlecenia wejścia
+                    "updated_time": int(pnl_data.get("updatedTime", 0)), # Timestamp zamknięcia w ms
+                }
+            logger.warning(f"[{symbol}] Nie znaleziono historii zamkniętych pozycji w Bybit.")
+            return None
         except (RequestException, BybitAPIError) as e:
-            logger.error(f"[{symbol}] Błąd podczas pobierania historii P&L: {e}")
-            return []
+            logger.error(f"[{symbol}] Błąd podczas pobierania zrealizowanego P&L: {e}")
+            return None

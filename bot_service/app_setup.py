@@ -8,8 +8,8 @@ from typing import Optional, Tuple
 from shared_lib.config_loader import load_config
 from shared_lib.firebase_client import initialize_firebase
 from shared_lib.config import config 
-from bot_service.pnl_logger import initialize_pnl_logger
-from bot_service.bot_logic import process_new_alerts, run_trading_logic, sync_pnl_history
+from bot_service.bigquery_logger import initialize_bigquery
+from bot_service.bot_logic import process_new_alerts, run_trading_logic
 from bot_service.fetch_from_firestore import (
     load_last_processed_timestamp, 
     fetch_new_alerts_since, 
@@ -22,14 +22,19 @@ def initialize_trading_services() -> Tuple[bool, Optional['BybitExecutor']]:
     from bot_service.bybit_executor import BybitExecutor
     logger.info("Inicjalizacja usług tradingowych...")
     try:
+        # === BARDZIEJ RYGORYSTYCZNE SPRAWDZANIE KLUCZY API ===
         api_key = config.BYBIT_API_KEY
         api_secret = config.BYBIT_API_SECRET
+
         if not api_key or not isinstance(api_key, str) or len(api_key.strip()) == 0:
+            # Ten log jednoznacznie wskaże problem z konfiguracją
             logger.critical("KRYTYCZNY BŁĄD KONFIGURACJI: BYBIT_API_KEY jest pusty lub nie został załadowany z Secret Manager.")
             raise ValueError("Klucz API Bybit jest pusty.")
+        
         if not api_secret or not isinstance(api_secret, str) or len(api_secret.strip()) == 0:
             logger.critical("KRYTYCZNY BŁĄD KONFIGURACJI: BYBIT_API_SECRET jest pusty lub nie został załadowany z Secret Manager.")
             raise ValueError("Sekret API Bybit jest pusty.")
+        
         executor_instance = BybitExecutor(
             api_key=api_key,
             api_secret=api_secret
@@ -37,6 +42,7 @@ def initialize_trading_services() -> Tuple[bool, Optional['BybitExecutor']]:
         logger.info("BybitExecutor pomyślnie zainicjalizowany.")
         return True, executor_instance
     except (RuntimeError, ValueError) as e:
+        # Log z góry będzie teraz bardziej szczegółowy
         logger.critical(f"Nie można zainicjalizować BybitExecutor: {e}")
         return False, None
 
@@ -47,20 +53,20 @@ def initialize_app_services(app: Flask):
         load_config()
         
         firebase_ok = initialize_firebase()
-        pnl_logger_ok = initialize_pnl_logger()
+        bigquery_ok = initialize_bigquery()
         trading_services_ok, executor = initialize_trading_services()
         
         if executor:
             app.config['BYBIT_EXECUTOR'] = executor
        
-        if firebase_ok and pnl_logger_ok and trading_services_ok:
+        if firebase_ok and bigquery_ok and trading_services_ok:
             app.config['INITIALIZATION_SUCCESS'] = True
             logger.info("Wszystkie kluczowe usługi zainicjalizowane. Aplikacja gotowa do startu.")
         else:
             app.config['INITIALIZATION_SUCCESS'] = False
             reasons = []
             if not firebase_ok: reasons.append("Firebase failed")
-            if not pnl_logger_ok: reasons.append("PNL Logger (BigQuery) failed")
+            if not bigquery_ok: reasons.append("BigQuery failed")
             if not trading_services_ok: reasons.append("BybitExecutor failed")
             final_reason = ", ".join(reasons)
             app.config['INITIALIZATION_FAILURE_REASON'] = final_reason
@@ -95,7 +101,6 @@ def register_endpoints(app: Flask):
             return jsonify({"status": "error", "message": "BybitExecutor not initialized"}), 500
 
         try:
-            # Krok 1: Przetwarzanie nowych alertów (otwieranie nowych pozycji)
             last_ts = load_last_processed_timestamp()
             new_alerts, new_ts = fetch_new_alerts_since(last_ts)
             if new_alerts:
@@ -104,11 +109,7 @@ def register_endpoints(app: Flask):
                 if new_ts and new_ts > last_ts:
                     save_last_processed_timestamp(new_ts)
             
-            # Krok 2: Zarządzanie istniejącymi setupami i pozycjami
             run_trading_logic(bybit_executor)
-
-            # Krok 3: Synchronizacja historii P&L z Bybit (nasz "księgowy")
-            sync_pnl_history(bybit_executor)
 
             logger.info("--- ZAKOŃCZENIE CYKLU BOTA ---", extra={"json_fields": {"cycle_id": cycle_id, "status": "success"}})
             return jsonify({"status": "success", "cycle_id": cycle_id}), 200
