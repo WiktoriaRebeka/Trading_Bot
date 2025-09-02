@@ -25,14 +25,14 @@ from bot_service.bybit_executor import BybitExecutor
 
 logger = logging.getLogger(__name__)
 
-def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecutor, alert_id: str = 'N/A') -> Tuple[Optional[str], Optional[Decimal]]:
+def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecutor, alert_id: str = 'N/A') -> Tuple[Optional[str], Optional[Decimal], Optional[Decimal]]:
     symbol = alert_data.symbol
     logger.info(f"[{symbol}] --- Rozpoczynam kalkulację ryzyka dla alertu {alert_id} ---")
     try:
         instrument_info = bybit_executor.get_instrument_info(symbol)
         if not instrument_info:
             logger.error(f"[{symbol}] Nie udało się pobrać informacji o instrumencie. Przerywam.")
-            return None, None
+            return None, None, None
             
         tick_size = Decimal(instrument_info.get('tick_size'))
         qty_step = Decimal(instrument_info.get('qty_step'))
@@ -47,15 +47,15 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
             corrected_sl_price = entry_price - price_distance
             if corrected_sl_price >= entry_price:
                 logger.error(f"[{symbol}] Błąd logiki SL dla LONG. Cena SL ({corrected_sl_price}) musi być niższa niż cena wejścia ({entry_price}). Przerywam.")
-                return None, None
+                return None, None, None
         elif alert_data.direction == "SHORT":
             corrected_sl_price = entry_price + price_distance
             if corrected_sl_price <= entry_price:
                 logger.error(f"[{symbol}] Błąd logiki SL dla SHORT. Cena SL ({corrected_sl_price}) musi być wyższa niż cena wejścia ({entry_price}). Przerywam.")
-                return None, None
+                return None, None, None
         else:
             logger.error(f"[{symbol}] Nieznany kierunek pozycji: {alert_data.direction}. Przerywam.")
-            return None, None
+            return None, None, None
         
         sl_price = corrected_sl_price
         logger.info(f"[{symbol}] Poziom SL z alertu: {sl_price_from_alert}. Skorygowany, poprawny poziom SL: {sl_price}")
@@ -67,19 +67,19 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
 
         if entry_price <= 0:
             logger.error(f"[{symbol}] Cena wejścia jest nieprawidłowa: {entry_price}. Przerywam.")
-            return None, None
+            return None, None, None
             
         sl_distance_percentage = abs(entry_price - sl_price) / entry_price
         if sl_distance_percentage == 0:
             logger.error(f"[{symbol}] Odległość SL wynosi zero. Przerywam.")
-            return None, None
+            return None, None, None
             
         if sl_distance_percentage < MIN_SL_DISTANCE_PERCENT:
             logger.warning(
                 f"[{symbol}] Zlecenie odrzucone. Odległość SL ({sl_distance_percentage:.4%}) "
                 f"jest mniejsza niż wymagane minimum ({MIN_SL_DISTANCE_PERCENT:.4%})."
             )
-            return None, None
+            return None, None, None
             
         total_cost_percentage = sl_distance_percentage + (TAKER_FEE_RATE * 2)
         ideal_notional_value = TARGET_RISK_USDT / total_cost_percentage
@@ -87,19 +87,17 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
         
         if target_qty < min_order_qty:
             logger.warning(f"[{symbol}] Zlecenie odrzucone. Obliczona ilość ({target_qty}) < minimum giełdowe ({min_order_qty}).")
-            return None, None
+            return None, None, None
             
         formatted_qty = target_qty.quantize(qty_step, rounding=ROUND_DOWN)
         if formatted_qty <= 0:
             logger.error(f"[{symbol}] Po zaokrągleniu ilość (qty) wynosi zero. Zwiększ ryzyko lub wybierz inny setup.")
-            return None, None
+            return None, None, None
             
-        # --- KLUCZOWA ZMIANA: Obliczenia TP bazują na finalnej, rzeczywistej ilości ---
         actual_notional_value = formatted_qty * entry_price
         actual_fees_usdt = actual_notional_value * TAKER_FEE_RATE * 2
         target_gross_profit_usdt = TARGET_REWARD_USDT + actual_fees_usdt
         price_change_for_tp = target_gross_profit_usdt / formatted_qty
-        # --- KONIEC ZMIANY ---
         
         if alert_data.direction == "LONG":
             take_profit_price = entry_price + price_change_for_tp
@@ -116,13 +114,13 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
         order_id = bybit_executor.place_limit_order(order_params)
         
         if order_id:
-            return order_id, take_profit_price
+            return order_id, take_profit_price, sl_price
         else:
-            return None, None
+            return None, None, None
             
     except Exception as e:
         logger.critical(f"[{symbol}] Nieoczekiwany, krytyczny błąd w logice przygotowywania zlecenia dla alertu {alert_id}: {e}", exc_info=True)
-        return None, None
+        return None, None, None
 
 def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executor: BybitExecutor):
     if not newly_fetched_alerts: return
@@ -164,15 +162,17 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executo
             result = _process_alert_transaction(transaction, alert_data)
             if result != "PROCEED": continue
             logger.info(f"[{symbol}] Giełda i baza danych są czyste. Składam nowe zlecenie.")
-            order_id, new_tp_price = _prepare_and_place_order(alert_data, bybit_executor, alert_id)
-            if order_id and new_tp_price:
+            
+            order_id, new_tp_price, corrected_sl_price = _prepare_and_place_order(alert_data, bybit_executor, alert_id)
+            
+            if order_id and new_tp_price and corrected_sl_price:
                 trade_id = str(uuid.uuid4())
                 state_manager.create_open_trade(
                     trade_id=trade_id, symbol=symbol, direction=alert_data.direction, ob_type="New Alert",
-                    entry_price=alert_data.entry, sl_price=alert_data.sl, tp_price=float(new_tp_price), 
+                    entry_price=alert_data.entry, sl_price=float(corrected_sl_price), tp_price=float(new_tp_price), 
                     alert_data=alert_data, bybit_order_id=order_id
                 )
-                logger.info(f"[{symbol}][Alert: {alert_id}] SUKCES. Zlecenie {order_id} złożone i zapisane z TP={new_tp_price:.4f}.")
+                logger.info(f"[{symbol}][Alert: {alert_id}] SUKCES. Zlecenie {order_id} złożone i zapisane z TP={new_tp_price:.4f} i skorygowanym SL={corrected_sl_price:.4f}.")
             else:
                 logger.error(f"[{symbol}][Alert: {alert_id}] PORAŻKA. Nie udało się złożyć nowego zlecenia.")
         except Exception as e:
