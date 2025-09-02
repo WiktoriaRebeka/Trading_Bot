@@ -1,3 +1,5 @@
+# Lokalizacja: bot_service/app_setup.py
+
 import logging
 import uuid
 from flask import Flask, jsonify

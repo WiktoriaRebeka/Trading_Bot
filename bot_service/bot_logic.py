@@ -1,3 +1,5 @@
+# Lokalizacja: bot_service/bot_logic.py
+
 import logging
 import uuid
 from datetime import datetime, timezone, timedelta

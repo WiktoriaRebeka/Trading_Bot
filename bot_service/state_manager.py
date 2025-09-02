@@ -1,3 +1,5 @@
+# Lokalizacja: bot_service/state_manager.py
+
 import logging
 from typing import Optional, Iterable, Dict, Any, List
 from datetime import datetime, timezone, timedelta

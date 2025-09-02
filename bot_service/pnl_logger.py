@@ -1,3 +1,5 @@
+# Lokalizacja: bot_service/pnl_logger.py
+
 import logging
 from typing import Dict, Any, Optional
 
