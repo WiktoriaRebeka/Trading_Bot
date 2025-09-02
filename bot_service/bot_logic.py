@@ -41,7 +41,7 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
         entry_price = Decimal(str(alert_data.entry))
         sl_price = Decimal(str(alert_data.sl))
         
-        # --- KLUCZOWA ZMIANA: Twarda walidacja SL zamiast autokorekty ---
+        # Twarda walidacja logiki SL
         if alert_data.direction == "LONG":
             if sl_price >= entry_price:
                 logger.error(f"[{symbol}] Zlecenie odrzucone. Dla pozycji LONG, cena SL ({sl_price}) musi być niższa niż cena wejścia ({entry_price}).")
@@ -53,7 +53,6 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
         else:
             logger.error(f"[{symbol}] Nieznany kierunek pozycji: {alert_data.direction}. Przerywam.")
             return None, None, None
-        # --- KONIEC ZMIANY ---
 
         TARGET_RISK_USDT = Decimal("2.50")
         TAKER_FEE_RATE = Decimal("0.00055")
@@ -80,8 +79,10 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
             logger.error(f"[{symbol}] Po zaokrągleniu ilość (qty) wynosi zero. Zwiększ ryzyko lub wybierz inny setup.")
             return None, None, None
             
-        take_profit_price = Decimal(str(alert_data.tp_2_0))
-        logger.info(f"[{symbol}] Używam poziomu TP z alertu (tp_2_0): {take_profit_price}")
+        # --- KLUCZOWA ZMIANA: Użycie TP z alertu (tp_3_0) zamiast dynamicznej kalkulacji ---
+        take_profit_price = Decimal(str(alert_data.tp_3_0))
+        logger.info(f"[{symbol}] Używam poziomu TP z alertu (tp_3_0): {take_profit_price}")
+        # --- KONIEC ZMIANY ---
             
         order_params = {
             "symbol": symbol, "side": alert_data.direction, "price": format_price(float(entry_price), str(tick_size)),
@@ -94,7 +95,6 @@ def _prepare_and_place_order(alert_data: AlertData, bybit_executor: BybitExecuto
         order_id = bybit_executor.place_limit_order(order_params)
         
         if order_id:
-            # Zwracamy oryginalny, ale poprawnie zwalidowany sl_price
             return order_id, take_profit_price, sl_price
         else:
             return None, None, None
