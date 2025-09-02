@@ -198,3 +198,24 @@ def save_last_pnl_sync_timestamp(timestamp_ms: int):
         logger.info(f"[PNL_SYNC] Zapisano nowy timestamp synchronizacji P&L: {timestamp_ms}")
     except Exception as e:
         logger.error(f"[PNL_SYNC] Błąd zapisu timestampu P&L: {e}")
+
+
+def reset_setup_after_trade_close(symbol: str, is_loss: bool):
+    """
+    Resetuje stan setupu po zamknięciu powiązanej z nim pozycji.
+    Kluczowe dla odblokowania możliwości ponownego handlu na danym symbolu.
+
+    Args:
+        symbol (str): Symbol, dla którego setup ma być zresetowany.
+        is_loss (bool): True, jeśli pozycja zakończyła się stratą.
+    """
+    try:
+        setup_doc_ref = _get_db().collection(constants.SETUP_COLLECTION).document(symbol)
+        update_data = {
+            "is_position_open_on_this_setup": False,
+            "is_reset_needed_after_loss": is_loss
+        }
+        setup_doc_ref.update(update_data)
+        logger.info(f"[{symbol}] SUKCES. Stan setupu został zresetowany po zamknięciu pozycji (is_loss: {is_loss}).")
+    except Exception as e:
+        logger.error(f"[{symbol}] KRYTYCZNY BŁĄD podczas resetowania stanu setupu: {e}", exc_info=True)

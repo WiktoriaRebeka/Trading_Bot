@@ -258,15 +258,14 @@ def sync_pnl_history(bybit_executor: BybitExecutor):
     """
     logger.info("--- ROZPOCZĘCIE CYKLU SYNCHRONIZACJI P&L ---")
     
-    # Pobieramy wszystkie symbole, dla których mamy otwarte transakcje w naszej bazie
     all_trades_in_db_docs = list(state_manager.get_all_open_trades())
-    all_trades_in_db = [doc.to_dict() for doc in all_trades_in_db_docs]
-    symbols_to_check = {trade['symbol'] for trade in all_trades_in_db}
-    
-    if not symbols_to_check:
+    if not all_trades_in_db_docs:
         logger.info("Brak otwartych transakcji w bazie do synchronizacji P&L. Kończę synchronizację.")
         return
 
+    all_trades_in_db = [doc.to_dict() for doc in all_trades_in_db_docs]
+    symbols_to_check = {trade['symbol'] for trade in all_trades_in_db}
+    
     last_sync_ts_ms = state_manager.load_last_pnl_sync_timestamp()
     newest_processed_ts = last_sync_ts_ms
 
@@ -278,7 +277,6 @@ def sync_pnl_history(bybit_executor: BybitExecutor):
                 real_pnl = float(position_data.get("closedPnl", 0.0))
                 closed_time_ms = int(position_data.get("updatedTime", 0))
                 
-                # Znajdź odpowiadający trade w naszej bazie po symbolu
                 trade_in_db = next((t for t in all_trades_in_db if t.get('symbol') == symbol), None)
                 
                 if not trade_in_db:
@@ -286,10 +284,11 @@ def sync_pnl_history(bybit_executor: BybitExecutor):
                     continue
 
                 final_result = "WIN" if real_pnl > 0 else "LOSE"
+                is_loss = final_result == "LOSE"
                 
                 planned_risk_usdt = 2.50
                 realized_rr = 0.0
-                if final_result == "WIN" and planned_risk_usdt > 0:
+                if planned_risk_usdt > 0: # Unikamy dzielenia przez zero
                     realized_rr = real_pnl / planned_risk_usdt
 
                 bq_pnl_data = {
@@ -310,7 +309,12 @@ def sync_pnl_history(bybit_executor: BybitExecutor):
                 
                 log_realized_trade(bq_pnl_data)
 
-                # Po pomyślnym zapisie, usuwamy trade z naszej bazy 'open_trades'
+                # --- KLUCZOWA ZMIANA ---
+                # Resetujemy stan setupu, aby umożliwić ponowne wejście w przyszłości.
+                state_manager.reset_setup_after_trade_close(symbol, is_loss=is_loss)
+                # -----------------------
+
+                # Po pomyślnym zapisie i resecie, usuwamy trade z naszej bazy 'open_trades'
                 state_manager.delete_open_trade(trade_in_db['trade_id'])
                 
                 if closed_time_ms > newest_processed_ts:
@@ -319,6 +323,7 @@ def sync_pnl_history(bybit_executor: BybitExecutor):
             except Exception as e:
                 logger.error(f"[{symbol}] Błąd podczas przetwarzania rekordu P&L: {e}", exc_info=True)
 
-    # Zapisujemy timestamp ostatniej przetworzonej transakcji
-    state_manager.save_last_pnl_sync_timestamp(newest_processed_ts)
+    if newest_processed_ts > last_sync_ts_ms:
+        state_manager.save_last_pnl_sync_timestamp(newest_processed_ts)
+        
     logger.info("--- ZAKOŃCZONO CYKL SYNCHRONIZACJI P&L ---")
