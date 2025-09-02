@@ -212,62 +212,6 @@ def _handle_manage_open_trades(klines_data: Dict[str, Kline], open_trades_docs: 
         except Exception as e:
             logger.error(f"Nieoczekiwany błąd podczas monitorowania pozycji {trade_id}: {e}", exc_info=True)
 
-def sync_pnl_history(bybit_executor: BybitExecutor):
-    logger.info("--- ROZPOCZĘCIE CYKLU SYNCHRONIZACJI P&L ---")
-    
-    all_trades_in_db_docs = list(state_manager.get_all_open_trades())
-    all_trades_in_db = [doc.to_dict() for doc in all_trades_in_db_docs]
-    symbols_to_check = {trade['symbol'] for trade in all_trades_in_db}
-    
-    if not symbols_to_check:
-        logger.info("Brak otwartych transakcji w bazie do synchronizacji P&L. Kończę synchronizację.")
-        return
-
-    last_sync_ts_ms = state_manager.load_last_pnl_sync_timestamp()
-    newest_processed_ts = last_sync_ts_ms
-
-    for symbol in symbols_to_check:
-        closed_positions = bybit_executor.get_closed_pnl_since(symbol, start_time_ms=last_sync_ts_ms)
-        
-        for position_data in closed_positions:
-            try:
-                real_pnl = float(position_data.get("closedPnl", 0.0))
-                closed_time_ms = int(position_data.get("updatedTime", 0))
-                
-                trade_in_db = next((t for t in all_trades_in_db if t.get('symbol') == symbol), None)
-                
-                if not trade_in_db:
-                    logger.warning(f"[{symbol}] Znaleziono zamkniętą pozycję w Bybit, ale brak jej odpowiednika w 'open_trades'. Może to być transakcja ręczna. Pomijam.")
-                    continue
-
-                final_result = "WIN" if real_pnl > 0 else "LOSE"
-                
-                planned_risk_usdt = 2.50
-                realized_rr = 0.0
-                if final_result == "WIN" and planned_risk_usdt > 0:
-                    realized_rr = real_pnl / planned_risk_usdt
-
-                bq_pnl_data = {
-                    "trade_id": trade_in_db['trade_id'], "bybit_order_id": trade_in_db['bybit_order_id'], "symbol": symbol,
-                    "direction": trade_in_db['direction'], "entry_price_planned": trade_in_db['entry_price'], "stop_loss_price": trade_in_db['sl_price'],
-                    "realized_pnl_usdt": real_pnl, "commission_usdt": None, "final_result": final_result,
-                    "realized_rr": round(realized_rr, 4), "timestamp_entry": datetime.fromtimestamp(trade_in_db['opened_at_ms'] / 1000, tz=timezone.utc),
-                    "timestamp_close": datetime.fromtimestamp(closed_time_ms / 1000, tz=timezone.utc),
-                    "close_reason": "CLOSED_ON_BYBIT",
-                }
-                
-                log_realized_trade(bq_pnl_data)
-                state_manager.delete_open_trade(trade_in_db['trade_id'])
-                
-                if closed_time_ms > newest_processed_ts:
-                    newest_processed_ts = closed_time_ms
-
-            except Exception as e:
-                logger.error(f"[{symbol}] Błąd podczas przetwarzania rekordu P&L: {e}", exc_info=True)
-
-    state_manager.save_last_pnl_sync_timestamp(newest_processed_ts)
-    logger.info("--- ZAKOŃCZONO CYKL SYNCHRONIZACJI P&L ---")
-
 def run_trading_logic(bybit_executor: BybitExecutor):
     logger.info("--- ROZPOCZYNAM GŁÓWNĄ PĘTLĘ LOGIKI (TRYB UPROSZCZONY) ---")
     
@@ -302,3 +246,77 @@ def run_trading_logic(bybit_executor: BybitExecutor):
             logger.error(f"[{symbol}] Nieoczekiwany błąd podczas przetwarzania symbolu w run_trading_logic: {e}", exc_info=True)
 
     logger.info("--- ZAKOŃCZONO GŁÓWNĄ PĘTLĘ LOGIKI ---")
+
+
+
+def sync_pnl_history(bybit_executor: BybitExecutor):
+    """
+    Synchronizuje historię zamkniętych transakcji z Bybit i zapisuje je do BigQuery.
+    Działa jako niezależny "księgowy".
+    """
+    logger.info("--- ROZPOCZĘCIE CYKLU SYNCHRONIZACJI P&L ---")
+    
+    # Pobieramy wszystkie symbole, dla których mamy otwarte transakcje w naszej bazie
+    all_trades_in_db_docs = list(state_manager.get_all_open_trades())
+    all_trades_in_db = [doc.to_dict() for doc in all_trades_in_db_docs]
+    symbols_to_check = {trade['symbol'] for trade in all_trades_in_db}
+    
+    if not symbols_to_check:
+        logger.info("Brak otwartych transakcji w bazie do synchronizacji P&L. Kończę synchronizację.")
+        return
+
+    last_sync_ts_ms = state_manager.load_last_pnl_sync_timestamp()
+    newest_processed_ts = last_sync_ts_ms
+
+    for symbol in symbols_to_check:
+        closed_positions = bybit_executor.get_closed_pnl_since(symbol, start_time_ms=last_sync_ts_ms)
+        
+        for position_data in closed_positions:
+            try:
+                real_pnl = float(position_data.get("closedPnl", 0.0))
+                closed_time_ms = int(position_data.get("updatedTime", 0))
+                
+                # Znajdź odpowiadający trade w naszej bazie po symbolu
+                trade_in_db = next((t for t in all_trades_in_db if t.get('symbol') == symbol), None)
+                
+                if not trade_in_db:
+                    logger.warning(f"[{symbol}] Znaleziono zamkniętą pozycję w Bybit, ale brak jej odpowiednika w 'open_trades'. Może to być transakcja ręczna. Pomijam.")
+                    continue
+
+                final_result = "WIN" if real_pnl > 0 else "LOSE"
+                
+                planned_risk_usdt = 2.50
+                realized_rr = 0.0
+                if final_result == "WIN" and planned_risk_usdt > 0:
+                    realized_rr = real_pnl / planned_risk_usdt
+
+                bq_pnl_data = {
+                    "trade_id": trade_in_db['trade_id'],
+                    "bybit_order_id": trade_in_db['bybit_order_id'],
+                    "symbol": symbol,
+                    "direction": trade_in_db['direction'],
+                    "entry_price_planned": trade_in_db['entry_price'],
+                    "stop_loss_price": trade_in_db['sl_price'],
+                    "realized_pnl_usdt": real_pnl,
+                    "commission_usdt": None,
+                    "final_result": final_result,
+                    "realized_rr": round(realized_rr, 4),
+                    "timestamp_entry": datetime.fromtimestamp(trade_in_db['opened_at_ms'] / 1000, tz=timezone.utc),
+                    "timestamp_close": datetime.fromtimestamp(closed_time_ms / 1000, tz=timezone.utc),
+                    "close_reason": "CLOSED_ON_BYBIT",
+                }
+                
+                log_realized_trade(bq_pnl_data)
+
+                # Po pomyślnym zapisie, usuwamy trade z naszej bazy 'open_trades'
+                state_manager.delete_open_trade(trade_in_db['trade_id'])
+                
+                if closed_time_ms > newest_processed_ts:
+                    newest_processed_ts = closed_time_ms
+
+            except Exception as e:
+                logger.error(f"[{symbol}] Błąd podczas przetwarzania rekordu P&L: {e}", exc_info=True)
+
+    # Zapisujemy timestamp ostatniej przetworzonej transakcji
+    state_manager.save_last_pnl_sync_timestamp(newest_processed_ts)
+    logger.info("--- ZAKOŃCZONO CYKL SYNCHRONIZACJI P&L ---")
