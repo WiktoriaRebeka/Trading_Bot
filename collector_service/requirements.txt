@@ -9,3 +9,4 @@ pydantic
 python-dotenv
 requests
 pybit>=2.7.0
+google-auth
