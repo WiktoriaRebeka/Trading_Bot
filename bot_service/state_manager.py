@@ -314,24 +314,25 @@ def create_analytical_scenario(alert_data: AlertData):
         '3.0': 'ACTIVE', '4.0': 'ACTIVE', '5.0': 'ACTIVE'
     }
     
-    scenario_data = {
-        "alert_id": alert_data.id,
-        "symbol": alert_data.symbol,
-        "direction": alert_data.direction,
-        "entry_price": alert_data.entry,
-        "sl_price": alert_data.sl,
-        "tp_1_0": alert_data.tp_1_0,
-        "tp_1_5": alert_data.tp_1_5,
-        "tp_2_0": alert_data.tp_2_0,
-        "tp_3_0": alert_data.tp_3_0,
-        "tp_4_0": alert_data.tp_4_0,
-        "tp_5_0": alert_data.tp_5_0,
-        "scenario_status": initial_status,
-        "created_at": firestore.SERVER_TIMESTAMP
-    }
+    # Używamy modelu Pydantic do stworzenia danych, aby zapewnić spójność
+    scenario = AnalyticalScenario(
+        alert_id=alert_data.id,
+        symbol=alert_data.symbol,
+        direction=alert_data.direction,
+        entry_price=alert_data.entry,
+        sl_price=alert_data.sl,
+        tp_1_0=alert_data.tp_1_0,
+        tp_1_5=alert_data.tp_1_5,
+        tp_2_0=alert_data.tp_2_0,
+        tp_3_0=alert_data.tp_3_0,
+        tp_4_0=alert_data.tp_4_0,
+        tp_5_0=alert_data.tp_5_0,
+        scenario_status=initial_status,
+        created_at=datetime.now(timezone.utc)
+    )
     
-    doc_ref.set(scenario_data)
-    logger.info(f"[{alert_data.symbol}] Utworzono nowy scenariusz analityczny dla alertu {alert_data.id}.")
+    doc_ref.set(scenario.model_dump())
+    logger.info(f"[{alert_data.symbol}] Utworzono nową 'teczkę analityczną' dla alertu {alert_data.id}.")
 
 def get_all_active_scenarios() -> Iterable[DocumentSnapshot]:
     """Pobiera wszystkie aktywne scenariusze analityczne."""
@@ -341,7 +342,14 @@ def update_analytical_scenario_status(alert_id: str, new_status: Dict[str, str])
     """Aktualizuje statusy scenariuszy w dokumencie."""
     doc_ref = _get_db().collection('analytical_scenarios').document(alert_id)
     doc_ref.update({"scenario_status": new_status})
+    logger.info(f"[Alert: {alert_id}] Zaktualizowano statusy scenariuszy w Firestore.")
 
 def delete_analytical_scenario(alert_id: str):
     """Usuwa zakończony dokument analityczny."""
     _get_db().collection('analytical_scenarios').document(alert_id).delete()
+    logger.info(f"[Alert: {alert_id}] Usunięto zakończoną 'teczkę analityczną' z Firestore.")
+
+def delete_active_setup(symbol: str):
+    """Usuwa dokument blokady z 'active_setups'."""
+    _get_db().collection(constants.SETUP_COLLECTION).document(symbol).delete()
+    logger.info(f"[{symbol}] Usunięto blokadę ('active_setup') po zakończeniu analizy.")

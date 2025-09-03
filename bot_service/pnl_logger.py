@@ -1,60 +1,72 @@
 # Lokalizacja: bot_service/pnl_logger.py
 
 import logging
-from typing import Dict, Any, Optional
-
+from typing import Optional
+from datetime import datetime, timezone
 from google.cloud import bigquery
+from shared_lib.models import AnalyticalScenario
 
 logger = logging.getLogger(__name__)
 
+# Zmienne globalne dla klienta i referencji do tabeli
 bigquery_client: Optional[bigquery.Client] = None
-REALIZED_TRADES_TABLE_REF = "trading-bot-463318.trading_analytics.realized_trades_pnl"
+ANALYSIS_TABLE_REF: Optional[str] = None
 
-def initialize_pnl_logger() -> bool:
-    global bigquery_client
-    if bigquery_client is not None:
-        logger.info("[PNL_LOGGER_INIT] Klient BigQuery jest już zainicjalizowany.")
+def initialize_bigquery_for_analysis() -> bool:
+    """Inicjalizuje klienta BigQuery dla tabeli wyników analizy."""
+    global bigquery_client, ANALYSIS_TABLE_REF
+    if bigquery_client:
+        logger.info("[BQ_ANALYSIS_INIT] Klient BigQuery dla analizy jest już zainicjalizowany.")
         return True
     try:
-        logger.info("[PNL_LOGGER_INIT] Próba inicjalizacji klienta BigQuery...")
-        client = bigquery.Client()
-        client.get_table(REALIZED_TRADES_TABLE_REF)
+        logger.info("[BQ_ANALYSIS_INIT] Inicjalizacja klienta BigQuery dla tabeli 'analysis_results'...")
+        # Upewnij się, że te stałe są zdefiniowane w constants.py lub bezpośrednio tutaj
+        project_id = "trading-bot-463318"
+        dataset_id = "trading_analytics"
+        table_id = "analysis_results" # Dedykowana tabela dla wyników analizy
+        
+        client = bigquery.Client(project=project_id)
+        table_ref_str = f"{project_id}.{dataset_id}.{table_id}"
+        client.get_table(table_ref_str)  # Walidacja, czy tabela istnieje
+        
         bigquery_client = client
-        logger.info(f"[PNL_LOGGER_INIT] Klient BigQuery pomyślnie zainicjalizowany. Tabela: {REALIZED_TRADES_TABLE_REF}")
+        ANALYSIS_TABLE_REF = table_ref_str
+        logger.info(f"[BQ_ANALYSIS_INIT] Klient BigQuery dla analizy pomyślnie zainicjalizowany. Tabela: {ANALYSIS_TABLE_REF}")
         return True
     except Exception as e:
-        logger.critical(f"[PNL_LOGGER_INIT] KRYTYCZNY BŁĄD: Inicjalizacja PNL Loggera nie powiodła się: {e}", exc_info=True)
-        bigquery_client = None
+        logger.critical(f"[BQ_ANALYSIS_INIT] KRYTYCZNY BŁĄD: Inicjalizacja klienta BigQuery dla analizy nie powiodła się: {e}", exc_info=True)
+        bigquery_client, ANALYSIS_TABLE_REF = None, None
         return False
 
-def get_pnl_bigquery_client() -> bigquery.Client:
-    if bigquery_client is None:
-        raise RuntimeError("Klient BigQuery dla PNL Loggera nie został pomyślnie zainicjalizowany.")
-    return bigquery_client
-
-def log_realized_trade(trade_pnl_data: Dict[str, Any]):
-    trade_id = trade_pnl_data.get('trade_id', 'N/A')
-    logger.info(f"[{trade_id}] Otrzymano polecenie zapisu do BigQuery z danymi: {trade_pnl_data}")
-    
-    try:
-        client = get_pnl_bigquery_client()
-    except RuntimeError as e:
-        logger.error(f"[{trade_id}] BŁĄD KRYTYCZNY: Nie można zapisać do BigQuery, ponieważ klient nie jest zainicjalizowany: {e}")
+def log_analysis_to_bigquery(scenario: AnalyticalScenario, rr_level: str, result: str):
+    """Loguje wynik pojedynczego scenariusza analitycznego do BigQuery."""
+    if not bigquery_client or not ANALYSIS_TABLE_REF:
+        logger.error(f"[BQ_ANALYSIS_LOGGER] Klient BigQuery nie jest zainicjalizowany. Nie można zapisać wyniku dla {scenario.symbol}.")
         return
 
-    required_keys = ['trade_id', 'symbol', 'realized_pnl_usdt', 'final_result']
-    if not all(key in trade_pnl_data for key in required_keys):
-        logger.error(f"[{trade_id}] BŁĄD: Otrzymano niekompletne dane do zapisu P&L. Pomijam. Dane: {trade_pnl_data}")
-        return
+    tp_prices = {
+        '1.0': scenario.tp_1_0, '1.5': scenario.tp_1_5, '2.0': scenario.tp_2_0,
+        '3.0': scenario.tp_3_0, '4.0': scenario.tp_4_0, '5.0': scenario.tp_5_0
+    }
+
+    row_to_insert = {
+        "alert_id": scenario.alert_id,
+        "scenario_id": f"{scenario.alert_id}_{rr_level.replace('.', '_')}",
+        "symbol": scenario.symbol,
+        "direction": scenario.direction,
+        "entry_price": scenario.entry_price,
+        "sl_price": scenario.sl_price,
+        "tp_price": tp_prices.get(rr_level),
+        "rr_level": rr_level,
+        "result": result,
+        "closed_at": datetime.now(timezone.utc).isoformat(),
+    }
 
     try:
-        rows_to_insert = [trade_pnl_data]
-        logger.info(f"[{trade_id}] --- ROZPOCZYNAM ZAPIS DO TABELI BIGQUERY ---")
-        errors = client.insert_rows_json(REALIZED_TRADES_TABLE_REF, rows_to_insert)
-        
+        errors = bigquery_client.insert_rows_json(ANALYSIS_TABLE_REF, [row_to_insert])
         if not errors:
-            logger.info(f"[{trade_id}] --- SUKCES! Pomyślnie zapisano dane w BigQuery. ---")
+            logger.info(f"[{scenario.symbol}] Zapisano wynik analizy do BigQuery: RR {rr_level} -> {result}")
         else:
-            logger.error(f"[{trade_id}] BŁĄD: BigQuery zwróciło błędy podczas wstawiania wierszy: {errors}")
+            logger.error(f"[{scenario.symbol}] Błąd BigQuery podczas zapisu wyniku analizy: {errors}")
     except Exception as e:
-        logger.error(f"[{trade_id}] KRYTYCZNY, NIEOCZEKIWANY BŁĄD podczas zapisu do BigQuery: {e}", exc_info=True)
+        logger.error(f"[{scenario.symbol}] Krytyczny błąd podczas zapisu wyniku analizy do BigQuery: {e}", exc_info=True)

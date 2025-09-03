@@ -1,19 +1,17 @@
 # Lokalizacja: bot_service/analyzer.py
 
 import logging
-from datetime import datetime, timezone
-from typing import Dict, List
-
 from shared_lib.models import Kline, AnalyticalScenario
 from bot_service import state_manager
-from bot_service.pnl_logger import log_analysis_to_bigquery # Nowa funkcja do logowania
+from bot_service.pnl_logger import log_analysis_to_bigquery
 
 logger = logging.getLogger(__name__)
 
-def _check_scenarios(scenario: AnalyticalScenario, kline: Kline):
+def _check_scenarios(scenario: AnalyticalScenario, kline: Kline) -> (dict, bool):
     """
     Sprawdza status wszystkich aktywnych scenariuszy dla danego alertu.
     Implementuje logikę "Stop Loss ma zawsze priorytet".
+    Zwraca (nowy_status, czy_była_zmiana).
     """
     new_status = scenario.scenario_status.copy()
     has_changed = False
@@ -26,12 +24,12 @@ def _check_scenarios(scenario: AnalyticalScenario, kline: Kline):
         sl_hit = True
 
     if sl_hit:
-        logger.warning(f"[{scenario.symbol}] ANALIZA: Stop Loss ({scenario.sl_price}) został trafiony. Zamykam wszystkie aktywne scenariusze jako 'LOSE'.")
+        logger.warning(f"[{scenario.symbol}] ANALIZA: Stop Loss ({scenario.sl_price}) trafiony na świecy. Zamykam wszystkie aktywne scenariusze jako 'LOSE'.")
         for rr_level, status in new_status.items():
             if status == 'ACTIVE':
                 new_status[rr_level] = 'LOSE'
                 log_analysis_to_bigquery(scenario, rr_level, 'LOSE')
-        has_changed = True
+                has_changed = True
         return new_status, has_changed
 
     # --- KROK 2: SPRAWDZENIE TAKE PROFIT (TYLKO JEŚLI SL NIE ZOSTAŁ TRAFIONY) ---
@@ -69,10 +67,14 @@ def run_analysis_cycle():
     klines_data = state_manager.get_latest_klines_from_cache(list(symbols_to_check))
 
     for scenario_doc in active_scenarios_docs:
+        scenario = None
         try:
-            scenario = AnalyticalScenario.model_validate(scenario_doc.to_dict())
+            scenario_data = scenario_doc.to_dict()
+            scenario = AnalyticalScenario.model_validate(scenario_data)
+            
             kline_dict = klines_data.get(scenario.symbol)
             if not kline_dict:
+                logger.warning(f"[{scenario.symbol}] Brak danych kline w cache dla aktywnego scenariusza {scenario.alert_id}. Pomijam w tym cyklu.")
                 continue
             
             kline = Kline.model_validate(kline_dict)
@@ -82,11 +84,11 @@ def run_analysis_cycle():
             if has_changed:
                 state_manager.update_analytical_scenario_status(scenario.alert_id, new_status)
                 
-                # Jeśli wszystkie scenariusze są zamknięte, usuwamy dokument
                 if all(status != 'ACTIVE' for status in new_status.values()):
-                    logger.info(f"[{scenario.symbol}] Wszystkie scenariusze dla alertu {scenario.alert_id} zostały zakończone. Usuwam dokument analityczny.")
+                    logger.info(f"[{scenario.symbol}] Wszystkie scenariusze dla alertu {scenario.alert_id} zostały zakończone. Rozpoczynam czyszczenie.")
                     state_manager.delete_analytical_scenario(scenario.alert_id)
+                    state_manager.delete_active_setup(scenario.symbol)
 
         except Exception as e:
-            alert_id = scenario_doc.id
+            alert_id = scenario.alert_id if scenario else scenario_doc.id
             logger.error(f"[ANALIZA][{alert_id}] Krytyczny błąd podczas analizy: {e}", exc_info=True)
