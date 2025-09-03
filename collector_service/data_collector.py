@@ -149,8 +149,6 @@ async def run_data_collection_cycle(cycle_id: str) -> (str, int):
     if klines:
         save_klines_to_firestore(klines, cycle_id)
     
-    # Po wykonaniu głównego zadania, wyzwalamy cykl bota analitycznego
-    # Używamy asyncio.create_task, aby zrobić to w tle i nie czekać na odpowiedź
     asyncio.create_task(_trigger_bot_service_cycle(cycle_id))
     
     # --- POPRAWIONA LINIA ---
