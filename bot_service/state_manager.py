@@ -300,3 +300,48 @@ def create_setup_from_alert(alert_data: AlertData):
     
     setup_doc_ref.set(new_setup_data) # Używamy set(), aby zagwarantować czysty start
     logger.info(f"[{alert_data.symbol}] Utworzono/zresetowano setup na podstawie nowego alertu.")
+
+
+# --- NOWE FUNKCJE DLA MODUŁU ANALITYCZNEGO ---
+
+def create_analytical_scenario(alert_data: AlertData):
+    """Tworzy nowy dokument w 'analytical_scenarios' na podstawie alertu."""
+    db = _get_db()
+    doc_ref = db.collection('analytical_scenarios').document(alert_data.id)
+    
+    initial_status = {
+        '1.0': 'ACTIVE', '1.5': 'ACTIVE', '2.0': 'ACTIVE',
+        '3.0': 'ACTIVE', '4.0': 'ACTIVE', '5.0': 'ACTIVE'
+    }
+    
+    scenario_data = {
+        "alert_id": alert_data.id,
+        "symbol": alert_data.symbol,
+        "direction": alert_data.direction,
+        "entry_price": alert_data.entry,
+        "sl_price": alert_data.sl,
+        "tp_1_0": alert_data.tp_1_0,
+        "tp_1_5": alert_data.tp_1_5,
+        "tp_2_0": alert_data.tp_2_0,
+        "tp_3_0": alert_data.tp_3_0,
+        "tp_4_0": alert_data.tp_4_0,
+        "tp_5_0": alert_data.tp_5_0,
+        "scenario_status": initial_status,
+        "created_at": firestore.SERVER_TIMESTAMP
+    }
+    
+    doc_ref.set(scenario_data)
+    logger.info(f"[{alert_data.symbol}] Utworzono nowy scenariusz analityczny dla alertu {alert_data.id}.")
+
+def get_all_active_scenarios() -> Iterable[DocumentSnapshot]:
+    """Pobiera wszystkie aktywne scenariusze analityczne."""
+    return _get_db().collection('analytical_scenarios').stream()
+
+def update_analytical_scenario_status(alert_id: str, new_status: Dict[str, str]):
+    """Aktualizuje statusy scenariuszy w dokumencie."""
+    doc_ref = _get_db().collection('analytical_scenarios').document(alert_id)
+    doc_ref.update({"scenario_status": new_status})
+
+def delete_analytical_scenario(alert_id: str):
+    """Usuwa zakończony dokument analityczny."""
+    _get_db().collection('analytical_scenarios').document(alert_id).delete()

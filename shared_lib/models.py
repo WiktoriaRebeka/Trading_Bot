@@ -89,3 +89,27 @@ class OrderData(BaseModel):
         if v.upper() not in ['LONG', 'SHORT']:
             raise ValueError('Kierunek musi być "LONG" lub "SHORT"')
         return v.upper()
+
+class AnalyticalScenario(BaseModel):
+    """
+    Reprezentuje pojedynczy alert i wszystkie scenariusze R:R do przetestowania.
+    To jest "teczka sprawy" dla naszej analizy.
+    """
+    alert_id: str
+    symbol: str
+    direction: str
+    entry_price: float
+    sl_price: float
+    
+    # Przechowujemy wszystkie potencjalne cele
+    tp_1_0: float
+    tp_1_5: float
+    tp_2_0: float
+    tp_3_0: float
+    tp_4_0: float
+    tp_5_0: float
+    
+    # Śledzimy status każdego scenariusza oddzielnie
+    scenario_status: Dict[str, str] # np. {'1.0': 'ACTIVE', '1.5': 'WIN', '2.0': 'LOSE'}
+    
+    created_at: datetime
