@@ -4,15 +4,15 @@ import aiohttp
 from typing import List, Dict, Any, Optional
 
 from shared_lib import constants
-from shared_lib.firebase_client import get_db
+from shared_lib.firebase_client import get_db, get_symbols_to_watch_from_config
 
 logger = logging.getLogger(__name__)
 
 async def _fetch_kline_for_symbol(session: aiohttp.ClientSession, symbol: str, cycle_id: str) -> Optional[Dict[str, Any]]:
-    """Pobiera najnowszą, zamkniętą świecę 5-minutową dla danego symbolu."""
+    """Pobiera najnowszą, zamkniętą świecę 1-minutową dla danego symbolu."""
     api_symbol = symbol.replace('.P', '')
-    # --- ZMIANA: Zawsze prosimy o 2 świece, aby mieć pewność, że bierzemy ostatnią zamkniętą ---
-    params = {"category": "linear", "symbol": api_symbol, "interval": "5", "limit": 2}
+    # --- KLUCZOWA ZMIANA: Powrót do interwału 1-minutowego ---
+    params = {"category": "linear", "symbol": api_symbol, "interval": "1", "limit": 2}
     max_retries = 3
     
     log_extra = {"json_fields": {"cycle_id": cycle_id, "symbol": symbol}}
@@ -27,11 +27,8 @@ async def _fetch_kline_for_symbol(session: aiohttp.ClientSession, symbol: str, c
                 if data.get("retCode") == 0 and data.get("result") and data["result"].get("list"):
                     kline_list = data["result"]["list"]
                     
-                    # --- KLUCZOWA ZMIANA: Logika wyboru świecy ---
-                    # Bierzemy przedostatnią świecę (indeks 1), która jest ostatnią w pełni zamkniętą.
-                    # Jeśli API zwróci tylko jedną, logujemy ostrzeżenie, ale jej nie używamy.
                     if len(kline_list) > 1:
-                        target_kline = kline_list[1] # Zawsze bierzemy przedostatnią
+                        target_kline = kline_list[1] # Zawsze bierzemy przedostatnią, zamkniętą świecę
                         return {
                             "symbol": symbol, 
                             "high": float(target_kline[2]), 
@@ -40,8 +37,8 @@ async def _fetch_kline_for_symbol(session: aiohttp.ClientSession, symbol: str, c
                             "timestamp": int(target_kline[0])
                         }
                     else:
-                        logger.warning(f"API Bybit zwróciło tylko jedną świecę (prawdopodobnie bieżącą). Pomijam zapis, aby zapewnić spójność danych.", extra=log_extra)
-                        return None # Nie zwracamy nic, jeśli nie mamy pewności
+                        logger.warning(f"API Bybit zwróciło tylko jedną świecę. Pomijam zapis, aby zapewnić spójność danych.", extra=log_extra)
+                        return None
                 else:
                     logger.warning(f"API Bybit zwróciło błąd: {data.get('retMsg', 'Brak wiadomości')}", extra=log_extra)
         except Exception as e:
@@ -52,7 +49,6 @@ async def _fetch_kline_for_symbol(session: aiohttp.ClientSession, symbol: str, c
     return None
 
 async def get_latest_klines_for_all_symbols(symbols_to_watch: List[str], cycle_id: str) -> Dict[str, Dict[str, Any]]:
-    """Asynchronicznie pobiera świece dla wszystkich symboli."""
     log_extra = {"json_fields": {"cycle_id": cycle_id}}
     logger.info(f"Pobieranie klines dla {len(symbols_to_watch)} symboli.")
     
@@ -61,7 +57,6 @@ async def get_latest_klines_for_all_symbols(symbols_to_watch: List[str], cycle_i
         return {}
         
     async with aiohttp.ClientSession() as session:
-        # --- ZMIANA: Usunięto import, który nie jest już potrzebny w tej funkcji ---
         tasks = [_fetch_kline_for_symbol(session, symbol, cycle_id) for symbol in symbols_to_watch]
         results = await asyncio.gather(*tasks, return_exceptions=True)
     
@@ -74,7 +69,6 @@ async def get_latest_klines_for_all_symbols(symbols_to_watch: List[str], cycle_i
     return klines_data
 
 def save_klines_to_firestore(klines_data: Dict[str, Dict[str, Any]], cycle_id: str):
-    """Zapisuje pobrane dane o świecach do Firestore w trybie batch."""
     log_extra = {"json_fields": {"cycle_id": cycle_id}}
     if not klines_data:
         logger.info("Brak nowych danych kline do zapisania.")
@@ -96,13 +90,6 @@ def save_klines_to_firestore(klines_data: Dict[str, Dict[str, Any]], cycle_id: s
         raise
 
 async def run_data_collection_cycle(cycle_id: str) -> (str, int):
-    """
-    Główna funkcja cyklu kolektora: pobiera listę symboli, pobiera dla nich dane
-    i zapisuje je do cache'u w Firestore.
-    """
-    # --- ZMIANA: Usunięto import, który nie jest już potrzebny w tej funkcji ---
-    from shared_lib.firebase_client import get_symbols_to_watch_from_config
-    
     log_extra = {"json_fields": {"cycle_id": cycle_id}}
     
     symbols_to_watch = get_symbols_to_watch_from_config()
