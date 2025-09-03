@@ -12,13 +12,29 @@ from bot_service.bigquery_logger import log_analysis_result
 
 logger = logging.getLogger(__name__)
 
-# --- NOWA FUNKCJA POMOCNICZA ---
-def _calculate_risk_percentage(entry_price: float, sl_price: float) -> Optional[float]:
-    """Oblicza procentową odległość SL od ceny wejścia."""
-    if entry_price == 0:
-        return None
-    risk_distance = abs(entry_price - sl_price)
-    return round((risk_distance / entry_price) * 100, 4)
+def create_analytical_case(case_data: AnalyticalCase):
+    """Tworzy nowy dokument teczki analitycznej w Firestore."""
+    case_id = case_data.alert_id
+    symbol = case_data.symbol
+    logger.info(f"[{case_id}][{symbol}] Próba utworzenia dokumentu w kolekcji '{constants.ANALYTICAL_CASES_COLLECTION}'...")
+    try:
+        db = _get_db()
+        doc_ref = db.collection(constants.ANALYTICAL_CASES_COLLECTION).document(case_id)
+        
+        # Używamy json.loads(model.json()) aby uzyskać słownik z poprawnymi typami dla Firestore
+        data_to_set = json.loads(case_data.json())
+        
+        doc_ref.set(data_to_set)
+        
+        logger.info(f"[{case_id}][{symbol}] SUKCES! Pomyślnie utworzono teczkę analityczną.")
+    except Exception as e:
+        # TO JEST KLUCZOWY LOG, KTÓREGO SZUKAMY
+        logger.critical(
+            f"[{case_id}][{symbol}] KRYTYCZNY BŁĄD podczas zapisu do Firestore w create_analytical_case: {e}", 
+            exc_info=True
+        )
+        # Rzucamy wyjątek dalej, aby zatrzymać proces, jeśli zapis się nie powiedzie
+        raise
 
 def _correct_and_validate_alert(alert: AlertData) -> Optional[AlertData]:
     """Koryguje i waliduje alert, zachowując minimalny próg ryzyka."""
