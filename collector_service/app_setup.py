@@ -1,11 +1,11 @@
-# Lokalizacja: collector_service/app_setup.py 
+# Lokalizacja: collector_service/app_setup.py (NOWY PLIK)
 
 import logging
 import uuid
 import asyncio
 from flask import Flask, jsonify
 
-
+# Importy
 from shared_lib.config_loader import load_config
 from shared_lib.firebase_client import initialize_firebase
 from collector_service.data_collector import run_data_collection_cycle
@@ -36,15 +36,7 @@ def register_endpoints(app: Flask):
             return jsonify({"status": "error", "message": "Service is unhealthy"}), 503
         
         try:
-            # --- KLUCZOWA ZMIANA ---
-            # Tworzymy nową, dedykowaną pętlę zdarzeń, uruchamiamy w niej nasze zadanie,
-            # a następnie ją zamykamy. To zapobiega konfliktom z pętlą Gunicorna.
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            message, status_code = loop.run_until_complete(run_data_collection_cycle(cycle_id))
-            loop.close()
-            # --- KONIEC ZMIANY ---
-
+            message, status_code = asyncio.run(run_data_collection_cycle(cycle_id))
             logger.info("--- ZAKOŃCZENIE CYKLU KOLEKTORA DANYCH ---", extra={"json_fields": {"cycle_id": cycle_id, "status": "success"}})
             return jsonify({"status": "success", "details": message, "cycle_id": cycle_id}), status_code
         except Exception as e:

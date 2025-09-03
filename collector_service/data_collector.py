@@ -1,14 +1,9 @@
-# Lokalizacja: collector_service/data_collector.py 
+# Lokalizacja: collector_service/data_collector.py
+
 import logging
 import asyncio
 import aiohttp
-import os  # <--- DODAJ TĘ LINIĘ
 from typing import List, Dict, Any, Optional
-
-
-import google.auth
-import google.auth.transport.requests
-import google.oauth2.id_token
 
 from shared_lib import constants
 from shared_lib.firebase_client import get_db, get_symbols_to_watch_from_config
@@ -16,9 +11,8 @@ from shared_lib.firebase_client import get_db, get_symbols_to_watch_from_config
 logger = logging.getLogger(__name__)
 
 async def _fetch_kline_for_symbol(session: aiohttp.ClientSession, symbol: str, cycle_id: str) -> Optional[Dict[str, Any]]:
-    """Pobiera najnowszą, zamkniętą świecę 1-minutową dla danego symbolu."""
+    """Pobiera najnowszą świecę dla danego symbolu, logując z cycle_id."""
     api_symbol = symbol.replace('.P', '')
-    # --- KLUCZOWA ZMIANA: Powrót do interwału 1-minutowego ---
     params = {"category": "linear", "symbol": api_symbol, "interval": "1", "limit": 2}
     max_retries = 3
     
@@ -26,26 +20,19 @@ async def _fetch_kline_for_symbol(session: aiohttp.ClientSession, symbol: str, c
 
     for attempt in range(max_retries):
         try:
-            kline_endpoint = "/v5/market/kline"
-            full_url = constants.BYBIT_API_URL_V5 + kline_endpoint
-            async with session.get(full_url, params=params, timeout=5) as response:
+            async with session.get(constants.BYBIT_API_URL_V5_KLINE, params=params, timeout=5) as response:
                 response.raise_for_status()
                 data = await response.json()
                 if data.get("retCode") == 0 and data.get("result") and data["result"].get("list"):
                     kline_list = data["result"]["list"]
-                    
-                    if len(kline_list) > 1:
-                        target_kline = kline_list[1] # Zawsze bierzemy przedostatnią, zamkniętą świecę
-                        return {
-                            "symbol": symbol, 
-                            "high": float(target_kline[2]), 
-                            "low": float(target_kline[3]), 
-                            "close": float(target_kline[4]), 
-                            "timestamp": int(target_kline[0])
-                        }
-                    else:
-                        logger.warning(f"API Bybit zwróciło tylko jedną świecę. Pomijam zapis, aby zapewnić spójność danych.", extra=log_extra)
-                        return None
+                    target_kline = kline_list[1] if len(kline_list) > 1 else kline_list[0]
+                    return {
+                        "symbol": symbol, 
+                        "high": float(target_kline[2]), 
+                        "low": float(target_kline[3]), 
+                        "close": float(target_kline[4]), 
+                        "timestamp": int(target_kline[0]) # <-- POPRAWIONA NAZWA POLA
+                    }
                 else:
                     logger.warning(f"API Bybit zwróciło błąd: {data.get('retMsg', 'Brak wiadomości')}", extra=log_extra)
         except Exception as e:
@@ -56,6 +43,7 @@ async def _fetch_kline_for_symbol(session: aiohttp.ClientSession, symbol: str, c
     return None
 
 async def get_latest_klines_for_all_symbols(symbols_to_watch: List[str], cycle_id: str) -> Dict[str, Dict[str, Any]]:
+    """Asynchronicznie pobiera świece dla wszystkich symboli."""
     log_extra = {"json_fields": {"cycle_id": cycle_id}}
     logger.info(f"Pobieranie klines dla {len(symbols_to_watch)} symboli.")
     
@@ -76,6 +64,7 @@ async def get_latest_klines_for_all_symbols(symbols_to_watch: List[str], cycle_i
     return klines_data
 
 def save_klines_to_firestore(klines_data: Dict[str, Dict[str, Any]], cycle_id: str):
+    """Zapisuje pobrane dane o świecach do Firestore w trybie batch."""
     log_extra = {"json_fields": {"cycle_id": cycle_id}}
     if not klines_data:
         logger.info("Brak nowych danych kline do zapisania.")
@@ -96,60 +85,21 @@ def save_klines_to_firestore(klines_data: Dict[str, Dict[str, Any]], cycle_id: s
         logger.error(f"Krytyczny błąd podczas zapisu batchowego do Firestore: {e}", exc_info=True, extra=log_extra)
         raise
 
-# --- NOWA FUNKCJA WYZWALAJĄCA ---
-async def _trigger_bot_service_cycle(cycle_id: str):
-    """
-    Wywołuje endpoint /run-bot-cycle w usłudze trading-bot-service.
-    Działa jako wewnętrzny, niezawodny trigger.
-    """
-    log_extra = {"json_fields": {"cycle_id": cycle_id}}
-    
-    # Pobieramy URL docelowej usługi ze zmiennej środowiskowej
-    target_url = os.getenv("TRADING_BOT_SERVICE_URL")
-    if not target_url:
-        logger.error("Zmienna środowiskowa TRADING_BOT_SERVICE_URL nie jest ustawiona! Nie można wyzwolić cyklu bota.", extra=log_extra)
-        return
-
-    try:
-        logger.info(f"Próba wyzwolenia cyklu bota w usłudze: {target_url}", extra=log_extra)
-        
-        # Uzyskujemy token tożsamości OIDC do bezpiecznego wywołania innej usługi Cloud Run
-        creds, project = google.auth.default()
-        auth_req = google.auth.transport.requests.Request()
-        id_token = google.oauth2.id_token.fetch_id_token(auth_req, target_url)
-        
-        headers = {
-            "Authorization": f"Bearer {id_token}"
-        }
-
-        async with aiohttp.ClientSession() as session:
-            async with session.post(target_url, headers=headers, timeout=10) as response:
-                if response.status == 200:
-                    logger.info(f"Pomyślnie wyzwolono cykl bota. Status: {response.status}", extra=log_extra)
-                else:
-                    responseText = await response.text()
-                    logger.error(f"Błąd podczas wyzwalania cyklu bota. Status: {response.status}, Odpowiedź: {responseText}", extra=log_extra)
-
-    except Exception as e:
-        logger.error(f"Krytyczny błąd podczas próby wyzwolenia cyklu bota: {e}", exc_info=True, extra=log_extra)
-
-
 async def run_data_collection_cycle(cycle_id: str) -> (str, int):
+    """
+    Główna funkcja cyklu kolektora: pobiera listę symboli, pobiera dla nich dane
+    i zapisuje je do cache'u w Firestore.
+    """
     log_extra = {"json_fields": {"cycle_id": cycle_id}}
     
     symbols_to_watch = get_symbols_to_watch_from_config()
     if not symbols_to_watch:
         logger.warning("Brak symboli do przetworzenia w konfiguracji.")
-        # Mimo braku symboli, nadal próbujemy wyzwolić bota, bo może mieć inne zadania
-        await _trigger_bot_service_cycle(cycle_id)
-        return "Brak symboli do przetworzenia, ale cykl bota został wyzwolony.", 200
+        return "Brak symboli do przetworzenia w konfiguracji.", 200
         
     klines = await get_latest_klines_for_all_symbols(symbols_to_watch, cycle_id)
     
     if klines:
         save_klines_to_firestore(klines, cycle_id)
     
-    asyncio.create_task(_trigger_bot_service_cycle(cycle_id))
-    
-    # --- POPRAWIONA LINIA ---
-    return f"Cykl kolektora zakończony. Przetworzono {len(klines)}/{len(symbols_to_watch)} symboli. Cykl bota został wyzwolony.", 200
+    return f"Cykl kolektora danych zakończony. Przetworzono {len(klines)}/{len(symbols_to_watch)} symboli.", 200

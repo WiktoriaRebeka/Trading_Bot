@@ -1,5 +1,4 @@
 # Lokalizacja: shared_lib/models.py
-
 from pydantic import BaseModel, Field, validator
 from typing import Optional, Dict, Any, List
 from datetime import datetime
@@ -22,7 +21,7 @@ class AlertData(BaseModel):
     tp_5_0: float
     
     class Config:
-        populate_by_name = True  # ZMIANA Z 'allow_population_by_field_name'
+        allow_population_by_field_name = True
         extra = 'ignore'
 
     @validator('direction', pre=True, always=True)
@@ -53,7 +52,6 @@ class OpenTradeData(BaseModel):
     opened_at_ms: int
     opened_at_iso: str
     alert_data_snapshot: Dict[str, Any]
-    bybit_order_id: str 
 
 class Kline(BaseModel):
     timestamp: int
@@ -62,55 +60,19 @@ class Kline(BaseModel):
     close: float
 
 class AnalyzedTradeData(BaseModel):
+    """
+    Ulepszony model "ducha" ze stanem do inkrementalnej analizy.
+    """
     trade_id: str
     symbol: str
     direction: str
-    ob_type: str
+    ob_type: str  # <-- DODANE NOWE POLE
     entry_price: float
     original_sl: float
     original_tp_5_0: Optional[float] = None
     opened_at_ms: int
     alert_data_snapshot: Dict[str, Any]
+    
     last_known_extreme_price: float
     last_analysis_timestamp_ms: int
     achieved_tps: List[str] = []
-
-class OrderData(BaseModel):
-    symbol: str
-    direction: str
-    entry_price: float
-    sl_price: float
-    tp_price: float
-    margin_value_usdc: float
-    leverage: int
-
-    @validator('direction')
-    def direction_must_be_valid(cls, v):
-        if v.upper() not in ['LONG', 'SHORT']:
-            raise ValueError('Kierunek musi być "LONG" lub "SHORT"')
-        return v.upper()
-
-class AnalyticalScenario(BaseModel):
-    """
-    Reprezentuje pojedynczy alert i wszystkie scenariusze R:R do przetestowania.
-    To jest "teczka sprawy" dla naszej analizy.
-    """
-    alert_id: str
-    symbol: str
-    direction: str
-    entry_price: float
-    sl_price: float
-    
-    # Przechowujemy wszystkie potencjalne cele
-    tp_1_0: float
-    tp_1_5: float
-    tp_2_0: float
-    tp_3_0: float
-    tp_4_0: float
-    tp_5_0: float
-    
-    # Śledzimy status każdego scenariusza oddzielnie
-    scenario_status: Dict[str, str] # np. {'1.0': 'ACTIVE', '1.5': 'WIN', '2.0': 'LOSE'}
-    entry_status: str = 'PENDING' 
-    created_at: datetime
-

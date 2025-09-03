@@ -1,4 +1,3 @@
-
 Flask
 gunicorn
 google-cloud-firestore
@@ -8,4 +7,3 @@ google-cloud-logging
 pydantic
 python-dotenv
 requests
-pybit>=2.7.0
