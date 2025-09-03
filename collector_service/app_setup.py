@@ -36,7 +36,15 @@ def register_endpoints(app: Flask):
             return jsonify({"status": "error", "message": "Service is unhealthy"}), 503
         
         try:
-            message, status_code = asyncio.run(run_data_collection_cycle(cycle_id))
+            # --- KLUCZOWA ZMIANA ---
+            # Tworzymy nową, dedykowaną pętlę zdarzeń, uruchamiamy w niej nasze zadanie,
+            # a następnie ją zamykamy. To zapobiega konfliktom z pętlą Gunicorna.
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            message, status_code = loop.run_until_complete(run_data_collection_cycle(cycle_id))
+            loop.close()
+            # --- KONIEC ZMIANY ---
+
             logger.info("--- ZAKOŃCZENIE CYKLU KOLEKTORA DANYCH ---", extra={"json_fields": {"cycle_id": cycle_id, "status": "success"}})
             return jsonify({"status": "success", "details": message, "cycle_id": cycle_id}), status_code
         except Exception as e:
