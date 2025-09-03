@@ -1,7 +1,14 @@
+# Lokalizacja: collector_service/data_collector.py 
 import logging
 import asyncio
 import aiohttp
+import os  # <--- DODAJ TĘ LINIĘ
 from typing import List, Dict, Any, Optional
+
+
+import google.auth
+import google.auth.transport.requests
+import google.oauth2.id_token
 
 from shared_lib import constants
 from shared_lib.firebase_client import get_db, get_symbols_to_watch_from_config
@@ -89,17 +96,62 @@ def save_klines_to_firestore(klines_data: Dict[str, Dict[str, Any]], cycle_id: s
         logger.error(f"Krytyczny błąd podczas zapisu batchowego do Firestore: {e}", exc_info=True, extra=log_extra)
         raise
 
+# --- NOWA FUNKCJA WYZWALAJĄCA ---
+async def _trigger_bot_service_cycle(cycle_id: str):
+    """
+    Wywołuje endpoint /run-bot-cycle w usłudze trading-bot-service.
+    Działa jako wewnętrzny, niezawodny trigger.
+    """
+    log_extra = {"json_fields": {"cycle_id": cycle_id}}
+    
+    # Pobieramy URL docelowej usługi ze zmiennej środowiskowej
+    target_url = os.getenv("TRADING_BOT_SERVICE_URL")
+    if not target_url:
+        logger.error("Zmienna środowiskowa TRADING_BOT_SERVICE_URL nie jest ustawiona! Nie można wyzwolić cyklu bota.", extra=log_extra)
+        return
+
+    try:
+        logger.info(f"Próba wyzwolenia cyklu bota w usłudze: {target_url}", extra=log_extra)
+        
+        # Uzyskujemy token tożsamości OIDC do bezpiecznego wywołania innej usługi Cloud Run
+        creds, project = google.auth.default()
+        auth_req = google.auth.transport.requests.Request()
+        id_token = google.oauth2.id_token.fetch_id_token(auth_req, target_url)
+        
+        headers = {
+            "Authorization": f"Bearer {id_token}"
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(target_url, headers=headers, timeout=10) as response:
+                if response.status == 200:
+                    logger.info(f"Pomyślnie wyzwolono cykl bota. Status: {response.status}", extra=log_extra)
+                else:
+                    responseText = await response.text()
+                    logger.error(f"Błąd podczas wyzwalania cyklu bota. Status: {response.status}, Odpowiedź: {responseText}", extra=log_extra)
+
+    except Exception as e:
+        logger.error(f"Krytyczny błąd podczas próby wyzwolenia cyklu bota: {e}", exc_info=True, extra=log_extra)
+
+
+# --- ZMODYFIKOWANA GŁÓWNA FUNKCJA ---
 async def run_data_collection_cycle(cycle_id: str) -> (str, int):
     log_extra = {"json_fields": {"cycle_id": cycle_id}}
     
     symbols_to_watch = get_symbols_to_watch_from_config()
     if not symbols_to_watch:
         logger.warning("Brak symboli do przetworzenia w konfiguracji.")
-        return "Brak symboli do przetworzenia w konfiguracji.", 200
+        # Mimo braku symboli, nadal próbujemy wyzwolić bota, bo może mieć inne zadania
+        await _trigger_bot_service_cycle(cycle_id)
+        return "Brak symboli do przetworzenia, ale cykl bota został wyzwolony.", 200
         
     klines = await get_latest_klines_for_all_symbols(symbols_to_watch, cycle_id)
     
     if klines:
         save_klines_to_firestore(klines, cycle_id)
     
-    return f"Cykl kolektora danych zakończony. Przetworzono {len(klines)}/{len(symbols_to_watch)} symboli.", 200
+    # Po wykonaniu głównego zadania, wyzwalamy cykl bota analitycznego
+    # Używamy asyncio.create_task, aby zrobić to w tle i nie czekać na odpowiedź
+    asyncio.create_task(_trigger_bot_service_cycle(cycle_id))
+    
+    return f"Cykl kolektora zakończony. Przetworzono {len(klines)}/{len(symbols_to_watch)} symboli. Cykl bota został 
