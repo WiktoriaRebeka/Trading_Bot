@@ -1,5 +1,8 @@
+# Lokalizacja: bot_service/app_setup.py
+
 import logging
 import uuid
+import time  # Dodajemy import modułu time
 from flask import Flask, jsonify
 
 # Importy logiki biznesowej i inicjalizatorów
@@ -10,6 +13,10 @@ from bot_service.bot_logic import process_new_alerts, run_analysis_cycle
 from bot_service.fetch_from_firestore import load_last_processed_timestamp, fetch_new_alerts_since, save_last_processed_timestamp
 
 logger = logging.getLogger(__name__)
+
+# --- NOWE STAŁE KONFIGURACYJNE DLA MECHANIZMU PONAWIANIA ---
+MAX_INIT_RETRIES = 3  # Maksymalna liczba prób inicjalizacji każdej usługi
+INIT_RETRY_DELAY_SECONDS = 5  # Czas oczekiwania między próbami
 
 def register_endpoints(app: Flask):
     """Rejestruje wszystkie endpointy aplikacji."""
@@ -32,7 +39,7 @@ def register_endpoints(app: Flask):
 
         if not app.config.get('INITIALIZATION_SUCCESS', False):
              reason = app.config.get('INITIALIZATION_FAILURE_REASON', 'Unknown initialization error.')
-             logger.error(f"Zatrzymano cykl, ponieważ aplikacja nie została poprawnie zainicjalizowana. Powód: {reason}", extra={"json_fields": {"cycle_id": cycle_id}})
+             logger.error(f"Zatrzymano cykl, ponieważ aplikacja nie została poprawnie zainicjalizada. Powód: {reason}", extra={"json_fields": {"cycle_id": cycle_id}})
              return jsonify({"status": "error", "message": f"Service is unhealthy: {reason}"}), 503
         try:
             last_ts = load_last_processed_timestamp()
@@ -52,27 +59,49 @@ def register_endpoints(app: Flask):
             return jsonify({"status": "error", "message": str(e), "cycle_id": cycle_id}), 500
 
 def initialize_app_services(app: Flask):
-    """Wykonuje całą logikę inicjalizacji w kontekście aplikacji."""
+    """Wykonuje całą logikę inicjalizacji w kontekście aplikacji, z mechanizmem ponawiania."""
     with app.app_context():
         logger.info("Rozpoczynam konfigurację aplikacji bot_service wewnątrz kontekstu.")
         load_config()
 
-        firebase_ok = initialize_firebase()
-        if not firebase_ok:
-            app.config['INITIALIZATION_FAILURE_REASON'] = "Failed to initialize Firebase/Firestore."
-            logger.critical(app.config['INITIALIZATION_FAILURE_REASON'])
-        
-        bigquery_ok = initialize_bigquery()
-        if not bigquery_ok:
-            reason = app.config.get('INITIALIZATION_FAILURE_REASON', '')
-            new_reason = "Failed to initialize BigQuery."
-            app.config['INITIALIZATION_FAILURE_REASON'] = f"{reason} {new_reason}".strip()
-            logger.critical(new_reason)
+        failure_reasons = []
 
-        if firebase_ok and bigquery_ok:
+        # --- ULEPSZONA LOGIKA INICJALIZACJI Z PONAWIANIEM ---
+        
+        # Inicjalizacja Firebase
+        firebase_ok = False
+        for attempt in range(1, MAX_INIT_RETRIES + 1):
+            logger.info(f"Próba inicjalizacji Firebase... ({attempt}/{MAX_INIT_RETRIES})")
+            if initialize_firebase():
+                firebase_ok = True
+                logger.info("Inicjalizacja Firebase zakończona sukcesem.")
+                break
+            if attempt < MAX_INIT_RETRIES:
+                logger.warning(f"Inicjalizacja Firebase nie powiodła się. Ponawiam za {INIT_RETRY_DELAY_SECONDS}s.")
+                time.sleep(INIT_RETRY_DELAY_SECONDS)
+        if not firebase_ok:
+            failure_reasons.append("Failed to initialize Firebase/Firestore")
+
+        # Inicjalizacja BigQuery
+        bigquery_ok = False
+        for attempt in range(1, MAX_INIT_RETRIES + 1):
+            logger.info(f"Próba inicjalizacji BigQuery... ({attempt}/{MAX_INIT_RETRIES})")
+            if initialize_bigquery():
+                bigquery_ok = True
+                logger.info("Inicjalizacja BigQuery zakończona sukcesem.")
+                break
+            if attempt < MAX_INIT_RETRIES:
+                logger.warning(f"Inicjalizacja BigQuery nie powiodła się. Ponawiam za {INIT_RETRY_DELAY_SECONDS}s.")
+                time.sleep(INIT_RETRY_DELAY_SECONDS)
+        if not bigquery_ok:
+            failure_reasons.append("Failed to initialize BigQuery")
+
+        # Ostateczna decyzja o stanie aplikacji
+        if not failure_reasons:
             app.config['INITIALIZATION_SUCCESS'] = True
             logger.info("Aplikacja Flask [bot_service] została pomyślnie utworzona i skonfigurowana.")
         else:
             app.config['INITIALIZATION_SUCCESS'] = False
-            final_reason = app.config.get('INITIALIZATION_FAILURE_REASON', 'Unknown initialization error.')
+            final_reason = " & ".join(failure_reasons)
+            app.config['INITIALIZATION_FAILURE_REASON'] = final_reason
             logger.critical(f"Krytyczny błąd podczas inicjalizacji. Aplikacja będzie zwracać błędy 503. Powód: {final_reason}")
