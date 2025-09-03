@@ -21,12 +21,12 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executo
             alert_data = AlertData.model_validate(alert_dict)
             symbol = alert_data.symbol
 
-            # Sprawdzamy, czy już nie analizujemy tego alertu
+            # Sprawdzamy, czy już nie analizujemy tego alertu (na podstawie istnienia setupu)
             if state_manager.get_active_setup(symbol):
                 logger.warning(f"[{symbol}] Już istnieje aktywny setup/analiza. Ignoruję nowy alert {alert_id}.")
                 continue
 
-            # --- NOWY FILTR BEZPIECZEŃSTWA 0.05% ---
+            # --- FILTR BEZPIECZEŃSTWA 0.05% ---
             MIN_SL_DISTANCE_PERCENT = Decimal("0.0005") # 0.05%
             entry_price = Decimal(str(alert_data.entry))
             sl_price = Decimal(str(alert_data.sl))

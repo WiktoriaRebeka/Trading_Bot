@@ -113,3 +113,4 @@ class AnalyticalScenario(BaseModel):
     scenario_status: Dict[str, str] # np. {'1.0': 'ACTIVE', '1.5': 'WIN', '2.0': 'LOSE'}
     
     created_at: datetime
+
