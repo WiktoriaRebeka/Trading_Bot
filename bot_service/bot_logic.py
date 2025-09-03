@@ -31,18 +31,29 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executo
             alert_data = AlertData.model_validate(alert_dict)
             symbol = alert_data.symbol
 
-            # ZASADA 1: Jeden Symbol, Jedna Operacja
-            if state_manager.get_active_setup(symbol):
-                logger.warning(f"[{symbol}] Już istnieje aktywna analiza dla tego symbolu. Ignoruję nowy alert {alert_id}.")
-                continue
+            # --- NOWA, ZAAWANSOWANA LOGIKA OBSŁUGI ISTNIEJĄCEJ ANALIZY ---
+            existing_scenario = state_manager.find_scenario_by_symbol(symbol)
 
-            # ZASADA 2: Walidacja Logiki SL
+            if existing_scenario:
+                # Sprawdzamy, czy jakikolwiek scenariusz osiągnął już WIN (odpowiednik "pozycji otwartej")
+                is_position_open = any(status == 'WIN' for status in existing_scenario.scenario_status.values())
+
+                if is_position_open:
+                    # POZYCJA OTWARTA: Ignorujemy nowy alert i kontynuujemy starą analizę
+                    logger.warning(f"[{symbol}] Istnieje już 'otwarta' analiza (przynajmniej jeden TP trafiony). Ignoruję nowy alert {alert_id}.")
+                    continue
+                else:
+                    # ZLECENIE OCZEKUJĄCE: Anulujemy starą analizę, aby zrobić miejsce na nową
+                    logger.info(f"[{symbol}] Znaleziono 'oczekującą' analizę ({existing_scenario.alert_id}). Zastępuję ją nowym alertem {alert_id}.")
+                    state_manager.delete_analytical_scenario(existing_scenario.alert_id)
+                    # Nie usuwamy 'active_setup', bo zostanie on nadpisany poniżej
+            
+            # --- Walidacje (pozostają bez zmian) ---
             if not _is_sl_valid(alert_data):
                 logger.warning(f"[{symbol}] Alert {alert_id} odrzucony z powodu nieprawidłowej logiki Stop Lossa.")
                 continue
 
-            # ZASADA 3: Filtr Minimalnego Ryzyka
-            MIN_SL_DISTANCE_PERCENT = Decimal("0.0005") # 0.05%
+            MIN_SL_DISTANCE_PERCENT = Decimal("0.0005")
             entry_price = Decimal(str(alert_data.entry))
             sl_price = Decimal(str(alert_data.sl))
 
@@ -50,16 +61,12 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executo
                 sl_distance_percentage = abs(entry_price - sl_price) / entry_price
                 if sl_distance_percentage < MIN_SL_DISTANCE_PERCENT:
                     logger.warning(
-                        f"[{symbol}] Alert {alert_id} odrzucony. Odległość SL ({sl_distance_percentage:.4%}) "
-                        f"jest mniejsza niż wymagane minimum ({MIN_SL_DISTANCE_PERCENT:.4%})."
-                    )
+                        f"[{symbol}] Alert {alert_id} odrzucony. Odległość SL ({sl_distance_percentage:.4%}) jest mniejsza niż minimum.")
                     continue
             
             logger.info(f"[{symbol}] Alert {alert_id} przeszedł walidację. Inicjuję proces analityczny.")
-            # Krok 1: Tworzymy "teczkę analityczną"
+            # Tworzymy nową "teczkę analityczną" i nadpisujemy/tworzymy blokadę
             state_manager.create_analytical_scenario(alert_data)
-            
-            # Krok 2: Tworzymy blokadę w 'active_setups'
             state_manager.create_setup_from_alert(alert_data)
 
         except Exception as e:
