@@ -134,7 +134,6 @@ async def _trigger_bot_service_cycle(cycle_id: str):
         logger.error(f"Krytyczny błąd podczas próby wyzwolenia cyklu bota: {e}", exc_info=True, extra=log_extra)
 
 
-# --- ZMODYFIKOWANA GŁÓWNA FUNKCJA ---
 async def run_data_collection_cycle(cycle_id: str) -> (str, int):
     log_extra = {"json_fields": {"cycle_id": cycle_id}}
     
@@ -154,4 +153,5 @@ async def run_data_collection_cycle(cycle_id: str) -> (str, int):
     # Używamy asyncio.create_task, aby zrobić to w tle i nie czekać na odpowiedź
     asyncio.create_task(_trigger_bot_service_cycle(cycle_id))
     
-    return f"Cykl kolektora zakończony. Przetworzono {len(klines)}/{len(symbols_to_watch)} symboli. Cykl bota został 
+    # --- POPRAWIONA LINIA ---
+    return f"Cykl kolektora zakończony. Przetworzono {len(klines)}/{len(symbols_to_watch)} symboli. Cykl bota został wyzwolony.", 200
