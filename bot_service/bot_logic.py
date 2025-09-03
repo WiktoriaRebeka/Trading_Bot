@@ -20,57 +20,57 @@ def _is_sl_valid(alert_data: AlertData) -> bool:
         return False
     return True
 
+# Zastąp funkcję process_new_alerts
 def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]], bybit_executor: BybitExecutor):
     if not newly_fetched_alerts:
         return
     logger.info(f"Otrzymano {len(newly_fetched_alerts)} nowych alertów do przetworzenia.")
     
-    for alert_dict in newly_fetched_alerts:
-        alert_id = alert_dict.get('id', 'N/A')
-        try:
-            alert_data = AlertData.model_validate(alert_dict)
-            symbol = alert_data.symbol
+    # Grupujemy alerty po symbolach, aby przetwarzać je w odpowiedniej kolejności
+    alerts_by_symbol = {}
+    for alert in newly_fetched_alerts:
+        symbol = alert.get('symbol')
+        if symbol:
+            if symbol not in alerts_by_symbol:
+                alerts_by_symbol[symbol] = []
+            alerts_by_symbol[symbol].append(alert)
 
-            # --- NOWA, ZAAWANSOWANA LOGIKA OBSŁUGI ISTNIEJĄCEJ ANALIZY ---
-            existing_scenario = state_manager.find_scenario_by_symbol(symbol)
+    for symbol, alerts in alerts_by_symbol.items():
+        # Pobieramy wszystkie istniejące scenariusze dla danego symbolu
+        existing_scenarios = state_manager.find_all_scenarios_by_symbol(symbol)
+        
+        for alert_dict in alerts:
+            alert_id = alert_dict.get('id', 'N/A')
+            try:
+                alert_data = AlertData.model_validate(alert_dict)
 
-            if existing_scenario:
-                # Sprawdzamy, czy jakikolwiek scenariusz osiągnął już WIN (odpowiednik "pozycji otwartej")
-                is_position_open = any(status == 'WIN' for status in existing_scenario.scenario_status.values())
+                # Sprawdzamy, czy istnieje scenariusz w stanie PENDING
+                pending_scenario = next((s for s in existing_scenarios if s.entry_status == 'PENDING'), None)
 
-                if is_position_open:
-                    # POZYCJA OTWARTA: Ignorujemy nowy alert i kontynuujemy starą analizę
-                    logger.warning(f"[{symbol}] Istnieje już 'otwarta' analiza (przynajmniej jeden TP trafiony). Ignoruję nowy alert {alert_id}.")
+                if pending_scenario:
+                    # ZLECENIE OCZEKUJĄCE: Anulujemy starą analizę i zastępujemy ją nową
+                    logger.info(f"[{symbol}] Znaleziono 'oczekującą' analizę ({pending_scenario.alert_id}). Zastępuję ją nowym alertem {alert_id}.")
+                    state_manager.delete_analytical_scenario(pending_scenario.alert_id)
+                    # Usuwamy go z naszej listy, aby nie był brany pod uwagę przy następnym alercie
+                    existing_scenarios.remove(pending_scenario)
+                
+                # Walidacje
+                if not _is_sl_valid(alert_data):
+                    logger.warning(f"[{symbol}] Alert {alert_id} odrzucony (nieprawidłowy SL).")
                     continue
-                else:
-                    # ZLECENIE OCZEKUJĄCE: Anulujemy starą analizę, aby zrobić miejsce na nową
-                    logger.info(f"[{symbol}] Znaleziono 'oczekującą' analizę ({existing_scenario.alert_id}). Zastępuję ją nowym alertem {alert_id}.")
-                    state_manager.delete_analytical_scenario(existing_scenario.alert_id)
-                    # Nie usuwamy 'active_setup', bo zostanie on nadpisany poniżej
-            
-            # --- Walidacje (pozostają bez zmian) ---
-            if not _is_sl_valid(alert_data):
-                logger.warning(f"[{symbol}] Alert {alert_id} odrzucony z powodu nieprawidłowej logiki Stop Lossa.")
-                continue
-
-            MIN_SL_DISTANCE_PERCENT = Decimal("0.0005")
-            entry_price = Decimal(str(alert_data.entry))
-            sl_price = Decimal(str(alert_data.sl))
-
-            if entry_price > 0:
-                sl_distance_percentage = abs(entry_price - sl_price) / entry_price
-                if sl_distance_percentage < MIN_SL_DISTANCE_PERCENT:
-                    logger.warning(
-                        f"[{symbol}] Alert {alert_id} odrzucony. Odległość SL ({sl_distance_percentage:.4%}) jest mniejsza niż minimum.")
+                
+                MIN_SL_DISTANCE_PERCENT = Decimal("0.0005")
+                entry_price = Decimal(str(alert_data.entry))
+                sl_price = Decimal(str(alert_data.sl))
+                if entry_price > 0 and (abs(entry_price - sl_price) / entry_price) < MIN_SL_DISTANCE_PERCENT:
+                    logger.warning(f"[{symbol}] Alert {alert_id} odrzucony (zbyt mała odległość SL).")
                     continue
-            
-            logger.info(f"[{symbol}] Alert {alert_id} przeszedł walidację. Inicjuję proces analityczny.")
-            # Tworzymy nową "teczkę analityczną" i nadpisujemy/tworzymy blokadę
-            state_manager.create_analytical_scenario(alert_data)
-            state_manager.create_setup_from_alert(alert_data)
+                
+                logger.info(f"[{symbol}] Alert {alert_id} przeszedł walidację. Tworzę nową 'teczkę analityczną'.")
+                state_manager.create_analytical_scenario(alert_data)
 
-        except Exception as e:
-            logger.critical(f"[Alert: {alert_id}] Nieoczekiwany błąd w process_new_alerts: {e}", exc_info=True)
+            except Exception as e:
+                logger.critical(f"[Alert: {alert_id}] Błąd w process_new_alerts: {e}", exc_info=True)
 
 def run_trading_logic(bybit_executor: BybitExecutor):
     """

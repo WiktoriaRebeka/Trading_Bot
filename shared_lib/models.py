@@ -111,6 +111,6 @@ class AnalyticalScenario(BaseModel):
     
     # Śledzimy status każdego scenariusza oddzielnie
     scenario_status: Dict[str, str] # np. {'1.0': 'ACTIVE', '1.5': 'WIN', '2.0': 'LOSE'}
-    
+    entry_status: str = 'PENDING' 
     created_at: datetime
 

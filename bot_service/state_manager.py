@@ -14,43 +14,6 @@ def _get_db() -> firestore.Client:
     """Zwraca instancję klienta Firestore."""
     return get_db()
 
-# --- FUNKCJE ZARZĄDZANIA BLOKADAMI ('active_setups') ---
-
-def get_active_setup(symbol: str) -> Optional[Dict[str, Any]]:
-    """Pobiera pojedynczy dokument blokady na podstawie symbolu."""
-    try:
-        doc_ref = _get_db().collection(constants.SETUP_COLLECTION).document(symbol)
-        doc = doc_ref.get()
-        if doc.exists:
-            return doc.to_dict()
-        return None
-    except Exception as e:
-        logger.error(f"Błąd podczas pobierania aktywnego setupu dla {symbol}: {e}")
-        return None
-
-def create_setup_from_alert(alert_data: AlertData):
-    """
-    Tworzy lub nadpisuje dokument blokady w 'active_setups' na podstawie alertu.
-    Gwarantuje czysty start dla nowej analizy.
-    """
-    db = _get_db()
-    setup_doc_ref = db.collection(constants.SETUP_COLLECTION).document(alert_data.symbol)
-    
-    new_setup_data = {
-        "alert_id": alert_data.id, # Dodajemy ID alertu dla łatwiejszego śledzenia
-        "symbol": alert_data.symbol,
-        "created_at": firestore.SERVER_TIMESTAMP
-    }
-    
-    setup_doc_ref.set(new_setup_data)
-    logger.info(f"[{alert_data.symbol}] Utworzono/zresetowano blokadę ('active_setup') na podstawie alertu {alert_data.id}.")
-
-def delete_active_setup(symbol: str):
-    """Usuwa dokument blokady z 'active_setups' po zakończeniu analizy."""
-    _get_db().collection(constants.SETUP_COLLECTION).document(symbol).delete()
-    logger.info(f"[{symbol}] Usunięto blokadę ('active_setup') po zakończeniu analizy.")
-
-# --- FUNKCJE ZARZĄDZANIA SCENARIUSZAMI ANALITYCZNYMI ---
 
 def create_analytical_scenario(alert_data: AlertData):
     """Tworzy nowy dokument w 'analytical_scenarios' na podstawie alertu."""
@@ -75,6 +38,7 @@ def create_analytical_scenario(alert_data: AlertData):
         tp_4_0=alert_data.tp_4_0,
         tp_5_0=alert_data.tp_5_0,
         scenario_status=initial_status,
+        entry_status='PENDING',  
         created_at=datetime.now(timezone.utc)
     )
     
@@ -135,3 +99,21 @@ def get_latest_klines_from_cache(symbols: Iterable[str]) -> Dict[str, Dict[str, 
         logger.warning(f"[KLINE_CACHE] Nie udało się pobrać ŻADNYCH rekordów kline z cache'u dla symboli: {unique_symbols}.")
         
     return klines_cache
+
+def update_analytical_scenario_entry_status(alert_id: str, new_status: str):
+    """Aktualizuje status wejścia w dokumencie."""
+    doc_ref = _get_db().collection('analytical_scenarios').document(alert_id)
+    doc_ref.update({"entry_status": new_status})
+    logger.info(f"[Alert: {alert_id}] Status wejścia zaktualizowany na {new_status}.")
+
+def find_all_scenarios_by_symbol(symbol: str) -> List[AnalyticalScenario]:
+    """Wyszukuje WSZYSTKIE aktywne scenariusze dla danego symbolu."""
+    scenarios = []
+    try:
+        scenarios_ref = _get_db().collection('analytical_scenarios').where('symbol', '==', symbol).stream()
+        for scenario_doc in scenarios_ref:
+            scenarios.append(AnalyticalScenario.model_validate(scenario_doc.to_dict()))
+        return scenarios
+    except Exception as e:
+        logger.error(f"Błąd podczas wyszukiwania scenariuszy dla symbolu {symbol}: {e}")
+        return []

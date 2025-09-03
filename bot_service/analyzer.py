@@ -7,16 +7,28 @@ from bot_service.pnl_logger import log_analysis_to_bigquery
 
 logger = logging.getLogger(__name__)
 
+# Zastąp funkcję _check_scenarios
 def _check_scenarios(scenario: AnalyticalScenario, kline: Kline) -> (dict, bool):
-    """
-    Sprawdza status wszystkich aktywnych scenariuszy dla danego alertu.
-    Implementuje logikę "Stop Loss ma zawsze priorytet".
-    Zwraca (nowy_status, czy_była_zmiana).
-    """
+    # KROK 0: SPRAWDZENIE, CZY WEJŚCIE ZOSTAŁO ZREALIZOWANE
+    if scenario.entry_status == 'PENDING':
+        entry_triggered = False
+        if scenario.direction == 'LONG' and kline.low <= scenario.entry_price:
+            entry_triggered = True
+        elif scenario.direction == 'SHORT' and kline.high >= scenario.entry_price:
+            entry_triggered = True
+        
+        if entry_triggered:
+            logger.info(f"[{scenario.symbol}] ANALIZA: Wejście ({scenario.entry_price}) zostało zrealizowane dla alertu {scenario.alert_id}. Rozpoczynam analizę SL/TP.")
+            state_manager.update_analytical_scenario_entry_status(scenario.alert_id, 'TRIGGERED')
+            return {}, True # Zwracamy pusty status, aby wymusić odświeżenie
+        else:
+            return {}, False # Wejście nie zrealizowane, nic więcej nie robimy
+
+    # PONIŻSZY KOD WYKONA SIĘ TYLKO JEŚLI entry_status == 'TRIGGERED'
     new_status = scenario.scenario_status.copy()
     has_changed = False
 
-    # --- KROK 1: SPRAWDZENIE STOP LOSS (NAJWYŻSZY PRIORYTET) ---
+    # KROK 1: SPRAWDZENIE STOP LOSS
     sl_hit = False
     if scenario.direction == 'LONG' and kline.low <= scenario.sl_price:
         sl_hit = True
@@ -24,7 +36,7 @@ def _check_scenarios(scenario: AnalyticalScenario, kline: Kline) -> (dict, bool)
         sl_hit = True
 
     if sl_hit:
-        logger.warning(f"[{scenario.symbol}] ANALIZA: Stop Loss ({scenario.sl_price}) trafiony na świecy. Zamykam wszystkie aktywne scenariusze jako 'LOSE'.")
+        logger.warning(f"[{scenario.symbol}] ANALIZA: Stop Loss ({scenario.sl_price}) trafiony dla alertu {scenario.alert_id}.")
         for rr_level, status in new_status.items():
             if status == 'ACTIVE':
                 new_status[rr_level] = 'LOSE'
@@ -32,12 +44,11 @@ def _check_scenarios(scenario: AnalyticalScenario, kline: Kline) -> (dict, bool)
                 has_changed = True
         return new_status, has_changed
 
-    # --- KROK 2: SPRAWDZENIE TAKE PROFIT (TYLKO JEŚLI SL NIE ZOSTAŁ TRAFIONY) ---
+    # KROK 2: SPRAWDZENIE TAKE PROFIT
     tp_levels = {
         '1.0': scenario.tp_1_0, '1.5': scenario.tp_1_5, '2.0': scenario.tp_2_0,
         '3.0': scenario.tp_3_0, '4.0': scenario.tp_4_0, '5.0': scenario.tp_5_0
     }
-
     for rr_level, tp_price in tp_levels.items():
         if new_status.get(rr_level) == 'ACTIVE':
             tp_hit = False
@@ -47,11 +58,10 @@ def _check_scenarios(scenario: AnalyticalScenario, kline: Kline) -> (dict, bool)
                 tp_hit = True
             
             if tp_hit:
-                logger.info(f"[{scenario.symbol}] ANALIZA: Scenariusz {rr_level}R osiągnął TP ({tp_price}). Wynik: WIN.")
+                logger.info(f"[{scenario.symbol}] ANALIZA: Scenariusz {rr_level}R osiągnął TP ({tp_price}) dla alertu {scenario.alert_id}.")
                 new_status[rr_level] = 'WIN'
                 log_analysis_to_bigquery(scenario, rr_level, 'WIN')
                 has_changed = True
-
     return new_status, has_changed
 
 def run_analysis_cycle():
@@ -87,7 +97,6 @@ def run_analysis_cycle():
                 if all(status != 'ACTIVE' for status in new_status.values()):
                     logger.info(f"[{scenario.symbol}] Wszystkie scenariusze dla alertu {scenario.alert_id} zostały zakończone. Rozpoczynam czyszczenie.")
                     state_manager.delete_analytical_scenario(scenario.alert_id)
-                    state_manager.delete_active_setup(scenario.symbol)
 
         except Exception as e:
             alert_id = scenario.alert_id if scenario else scenario_doc.id
