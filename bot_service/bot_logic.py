@@ -1,5 +1,3 @@
-# Lokalizacja: bot_service/bot_logic.py
-
 import logging
 import json
 from typing import Dict, Any, List, Optional
@@ -36,7 +34,6 @@ def _validate_and_correct_alert(alert: AlertData) -> Optional[AlertData]:
             f"[{alert.symbol}] Wykryto odwrócone wartości entry/sl. Próba korekty. "
             f"Oryginalnie: entry={original_entry}, sl={original_sl}."
         )
-        # Zamieniamy wartości miejscami
         entry, sl = original_sl, original_entry
         is_corrected = True
     else:
@@ -56,12 +53,11 @@ def _validate_and_correct_alert(alert: AlertData) -> Optional[AlertData]:
     
     # Jeśli alert został skorygowany, tworzymy nowy, poprawny obiekt
     if is_corrected:
-        corrected_alert_data = alert.model_dump()
+        corrected_alert_data = alert.model_dump(by_alias=True) # Używamy by_alias=True dla spójności
         corrected_alert_data['entry'] = entry
         corrected_alert_data['sl'] = sl
         return AlertData.model_validate(corrected_alert_data)
     
-    # Jeśli nie było korekty, zwracamy oryginalny, poprawny alert
     return alert
 
 def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]]):
@@ -75,7 +71,6 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]]):
         try:
             raw_alert = AlertData.model_validate(alert_dict)
             
-            # KROK 1: Bezwzględne zastosowanie reguły zastępowania.
             existing_pending_case = state_manager.get_pending_case_for_symbol(raw_alert.symbol)
             if existing_pending_case:
                 logger.info(
@@ -83,11 +78,9 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]]):
                 )
                 state_manager.delete_case_by_id(existing_pending_case.id)
 
-            # KROK 2: Walidacja i korekta nowego alertu.
             validated_alert = _validate_and_correct_alert(raw_alert)
             
             if validated_alert:
-                # Jeśli nowy alert jest poprawny, tworzymy dla niego nową teczkę.
                 logger.info(f"[{validated_alert.symbol}] Alert ({alert_id}) przeszedł walidację. Tworzę teczkę PENDING.")
                 new_case = AnalyticalCase(
                     alert_id=validated_alert.id,
@@ -96,7 +89,6 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]]):
                 )
                 state_manager.create_analytical_case(new_case)
             else:
-                # Jeśli nowy alert jest niepoprawny, logujemy to i kończymy.
                 logger.info(f"[{raw_alert.symbol}] Nowy alert ({alert_id}) został odrzucony po walidacji. Nie tworzę nowej teczki PENDING.")
 
         except ValidationError as e:
@@ -106,10 +98,17 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]]):
 
 # --- Faza 2 i 4: Zarządzanie Cyklem Życia Teczek ---
 
-def _handle_pending_case(case_doc: Any, kline: Kline):
+def _handle_pending_case(case_doc_snapshot: Any, kline: Kline):
     """Sprawdza warunek wejścia dla teczki PENDING."""
+    case_doc = case_doc_snapshot.to_dict()
+    case_id = case_doc_snapshot.id
     alert = AlertData.model_validate(case_doc.get('alert_data'))
     entry_price = alert.entry
+    
+    logger.info(
+        f"[DIAGNOSTYKA PENDING][{case_id}] Sprawdzam warunek wejścia dla {alert.symbol} ({alert.direction}). "
+        f"Entry: {entry_price}, Kline Low: {kline.low}, Kline High: {kline.high}"
+    )
     
     entry_triggered = False
     if alert.direction == 'LONG' and kline.low <= entry_price:
@@ -118,7 +117,6 @@ def _handle_pending_case(case_doc: Any, kline: Kline):
         entry_triggered = True
         
     if entry_triggered:
-        case_id = case_doc.id # Poprawka: pobieramy ID z dokumentu
         logger.info(f"--- [TRIGGER] --- [{alert.symbol}] | ID: {case_id} | Cena wejścia {entry_price} dotknięta.")
         updates = {
             "status": "TRIGGERED",
@@ -126,9 +124,10 @@ def _handle_pending_case(case_doc: Any, kline: Kline):
         }
         state_manager.update_case_status_and_results(case_id, updates)
 
-def _handle_triggered_case(case_doc: Any, kline: Kline):
+def _handle_triggered_case(case_doc_snapshot: Any, kline: Kline):
     """Sprawdza warunki SL/TP dla teczki TRIGGERED i zapisuje wyniki."""
-    case_id = case_doc.id
+    case_doc = case_doc_snapshot.to_dict()
+    case_id = case_doc_snapshot.id
     symbol = case_doc.get('symbol')
     alert = AlertData.model_validate(case_doc.get('alert_data'))
     results = case_doc.get('results', {})
@@ -201,6 +200,7 @@ def run_analysis_cycle():
         logger.info("Brak aktywnych teczek analitycznych. Kończę cykl.")
         return
 
+    logger.info(f"[DIAGNOSTYKA] Znaleziono {len(all_cases_docs)} teczek analitycznych do przetworzenia.")
     symbols_to_watch = {doc.to_dict().get('symbol') for doc in all_cases_docs}
     valid_symbols = {s for s in symbols_to_watch if s}
     
@@ -216,24 +216,25 @@ def run_analysis_cycle():
     klines_models = {
         symbol: Kline.model_validate(data) for symbol, data in klines_data_from_cache.items()
     }
+    logger.info(f"[DIAGNOSTYKA] Pomyślnie pobrano {len(klines_models)} świec z cache'u.")
 
     for case_doc_snapshot in all_cases_docs:
-        case_doc = case_doc_snapshot.to_dict()
         case_id = case_doc_snapshot.id
-        symbol = case_doc.get('symbol')
-        status = case_doc.get('status')
-        
-        latest_kline = klines_models.get(symbol)
-        if not latest_kline:
-            logger.warning(f"Brak danych kline dla symbolu {symbol} (teczka {case_id}).")
-            continue
-        
         try:
+            case_doc = case_doc_snapshot.to_dict()
+            symbol = case_doc.get('symbol')
+            status = case_doc.get('status')
+            
+            latest_kline = klines_models.get(symbol)
+            if not latest_kline:
+                logger.warning(f"Brak danych kline dla symbolu {symbol} (teczka {case_id}). Pomijam tę teczkę w cyklu.")
+                continue
+            
             if status == 'PENDING':
-                _handle_pending_case(case_doc_snapshot, kline) # Przekazujemy cały snapshot
+                _handle_pending_case(case_doc_snapshot, latest_kline)
             elif status == 'TRIGGERED':
-                _handle_triggered_case(case_doc_snapshot, kline) # Przekazujemy cały snapshot
+                _handle_triggered_case(case_doc_snapshot, latest_kline)
         except Exception as e:
-            logger.error(f"Błąd podczas przetwarzania teczki {case_id} dla {symbol}: {e}", exc_info=True)
+            logger.error(f"Błąd podczas przetwarzania teczki {case_id}: {e}", exc_info=True)
 
     logger.info("Zakończono główną pętlę cyklu analitycznego.")
