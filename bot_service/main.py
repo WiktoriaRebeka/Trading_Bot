@@ -2,14 +2,21 @@
 import os
 import logging
 
+try:
+    import google.cloud.logging
+    client = google.cloud.logging.Client()
+    client.setup_logging()
+    logging.info("Ustrukturyzowane logowanie Google Cloud (bot_service) skonfigurowane pomyślnie.")
+except Exception as e:
+    logging.basicConfig(level=logging.INFO)
+    logging.warning(f"Logowanie GCP nie powiodło się, używam podstawowej konfiguracji: {e}")
+
 from shared_lib.config_loader import load_config
 load_config()
 
 from flask import Flask
 from bot_service.app_setup import initialize_app_services, register_endpoints
 
-# Inicjalizacja podstawowego logowania
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 def create_app():
@@ -25,7 +32,6 @@ def create_app():
 
     return app
 
-# Gunicorn szuka tej zmiennej
 app = create_app()
 
 if __name__ == '__main__':
