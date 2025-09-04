@@ -3,7 +3,7 @@
 import logging
 import uuid
 import time
-from flask import Flask, jsonify, request # Dodajemy import request
+from flask import Flask, jsonify, request
 
 # Importy logiki biznesowej i inicjalizatorów
 from shared_lib.config_loader import load_config
@@ -20,20 +20,14 @@ INIT_RETRY_DELAY_SECONDS = 5
 def register_endpoints(app: Flask):
     """Rejestruje wszystkie endpointy aplikacji."""
 
-    # === NOWY, BARDZO WAŻNY BLOK LOGOWANIA ===
     @app.before_request
     def log_request_info():
         """Loguje informacje o każdym przychodzącym żądaniu."""
-        headers = dict(request.headers)
-        # Usuwamy potencjalnie wrażliwe nagłówki
-        headers.pop('Authorization', None) 
-        headers.pop('Cookie', None)
-        
+        headers = {k: v for k, v in request.headers if k.lower() not in ['authorization', 'cookie']}
         logger.info(
             f"--- OTRZYMANO ŻĄDANIE --- Endpoint: {request.path}, Metoda: {request.method}, IP: {request.remote_addr}",
             extra={"json_fields": {"path": request.path, "method": request.method, "ip": request.remote_addr, "headers": headers}}
         )
-    # ==========================================
 
     @app.route('/')
     def health_check():
@@ -88,30 +82,28 @@ def initialize_app_services(app: Flask):
         
         failure_reasons = []
 
-        config_ok = load_config()
-        if not config_ok:
-            failure_reasons.append("Failed to load secrets from Secret Manager")
+        # Używamy uproszczonego load_config, który nie łączy się z Secret Manager API
+        load_config()
 
-        if config_ok:
-            firebase_ok = False
-            for attempt in range(1, MAX_INIT_RETRIES + 1):
-                if initialize_firebase():
-                    firebase_ok = True
-                    break
-                if attempt < MAX_INIT_RETRIES:
-                    time.sleep(INIT_RETRY_DELAY_SECONDS)
-            if not firebase_ok:
-                failure_reasons.append("Failed to initialize Firebase/Firestore")
-            
-            bigquery_ok = False
-            for attempt in range(1, MAX_INIT_RETRIES + 1):
-                if initialize_bigquery():
-                    bigquery_ok = True
-                    break
-                if attempt < MAX_INIT_RETRIES:
-                    time.sleep(INIT_RETRY_DELAY_SECONDS)
-            if not bigquery_ok:
-                failure_reasons.append("Failed to initialize BigQuery")
+        firebase_ok = False
+        for attempt in range(1, MAX_INIT_RETRIES + 1):
+            if initialize_firebase():
+                firebase_ok = True
+                break
+            if attempt < MAX_INIT_RETRIES:
+                time.sleep(INIT_RETRY_DELAY_SECONDS)
+        if not firebase_ok:
+            failure_reasons.append("Failed to initialize Firebase/Firestore")
+        
+        bigquery_ok = False
+        for attempt in range(1, MAX_INIT_RETRIES + 1):
+            if initialize_bigquery():
+                bigquery_ok = True
+                break
+            if attempt < MAX_INIT_RETRIES:
+                time.sleep(INIT_RETRY_DELAY_SECONDS)
+        if not bigquery_ok:
+            failure_reasons.append("Failed to initialize BigQuery")
         
         if not failure_reasons:
             app.config['INITIALIZATION_SUCCESS'] = True
