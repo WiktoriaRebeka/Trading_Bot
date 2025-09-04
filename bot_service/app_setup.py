@@ -66,12 +66,10 @@ def initialize_app_services(app: Flask):
     with app.app_context():
         logger.info("Rozpoczynam konfigurację aplikacji bot_service wewnątrz kontekstu.")
         
-        # Krok 1: Załaduj konfigurację. Ten krok już nie zwraca statusu.
         load_config()
 
         failure_reasons = []
         
-        # Krok 2: Inicjalizuj usługi z mechanizmem ponawiania.
         firebase_ok = False
         for attempt in range(1, MAX_INIT_RETRIES + 1):
             if initialize_firebase():
@@ -92,7 +90,6 @@ def initialize_app_services(app: Flask):
         if not bigquery_ok:
             failure_reasons.append("Failed to initialize BigQuery")
         
-        # Krok 3: Ustaw finalny status aplikacji.
         if not failure_reasons:
             app.config['INITIALIZATION_SUCCESS'] = True
             logger.info("Aplikacja Flask [bot_service] została pomyślnie utworzona i skonfigurowana.")
