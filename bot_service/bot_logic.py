@@ -19,46 +19,36 @@ def _calculate_risk_percentage(entry_price: float, sl_price: float) -> Optional[
     risk_distance = abs(entry_price - sl_price)
     return round((risk_distance / entry_price) * 100, 4)
 
-def _validate_and_correct_alert(alert: AlertData) -> Optional[AlertData]:
+def _correct_and_validate_alert(alert: AlertData) -> bool:
     """
-    Waliduje alert. Jeśli jest odwrócony, próbuje go naprawić.
-    Zwraca poprawny obiekt AlertData lub None.
+    Koryguje alert w miejscu i waliduje go. Zwraca True, jeśli jest poprawny, False w przeciwnym razie.
     """
-    original_entry, original_sl = alert.entry, alert.sl
-    is_corrected = False
-
-    # Sprawdzenie, czy alert jest odwrócony
-    if (alert.direction == 'SHORT' and original_entry > original_sl) or \
-       (alert.direction == 'LONG' and original_entry < original_sl):
+    # KROK 1: Logika autonaprawy dla odwróconych wartości entry/sl (modyfikacja w miejscu)
+    if alert.direction == 'SHORT' and alert.entry > alert.sl:
         logger.warning(
-            f"[{alert.symbol}] Wykryto odwrócone wartości entry/sl. Próba korekty. "
-            f"Oryginalnie: entry={original_entry}, sl={original_sl}."
+            f"[{alert.symbol}] Wykryto i skorygowano odwrócone wartości entry/sl dla alertu SHORT. "
+            f"Oryginalnie: entry={alert.entry}, sl={alert.sl}."
         )
-        entry, sl = original_sl, original_entry
-        is_corrected = True
-    else:
-        entry, sl = original_entry, original_sl
+        alert.entry, alert.sl = alert.sl, alert.entry
+    elif alert.direction == 'LONG' and alert.entry < alert.sl:
+        logger.warning(
+            f"[{alert.symbol}] Wykryto i skorygowano odwrócone wartości entry/sl dla alertu LONG. "
+            f"Oryginalnie: entry={alert.entry}, sl={alert.sl}."
+        )
+        alert.entry, alert.sl = alert.sl, alert.entry
 
-    # Walidacja logiczna (na potencjalnie skorygowanych wartościach)
-    if (alert.direction == 'LONG' and sl >= entry) or \
-       (alert.direction == 'SHORT' and sl <= entry):
-        logger.warning(f"Odrzucono alert [{alert.symbol}]: Pozycja niehandlowalna (entry={entry}, sl={sl}).")
-        return None
+    # KROK 2: Finalna walidacja (na potencjalnie zmodyfikowanym obiekcie)
+    if (alert.direction == 'LONG' and alert.sl >= alert.entry) or \
+       (alert.direction == 'SHORT' and alert.sl <= alert.entry):
+        logger.warning(f"Odrzucono alert [{alert.symbol}]: Pozycja niehandlowalna (entry={alert.entry}, sl={alert.sl}).")
+        return False
     
-    # Walidacja minimalnego ryzyka
-    risk_perc = _calculate_risk_percentage(entry, sl)
+    risk_perc = _calculate_risk_percentage(alert.entry, alert.sl)
     if risk_perc is None or risk_perc < 0.05:
         logger.warning(f"Odrzucono alert [{alert.symbol}]: Ryzyko poniżej minimum 0.05% (wynosi {risk_perc}%).")
-        return None
-    
-    # Jeśli alert został skorygowany, tworzymy nowy, poprawny obiekt
-    if is_corrected:
-        corrected_alert_data = alert.model_dump(by_alias=True) # Używamy by_alias=True dla spójności
-        corrected_alert_data['entry'] = entry
-        corrected_alert_data['sl'] = sl
-        return AlertData.model_validate(corrected_alert_data)
-    
-    return alert
+        return False
+        
+    return True
 
 def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]]):
     """Przetwarza nowe alerty, bezwzględnie stosując regułę zastępowania, a następnie waliduje i tworzy nowe teczki."""
@@ -69,37 +59,37 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]]):
     for alert_dict in newly_fetched_alerts:
         alert_id = alert_dict.get('id', 'unknown')
         try:
-            raw_alert = AlertData.model_validate(alert_dict)
+            alert_data = AlertData.model_validate(alert_dict)
             
-            existing_pending_case = state_manager.get_pending_case_for_symbol(raw_alert.symbol)
+            existing_pending_case = state_manager.get_pending_case_for_symbol(alert_data.symbol)
             if existing_pending_case:
                 logger.info(
-                    f"[{raw_alert.symbol}] Nowy alert ({alert_id}) unieważnia istniejącą teczkę PENDING ({existing_pending_case.id}). Usuwam."
+                    f"[{alert_data.symbol}] Nowy alert ({alert_id}) unieważnia istniejącą teczkę PENDING ({existing_pending_case.id}). Usuwam."
                 )
                 state_manager.delete_case_by_id(existing_pending_case.id)
 
-            validated_alert = _validate_and_correct_alert(raw_alert)
+            # Walidujemy i korygujemy obiekt `alert_data` w miejscu.
+            is_valid = _correct_and_validate_alert(alert_data)
             
-            if validated_alert:
-                logger.info(f"[{validated_alert.symbol}] Alert ({alert_id}) przeszedł walidację. Tworzę teczkę PENDING.")
+            if is_valid:
+                logger.info(f"[{alert_data.symbol}] Alert ({alert_id}) przeszedł walidację. Tworzę teczkę PENDING.")
                 new_case = AnalyticalCase(
-                    alert_id=validated_alert.id,
-                    symbol=validated_alert.symbol,
-                    alert_data=validated_alert.model_dump(by_alias=True)
+                    alert_id=alert_data.id,
+                    symbol=alert_data.symbol,
+                    alert_data=alert_data.model_dump(by_alias=True) # Używamy zmodyfikowanego alert_data
                 )
                 state_manager.create_analytical_case(new_case)
             else:
-                logger.info(f"[{raw_alert.symbol}] Nowy alert ({alert_id}) został odrzucony po walidacji. Nie tworzę nowej teczki PENDING.")
+                logger.info(f"[{alert_data.symbol}] Nowy alert ({alert_id}) został odrzucony po walidacji. Nie tworzę nowej teczki PENDING.")
 
         except ValidationError as e:
             logger.error(f"Błąd walidacji Pydantic dla alertu ({alert_id}): {e}", extra={"json_fields": {"alert_id": alert_id}})
         except Exception as e:
             logger.error(f"Nieoczekiwany błąd podczas przetwarzania alertu ({alert_id}): {e}", exc_info=True, extra={"json_fields": {"alert_id": alert_id}})
 
-# --- Faza 2 i 4: Zarządzanie Cyklem Życia Teczek ---
+# --- Reszta pliku (od _handle_pending_case w dół) pozostaje bez zmian ---
 
 def _handle_pending_case(case_doc_snapshot: Any, kline: Kline):
-    """Sprawdza warunek wejścia dla teczki PENDING."""
     case_doc = case_doc_snapshot.to_dict()
     case_id = case_doc_snapshot.id
     alert = AlertData.model_validate(case_doc.get('alert_data'))
@@ -125,7 +115,6 @@ def _handle_pending_case(case_doc_snapshot: Any, kline: Kline):
         state_manager.update_case_status_and_results(case_id, updates)
 
 def _handle_triggered_case(case_doc_snapshot: Any, kline: Kline):
-    """Sprawdza warunki SL/TP dla teczki TRIGGERED i zapisuje wyniki."""
     case_doc = case_doc_snapshot.to_dict()
     case_id = case_doc_snapshot.id
     symbol = case_doc.get('symbol')
@@ -192,7 +181,6 @@ def _handle_triggered_case(case_doc_snapshot: Any, kline: Kline):
             state_manager.delete_case_by_id(case_id)
 
 def run_analysis_cycle():
-    """Główna pętla logiki analitycznej."""
     logger.info("Rozpoczynam główną pętlę cyklu analitycznego.")
     
     all_cases_docs = list(state_manager.get_all_analytical_cases())
@@ -231,9 +219,9 @@ def run_analysis_cycle():
                 continue
             
             if status == 'PENDING':
-                _handle_pending_case(case_doc_snapshot, latest_kline)
+                _handle_pending_case(case_doc_snapshot, kline)
             elif status == 'TRIGGERED':
-                _handle_triggered_case(case_doc_snapshot, latest_kline)
+                _handle_triggered_case(case_doc_snapshot, kline)
         except Exception as e:
             logger.error(f"Błąd podczas przetwarzania teczki {case_id}: {e}", exc_info=True)
 
