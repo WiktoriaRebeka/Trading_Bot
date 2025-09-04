@@ -1,8 +1,9 @@
 # Lokalizacja: shared_lib/models.py
 
-from pydantic import BaseModel, Field, validator
+# Zmieniony import Pydantic
+from pydantic import BaseModel, Field, validator, ConfigDict
 from typing import Optional, Dict, Any
-from datetime import datetime, timezone  # <-- POPRAWKA 1: Dodano import 'timezone'
+from datetime import datetime, timezone
 
 class AlertData(BaseModel):
     id: Optional[str] = None
@@ -21,9 +22,11 @@ class AlertData(BaseModel):
     tp_4_0: float
     tp_5_0: float
 
-    class Config:
-        allow_population_by_field_name = True
-        extra = 'ignore'
+    # Zmieniona konfiguracja Pydantic (naprawia ostrzeżenie)
+    model_config = ConfigDict(
+        populate_by_name=True,
+        extra='ignore'
+    )
 
     @validator('direction', pre=True, always=True)
     def set_direction_from_code(cls, v, values):
@@ -59,7 +62,6 @@ class AnalyticalCase(BaseModel):
     alert_data: Dict[str, Any]
     triggered_at: Optional[datetime] = None
     results: AnalyticalCaseResults = Field(default_factory=AnalyticalCaseResults)
-    # <-- POPRAWKA 2: Użyto bezpośrednio zaimportowanego 'timezone.utc'
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     class Config:
