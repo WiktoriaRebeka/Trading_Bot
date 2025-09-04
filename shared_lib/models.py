@@ -1,8 +1,8 @@
 # Lokalizacja: shared_lib/models.py
 
-from pydantic import BaseModel, Field, validator, ConfigDict
+from pydantic import BaseModel, Field, validator
 from typing import Optional, Dict, Any
-from datetime import datetime, timezone # <--- KLUCZOWA ZMIANA: dodany import
+from datetime import datetime
 
 class AlertData(BaseModel):
     id: Optional[str] = None
@@ -21,11 +21,9 @@ class AlertData(BaseModel):
     tp_4_0: float
     tp_5_0: float
 
-    # --- POPRAWKA OSTRZEŻENIA PYDANTIC ---
-    model_config = ConfigDict(
-        populate_by_name=True,
-        extra='ignore'
-    )
+    class Config:
+        allow_population_by_field_name = True
+        extra = 'ignore'
 
     @validator('direction', pre=True, always=True)
     def set_direction_from_code(cls, v, values):
@@ -61,9 +59,7 @@ class AnalyticalCase(BaseModel):
     alert_data: Dict[str, Any]
     triggered_at: Optional[datetime] = None
     results: AnalyticalCaseResults = Field(default_factory=AnalyticalCaseResults)
-    
-    # --- POPRAWKA BŁĘDU KRYTYCZNEGO AttributeError ---
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(datetime.timezone.utc))
 
     class Config:
         json_encoders = {

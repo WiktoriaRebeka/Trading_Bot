@@ -6,7 +6,7 @@ from datetime import datetime
 from google.cloud import firestore
 from google.cloud.firestore_v1.document import DocumentSnapshot
 import json
-from google.cloud.firestore_v1.base_query import FieldFilter
+
 from shared_lib.firebase_client import get_db
 from shared_lib import constants
 from shared_lib.models import AnalyticalCase
@@ -19,17 +19,15 @@ def _get_db() -> firestore.Client:
 def get_pending_case_for_symbol(symbol: str) -> Optional[DocumentSnapshot]:
     """Pobiera teczkę w stanie PENDING dla danego symbolu, jeśli istnieje."""
     try:
-        # --- POPRAWKA OSTRZEŻENIA FIRESTORE ---
         docs = _get_db().collection(constants.ANALYTICAL_CASES_COLLECTION) \
-            .where(filter=FieldFilter('symbol', '==', symbol)) \
-            .where(filter=FieldFilter('status', '==', 'PENDING')) \
+            .where('symbol', '==', symbol) \
+            .where('status', '==', 'PENDING') \
             .limit(1) \
             .stream()
         return next(docs, None)
     except Exception as e:
         logger.error(f"Błąd podczas pobierania teczki PENDING dla {symbol}: {e}", exc_info=True)
         return None
-
 
 def delete_case_by_id(case_id: str):
     """Usuwa dokument teczki analitycznej na podstawie jej ID."""
@@ -43,6 +41,8 @@ def create_analytical_case(case_data: AnalyticalCase):
     """Tworzy nowy dokument teczki analitycznej w Firestore."""
     try:
         doc_ref = _get_db().collection(constants.ANALYTICAL_CASES_COLLECTION).document(case_data.alert_id)
+        # Pydantic model_dump() zwraca obiekty, które trzeba serializować (np. datetime)
+        # Używamy json.loads(model.json()) aby uzyskać słownik z poprawnymi typami
         data_to_set = json.loads(case_data.json())
         doc_ref.set(data_to_set)
         logger.info(f"[{case_data.alert_id}] Utworzono nową teczkę analityczną dla {case_data.symbol}.")
@@ -62,7 +62,6 @@ def update_case_status_and_results(case_id: str, updates: Dict[str, Any]):
     except Exception as e:
         logger.error(f"Błąd podczas aktualizacji teczki {case_id}: {e}", exc_info=True)
 
-
 def get_latest_klines_from_cache(symbols: Iterable[str]) -> Dict[str, Dict[str, Any]]:
     if not symbols:
         return {}
@@ -71,14 +70,13 @@ def get_latest_klines_from_cache(symbols: Iterable[str]) -> Dict[str, Dict[str, 
     unique_symbols = list(set(s for s in symbols if isinstance(s, str) and s))
     if not unique_symbols:
         return {}
-
+    
     # Firestore 'in' query supports max 30 elements
     for i in range(0, len(unique_symbols), 30):
         chunk = unique_symbols[i:i + 30]
         if not chunk: continue
         try:
-            # --- POPRAWKA OSTRZEŻENIA FIRESTORE ---
-            docs = db.collection(constants.LATEST_KLINES_COLLECTION).where(filter=FieldFilter("symbol", "in", chunk)).stream()
+            docs = db.collection(constants.LATEST_KLINES_COLLECTION).where("symbol", "in", chunk).stream()
             for doc in docs:
                 klines_cache[doc.id] = doc.to_dict()
         except Exception as e:

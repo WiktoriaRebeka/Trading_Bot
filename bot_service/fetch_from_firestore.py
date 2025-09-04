@@ -2,7 +2,7 @@
 from google.cloud import firestore
 from datetime import datetime, timezone, timedelta
 import logging
-from google.cloud.firestore_v1.base_query import FieldFilter
+
 from shared_lib.firebase_client import get_db 
 from shared_lib.constants import (
     FIRESTORE_COLLECTION_ALERTS,
@@ -43,11 +43,9 @@ def fetch_new_alerts_since(last_ts_dt: datetime):
     new_alerts_list = []
     new_max_ts = last_ts_dt
     try:
-        # --- POPRAWKA OSTRZEŻENIA FIRESTORE ---
         query = db.collection(FIRESTORE_COLLECTION_ALERTS) \
-            .where(filter=FieldFilter('received_at', '>', last_ts_dt)) \
-            .order_by('received_at')
-        
+                  .where(field_path='received_at', op_string='>', value=last_ts_dt) \
+                  .order_by('received_at')
         docs = query.stream()
         for doc in docs:
             alert_data = doc.to_dict()
@@ -56,13 +54,10 @@ def fetch_new_alerts_since(last_ts_dt: datetime):
             current_doc_ts = alert_data.get('received_at')
             if current_doc_ts and current_doc_ts > new_max_ts:
                 new_max_ts = current_doc_ts
-        
         if new_alerts_list:
             logger.info(f"[FETCHER] Pobrano {len(new_alerts_list)} nowych alertów.")
         else:
             logger.info("[FETCHER] Brak nowych alertów od ostatniego sprawdzenia.")
-            
     except Exception as e:
         logger.error(f"[FETCHER_FIRESTORE_ERROR] Błąd podczas pobierania alertów: {e}", exc_info=True)
-        
     return new_alerts_list, new_max_ts
