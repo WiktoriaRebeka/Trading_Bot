@@ -21,33 +21,35 @@ def _calculate_risk_percentage(entry_price: float, sl_price: float) -> Optional[
 
 def _correct_and_validate_alert(alert: AlertData) -> bool:
     """
-    Koryguje alert w miejscu i waliduje go. Zwraca True, jeśli jest poprawny, False w przeciwnym razie.
+    Waliduje logikę biznesową alertu. Zwraca True, jeśli jest poprawny, False w przeciwnym razie.
     """
-    # KROK 1: Logika autonaprawy dla odwróconych wartości entry/sl (modyfikacja w miejscu)
-    if alert.direction == 'SHORT' and alert.entry > alert.sl:
-        logger.warning(
-            f"[{alert.symbol}] Wykryto i skorygowano odwrócone wartości entry/sl dla alertu SHORT. "
-            f"Oryginalnie: entry={alert.entry}, sl={alert.sl}."
-        )
-        alert.entry, alert.sl = alert.sl, alert.entry
-    elif alert.direction == 'LONG' and alert.entry < alert.sl:
-        logger.warning(
-            f"[{alert.symbol}] Wykryto i skorygowano odwrócone wartości entry/sl dla alertu LONG. "
-            f"Oryginalnie: entry={alert.entry}, sl={alert.sl}."
-        )
-        alert.entry, alert.sl = alert.sl, alert.entry
+    # KROK 1: Sprawdzenie, czy pozycja jest logicznie poprawna.
+    # Dla LONG, Stop Loss MUSI być poniżej ceny wejścia.
+    # Dla SHORT, Stop Loss MUSI być powyżej ceny wejścia.
+    is_long_ok = (alert.direction == 'LONG' and alert.sl < alert.entry)
+    is_short_ok = (alert.direction == 'SHORT' and alert.sl > alert.entry)
 
-    # KROK 2: Finalna walidacja (na potencjalnie zmodyfikowanym obiekcie)
-    if (alert.direction == 'LONG' and alert.sl >= alert.entry) or \
-       (alert.direction == 'SHORT' and alert.sl <= alert.entry):
-        logger.warning(f"Odrzucono alert [{alert.symbol}]: Pozycja niehandlowalna (entry={alert.entry}, sl={alert.sl}).")
+    if not (is_long_ok or is_short_ok):
+        logger.warning(
+            f"Odrzucono alert [{alert.symbol}]: Nielogiczna pozycja. "
+            f"Kierunek: {alert.direction}, Wejście: {alert.entry}, SL: {alert.sl}."
+        )
         return False
-    
+
+    # KROK 2: Sprawdzenie minimalnego ryzyka.
     risk_perc = _calculate_risk_percentage(alert.entry, alert.sl)
     if risk_perc is None or risk_perc < 0.05:
-        logger.warning(f"Odrzucono alert [{alert.symbol}]: Ryzyko poniżej minimum 0.05% (wynosi {risk_perc}%).")
+        logger.warning(
+            f"Odrzucono alert [{alert.symbol}]: Ryzyko poniżej minimum 0.05%. "
+            f"Obliczone ryzyko: {risk_perc}% (Wejście: {alert.entry}, SL: {alert.sl})."
+        )
         return False
-        
+    
+    # Jeśli oba warunki są spełnione, alert jest prawidłowy.
+    logger.info(
+        f"Alert [{alert.symbol}] przeszedł walidację. "
+        f"Kierunek: {alert.direction}, Ryzyko: {risk_perc}%."
+    )
     return True
 
 def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]]):
