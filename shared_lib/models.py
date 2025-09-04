@@ -2,7 +2,7 @@
 
 from pydantic import BaseModel, Field, validator
 from typing import Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone  # <-- POPRAWKA 1: Dodano import 'timezone'
 
 class AlertData(BaseModel):
     id: Optional[str] = None
@@ -59,7 +59,8 @@ class AnalyticalCase(BaseModel):
     alert_data: Dict[str, Any]
     triggered_at: Optional[datetime] = None
     results: AnalyticalCaseResults = Field(default_factory=AnalyticalCaseResults)
-    created_at: datetime = Field(default_factory=lambda: datetime.now(datetime.timezone.utc))
+    # <-- POPRAWKA 2: Użyto bezpośrednio zaimportowanego 'timezone.utc'
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     class Config:
         json_encoders = {
