@@ -55,39 +55,48 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]]):
     if not newly_fetched_alerts:
         return
     logger.info(f"Przetwarzam {len(newly_fetched_alerts)} nowych alertów.")
-    
+
     for alert_dict in newly_fetched_alerts:
         alert_id = alert_dict.get('id', 'unknown')
+        if alert_id == 'unknown':
+            logger.error("Otrzymano alert bez ID. Pomijam.", extra={"json_fields": {"alert_data": alert_dict}})
+            continue
+
         try:
-            alert_data = AlertData.model_validate(alert_dict)
+            # Krok 1: Walidacja danych przychodzących do modelu AlertData
+            alert_data_model = AlertData.model_validate(alert_dict)
             
-            existing_pending_case = state_manager.get_pending_case_for_symbol(alert_data.symbol)
+            # Krok 2: Sprawdzenie i usunięcie istniejącej teczki PENDING (reguła zastępowania)
+            existing_pending_case = state_manager.get_pending_case_for_symbol(alert_data_model.symbol)
             if existing_pending_case:
                 logger.info(
-                    f"[{alert_data.symbol}] Nowy alert ({alert_id}) unieważnia istniejącą teczkę PENDING ({existing_pending_case.id}). Usuwam."
+                    f"[{alert_data_model.symbol}] Nowy alert ({alert_id}) unieważnia istniejącą teczkę PENDING ({existing_pending_case.id}). Usuwam."
                 )
                 state_manager.delete_case_by_id(existing_pending_case.id)
 
-            # Walidujemy i korygujemy obiekt `alert_data` w miejscu.
-            is_valid = _correct_and_validate_alert(alert_data)
+            # Krok 3: Walidacja logiki biznesowej (ryzyko, poprawność SL/Entry)
+            # Ważne: przekazujemy model Pydantic, który może być modyfikowany wewnątrz funkcji
+            is_valid = _correct_and_validate_alert(alert_data_model)
             
             if is_valid:
-                logger.info(f"[{alert_data.symbol}] Alert ({alert_id}) przeszedł walidację. Tworzę teczkę PENDING.")
+                logger.info(f"[{alert_data_model.symbol}] Alert ({alert_id}) przeszedł walidację. Tworzę teczkę PENDING.")
+                
+                # --- KLUCZOWA POPRAWKA ---
+                # Tworzymy obiekt AnalyticalCase, jawnie mapując pola.
+                # Cały oryginalny słownik alertu (już zwalidowany) trafia do pola `alert_data`.
                 new_case = AnalyticalCase(
-                    alert_id=alert_data.id,
-                    symbol=alert_data.symbol,
-                    alert_data=alert_data.model_dump(by_alias=True) # Używamy zmodyfikowanego alert_data
+                    alert_id=alert_data_model.id,
+                    symbol=alert_data_model.symbol,
+                    alert_data=alert_data_model.model_dump(by_alias=True) # Używamy danych ze zwalidowanego i potencjalnie skorygowanego modelu
                 )
                 state_manager.create_analytical_case(new_case)
             else:
-                logger.info(f"[{alert_data.symbol}] Nowy alert ({alert_id}) został odrzucony po walidacji. Nie tworzę nowej teczki PENDING.")
+                logger.warning(f"[{alert_data_model.symbol}] Nowy alert ({alert_id}) został odrzucony po walidacji. Nie tworzę nowej teczki PENDING.")
 
         except ValidationError as e:
-            logger.error(f"Błąd walidacji Pydantic dla alertu ({alert_id}): {e}", extra={"json_fields": {"alert_id": alert_id}})
+            logger.error(f"Błąd walidacji Pydantic dla alertu ({alert_id}): {e}", extra={"json_fields": {"alert_id": alert_id, "alert_data": alert_dict}})
         except Exception as e:
             logger.error(f"Nieoczekiwany błąd podczas przetwarzania alertu ({alert_id}): {e}", exc_info=True, extra={"json_fields": {"alert_id": alert_id}})
-
-# --- Reszta pliku (od _handle_pending_case w dół) pozostaje bez zmian ---
 
 def _handle_pending_case(case_doc_snapshot: Any, kline: Kline):
     case_doc = case_doc_snapshot.to_dict()
