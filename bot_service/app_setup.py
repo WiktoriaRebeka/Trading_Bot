@@ -5,7 +5,6 @@ import uuid
 import time
 from flask import Flask, jsonify, request
 
-# Importy logiki biznesowej i inicjalizatorów
 from shared_lib.config_loader import load_config
 from shared_lib.firebase_client import initialize_firebase
 from bot_service.bigquery_logger import initialize_bigquery
@@ -18,15 +17,12 @@ MAX_INIT_RETRIES = 3
 INIT_RETRY_DELAY_SECONDS = 5
 
 def register_endpoints(app: Flask):
-    """Rejestruje wszystkie endpointy aplikacji."""
-
     @app.before_request
     def log_request_info():
-        """Loguje informacje o każdym przychodzącym żądaniu."""
         headers = {k: v for k, v in request.headers if k.lower() not in ['authorization', 'cookie']}
         logger.info(
-            f"--- OTRZYMANO ŻĄDANIE --- Endpoint: {request.path}, Metoda: {request.method}, IP: {request.remote_addr}",
-            extra={"json_fields": {"path": request.path, "method": request.method, "ip": request.remote_addr, "headers": headers}}
+            f"--- OTRZYMANO ŻĄDANIE --- Endpoint: {request.path}, Metoda: {request.method}",
+            extra={"json_fields": {"path": request.path, "method": request.method, "headers": headers}}
         )
 
     @app.route('/')
@@ -51,22 +47,13 @@ def register_endpoints(app: Flask):
              logger.error(f"Zatrzymano cykl, ponieważ aplikacja nie została poprawnie zainicjalizowana. Powód: {reason}", extra={"json_fields": {"cycle_id": cycle_id}})
              return jsonify({"status": "error", "message": f"Service is unhealthy: {reason}"}), 503
         try:
-            logger.info(f"[CYKL {cycle_id}] Krok 1: Ładowanie ostatniego timestampu.")
             last_ts = load_last_processed_timestamp()
-            
-            logger.info(f"[CYKL {cycle_id}] Krok 2: Pobieranie nowych alertów od {last_ts.isoformat()}.")
             new_alerts, new_ts = fetch_new_alerts_since(last_ts)
-            
             if new_alerts:
-                logger.info(f"[CYKL {cycle_id}] Krok 3: Przetwarzanie {len(new_alerts)} nowych alertów.")
                 process_new_alerts(new_alerts)
                 if new_ts and new_ts > last_ts:
-                    logger.info(f"[CYKL {cycle_id}] Krok 4: Zapisywanie nowego timestampu {new_ts.isoformat()}.")
                     save_last_processed_timestamp(new_ts)
-            else:
-                logger.info(f"[CYKL {cycle_id}] Krok 3 i 4 pominięte - brak nowych alertów.")
-
-            logger.info(f"[CYKL {cycle_id}] Krok 5: Uruchamianie głównej pętli analitycznej.")
+            
             run_analysis_cycle()
 
             logger.info("--- ZAKOŃCZENIE CYKLU BOTA ---", extra={"json_fields": {"cycle_id": cycle_id, "status": "success"}})
@@ -76,15 +63,15 @@ def register_endpoints(app: Flask):
             return jsonify({"status": "error", "message": str(e), "cycle_id": cycle_id}), 500
 
 def initialize_app_services(app: Flask):
-    """Wykonuje całą logikę inicjalizacji w kontekście aplikacji."""
     with app.app_context():
         logger.info("Rozpoczynam konfigurację aplikacji bot_service wewnątrz kontekstu.")
         
-        failure_reasons = []
-
-        # Używamy uproszczonego load_config, który nie łączy się z Secret Manager API
+        # Krok 1: Załaduj konfigurację. Ten krok już nie zwraca statusu.
         load_config()
 
+        failure_reasons = []
+        
+        # Krok 2: Inicjalizuj usługi z mechanizmem ponawiania.
         firebase_ok = False
         for attempt in range(1, MAX_INIT_RETRIES + 1):
             if initialize_firebase():
@@ -105,6 +92,7 @@ def initialize_app_services(app: Flask):
         if not bigquery_ok:
             failure_reasons.append("Failed to initialize BigQuery")
         
+        # Krok 3: Ustaw finalny status aplikacji.
         if not failure_reasons:
             app.config['INITIALIZATION_SUCCESS'] = True
             logger.info("Aplikacja Flask [bot_service] została pomyślnie utworzona i skonfigurowana.")

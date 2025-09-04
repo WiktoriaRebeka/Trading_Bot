@@ -3,9 +3,8 @@
 import logging
 import uuid
 import asyncio
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 
-# Importy
 from shared_lib.config_loader import load_config
 from shared_lib.firebase_client import initialize_firebase
 from collector_service.data_collector import run_data_collection_cycle
@@ -13,7 +12,13 @@ from collector_service.data_collector import run_data_collection_cycle
 logger = logging.getLogger(__name__)
 
 def register_endpoints(app: Flask):
-    """Rejestruje endpointy dla kolektora."""
+    @app.before_request
+    def log_request_info():
+        headers = {k: v for k, v in request.headers if k.lower() not in ['authorization', 'cookie']}
+        logger.info(
+            f"--- OTRZYMANO ŻĄDANIE --- Endpoint: {request.path}, Metoda: {request.method}",
+            extra={"json_fields": {"path": request.path, "method": request.method, "headers": headers}}
+        )
 
     @app.route('/')
     def health_check():
@@ -24,7 +29,8 @@ def register_endpoints(app: Flask):
         if app.config.get('INITIALIZATION_SUCCESS', False):
             return jsonify({"status": "healthy"}), 200
         else:
-            return jsonify({"status": "unhealthy", "reason": "Failed to initialize Firebase"}), 503
+            reason = app.config.get('INITIALIZATION_FAILURE_REASON', 'Unknown initialization error.')
+            return jsonify({"status": "unhealthy", "reason": reason}), 503
 
     @app.route('/run-collector-cycle', methods=['POST'])
     def run_collector_endpoint():
@@ -32,8 +38,9 @@ def register_endpoints(app: Flask):
         logger.info("--- ROZPOCZĘCIE CYKLU KOLEKTORA DANYCH ---", extra={"json_fields": {"cycle_id": cycle_id}})
 
         if not app.config.get('INITIALIZATION_SUCCESS', False):
-            logger.critical("Firestore nie jest zainicjalizowane. Zatrzymuję cykl.", extra={"json_fields": {"cycle_id": cycle_id}})
-            return jsonify({"status": "error", "message": "Service is unhealthy"}), 503
+            reason = app.config.get('INITIALIZATION_FAILURE_REASON', 'Unknown initialization error.')
+            logger.critical(f"Firestore nie jest zainicjalizowane. Zatrzymuję cykl. Powód: {reason}", extra={"json_fields": {"cycle_id": cycle_id}})
+            return jsonify({"status": "error", "message": f"Service is unhealthy: {reason}"}), 503
         
         try:
             message, status_code = asyncio.run(run_data_collection_cycle(cycle_id))
@@ -44,13 +51,16 @@ def register_endpoints(app: Flask):
             return jsonify({"status": "error", "message": str(e), "cycle_id": cycle_id}), 500
 
 def initialize_app_services(app: Flask):
-    """Inicjalizuje usługi dla kolektora."""
     with app.app_context():
-        logger.info("Rozpoczynam konfigurację aplikacji `collector_service` wewnątrz kontekstu.")
+        logger.info("Rozpoczynam konfigurację aplikacji collector_service wewnątrz kontekstu.")
+        
         load_config()
+        
         if initialize_firebase():
             app.config['INITIALIZATION_SUCCESS'] = True
             logger.info("Aplikacja Flask [collector] została pomyślnie utworzona i skonfigurowana.")
         else:
             app.config['INITIALIZATION_SUCCESS'] = False
-            logger.critical("Krytyczny błąd podczas inicjalizacji Firebase w kolektorze.")
+            reason = "Failed to initialize Firebase/Firestore"
+            app.config['INITIALIZATION_FAILURE_REASON'] = reason
+            logger.critical(f"Krytyczny błąd podczas inicjalizacji. Aplikacja będzie zwracać błędy 503. Powód: {reason}")
