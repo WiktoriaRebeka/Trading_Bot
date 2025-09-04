@@ -74,8 +74,8 @@ def register_endpoints(app: Flask):
 def initialize_app_services(app: Flask):
     with app.app_context():
         logger.info("Rozpoczynam konfigurację aplikacji bot_service wewnątrz kontekstu.")
-        
-        load_config()
+
+        # load_config() zostało przeniesione do main.py - usuwamy stąd.
 
         failure_reasons = []
         
@@ -84,6 +84,7 @@ def initialize_app_services(app: Flask):
             if initialize_firebase():
                 firebase_ok = True
                 break
+            logger.warning(f"Inicjalizacja Firebase nie powiodła się (próba {attempt}/{MAX_INIT_RETRIES}).")
             if attempt < MAX_INIT_RETRIES:
                 time.sleep(INIT_RETRY_DELAY_SECONDS)
         if not firebase_ok:
@@ -94,6 +95,7 @@ def initialize_app_services(app: Flask):
             if initialize_bigquery():
                 bigquery_ok = True
                 break
+            logger.warning(f"Inicjalizacja BigQuery nie powiodła się (próba {attempt}/{MAX_INIT_RETRIES}).")
             if attempt < MAX_INIT_RETRIES:
                 time.sleep(INIT_RETRY_DELAY_SECONDS)
         if not bigquery_ok:

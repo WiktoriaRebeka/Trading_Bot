@@ -1,9 +1,11 @@
 # Lokalizacja: bot_service/main.py
 import os
 import logging
-from flask import Flask
 
-# Import logiki setupu
+from shared_lib.config_loader import load_config
+load_config()
+
+from flask import Flask
 from bot_service.app_setup import initialize_app_services, register_endpoints
 
 # Inicjalizacja podstawowego logowania
@@ -13,7 +15,7 @@ logger = logging.getLogger(__name__)
 def create_app():
     """Tworzy i konfiguruje aplikację Flask."""
     app = Flask(__name__)
-    
+
     try:
         initialize_app_services(app)
         register_endpoints(app)

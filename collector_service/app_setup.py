@@ -53,8 +53,8 @@ def register_endpoints(app: Flask):
 def initialize_app_services(app: Flask):
     with app.app_context():
         logger.info("Rozpoczynam konfigurację aplikacji collector_service wewnątrz kontekstu.")
-        
-        load_config()
+
+        # load_config() zostało przeniesione do collector_main.py - usuwamy stąd.
         
         if initialize_firebase():
             app.config['INITIALIZATION_SUCCESS'] = True

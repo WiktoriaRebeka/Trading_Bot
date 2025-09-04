@@ -16,9 +16,9 @@ ANALYTICAL_CASES_COLLECTION = "analytical_cases"
 # Adresy URL API
 BYBIT_API_URL_V5_KLINE = "https://api.bybit.com/v5/market/kline"
 
-# Klucze API (ładowane przez config_loader.py)
-BYBIT_API_KEY = os.getenv("BYBIT_API_KEY")
-BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET")
+# Klucze API (USUNIĘTE - teraz dostępne tylko przez obiekt config)
+# BYBIT_API_KEY = os.getenv("BYBIT_API_KEY") <--- USUNIĘTE
+# BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET") <--- USUNIĘTE
 
 # Konfiguracja BigQuery
 BIGQUERY_PROJECT_ID = os.getenv("GCP_PROJECT", "trading-bot-463318")
