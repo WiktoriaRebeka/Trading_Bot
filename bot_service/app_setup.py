@@ -19,10 +19,19 @@ INIT_RETRY_DELAY_SECONDS = 5
 def register_endpoints(app: Flask):
     @app.before_request
     def log_request_info():
-        headers = {k: v for k, v in request.headers if k.lower() not in ['authorization', 'cookie']}
+        """Bezpiecznie loguje informacje o każdym przychodzącym żądaniu."""
+        safe_headers = {}
+        try:
+            # Bezpieczna konwersja nagłówków na słownik stringów
+            for key, value in request.headers.items():
+                if key.lower() not in ['authorization', 'cookie']:
+                    safe_headers[str(key)] = str(value)
+        except Exception as e:
+            logger.warning(f"Nie udało się w pełni sparsować nagłówków żądania: {e}")
+
         logger.info(
             f"--- OTRZYMANO ŻĄDANIE --- Endpoint: {request.path}, Metoda: {request.method}",
-            extra={"json_fields": {"path": request.path, "method": request.method, "headers": headers}}
+            extra={"json_fields": {"path": request.path, "method": request.method, "headers": safe_headers}}
         )
 
     @app.route('/')
