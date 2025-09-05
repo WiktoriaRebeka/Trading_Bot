@@ -51,34 +51,20 @@ def register_endpoints(app: Flask):
 
         if not app.config.get('INITIALIZATION_SUCCESS', False):
             reason = app.config.get('INITIALIZATION_FAILURE_REASON', 'Aplikacja niezainicjalizowana.')
-            logger.error(f"Zatrzymano cykl, ponieważ aplikacja nie jest 'healthy'. Powód: {reason}", extra={"json_fields": {"cycle_id": cycle_id}})
+            logger.error(f"Zatrzymano cykl, aplikacja nie 'healthy'. Powód: {reason}", extra={"json_fields": {"cycle_id": cycle_id}})
             return jsonify({"status": "error", "message": f"Service is unhealthy: {reason}"}), 503
         
         try:
-            # --- KROK 1: Zawsze najpierw analizuj istniejące teczki ---
-            # To jest główna praca bota. Analizujemy teczki utworzone w POPRZEDNIM cyklu.
-            logger.info(f"[{cycle_id}] ETAP 1: Uruchamiam cykl analityczny dla istniejących teczek.")
+            # --- KLUCZOWA ZMIANA: JEDNO WYWOŁANIE GŁÓWNEJ LOGIKI ---
+            # Zamiast dwóch oddzielnych funkcji, wywołujemy jedną, która zarządza wszystkim.
             run_analysis_cycle()
-
-            # --- KROK 2: Dopiero potem szukaj i twórz nowe teczki na następny cykl ---
-            logger.info(f"[{cycle_id}] ETAP 2: Sprawdzam, czy są nowe alerty do przetworzenia.")
-            last_ts = load_last_processed_timestamp()
-            new_alerts, new_ts = fetch_new_alerts_since(last_ts)
-            
-            if new_alerts:
-                logger.info(f"[{cycle_id}] Znaleziono {len(new_alerts)} nowych alertów. Przetwarzam je, aby przygotować teczki na NASTĘPNY cykl.")
-                process_new_alerts(new_alerts)
-                
-                if new_ts and (not last_ts or new_ts > last_ts):
-                    save_last_processed_timestamp(new_ts)
-            else:
-                logger.info(f"[{cycle_id}] Brak nowych alertów do przetworzenia.")
 
             logger.info(f"--- ZAKOŃCZENIE CYKLU BOTA --- ID cyklu: {cycle_id}")
             return jsonify({"status": "success", "cycle_id": cycle_id}), 200
         except Exception as e:
             logger.error(f"Krytyczny błąd w głównym cyklu bota: {e}", exc_info=True, extra={"json_fields": {"cycle_id": cycle_id}})
             return jsonify({"status": "error", "message": str(e), "cycle_id": cycle_id}), 500
+            
 def initialize_app_services(app: Flask):
     with app.app_context():
         logger.info("Rozpoczynam konfigurację aplikacji bot_service wewnątrz kontekstu.")
