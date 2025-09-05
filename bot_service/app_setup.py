@@ -2,46 +2,21 @@
 
 import logging
 import uuid
-from flask import jsonify, request
+import time
+from flask import Flask, jsonify, request
+
+# Przywracamy strukturę importów, która działała, ale z nowymi funkcjami
+from bot_service.bot_logic import process_new_alerts, run_analysis_cycle
+from bot_service.fetch_from_firestore import load_last_processed_timestamp, fetch_new_alerts_since, save_last_processed_timestamp
+from shared_lib.firebase_client import initialize_firebase
+from bot_service.bigquery_logger import initialize_bigquery
 
 logger = logging.getLogger(__name__)
 
-def initialize_app_services(app):
-    """
-    Inicjalizuje usługi zależne od aplikacji, takie jak połączenia z bazami danych.
-    """
-    logger.info("--- [APP_SETUP] Rozpoczynam initialize_app_services... ---")
-    try:
-        # Importy są wykonywane wewnątrz funkcji, aby uniknąć problemów przy starcie
-        from shared_lib.firebase_client import initialize_firebase
-        from bot_service.bigquery_logger import initialize_bigquery
+MAX_INIT_RETRIES = 3
+INIT_RETRY_DELAY_SECONDS = 5
 
-        # Tutaj można dodać logikę ponawiania prób, jeśli jest potrzebna
-        firebase_ok = initialize_firebase()
-        bigquery_ok = initialize_bigquery()
-
-        if firebase_ok and bigquery_ok:
-            app.config['INITIALIZATION_SUCCESS'] = True
-            logger.info("--- [APP_SETUP] Inicjalizacja usług zakończona pomyślnie. ---")
-        else:
-            raise RuntimeError("Inicjalizacja jednej z usług (Firebase/BigQuery) nie powiodła się.")
-
-    except Exception as e:
-        app.config['INITIALIZATION_SUCCESS'] = False
-        app.config['INITIALIZATION_FAILURE_REASON'] = str(e)
-        logger.critical(f"--- [APP_SETUP] KRYTYCZNY BŁĄD podczas initialize_app_services: {e} ---", exc_info=True)
-        # Rzucamy wyjątek dalej, aby zatrzymać tworzenie aplikacji, jeśli kluczowe usługi nie działają
-        raise
-
-def register_endpoints(app):
-    """
-    Rejestruje endpointy na przekazanym obiekcie `app`.
-    """
-    logger.info("--- [APP_SETUP] Rozpoczynam register_endpoints... ---")
-    
-    # Import logiki bota jest wykonywany "leniwie" tutaj, aby uniknąć cyklicznych zależności
-    from bot_service.bot_logic import run_analysis_cycle
-
+def register_endpoints(app: Flask):
     @app.route('/')
     def health_check():
         return "Trading Bot Service is running.", 200
@@ -60,14 +35,57 @@ def register_endpoints(app):
         logger.info(f"--- ROZPOCZĘCIE CYKLU BOTA --- ID cyklu: {cycle_id}")
 
         if not app.config.get('INITIALIZATION_SUCCESS', False):
-            reason = app.config.get('INITIALIZATION_FAILURE_REASON', 'Aplikacja niezainicjalizowana.')
-            logger.error(f"Zatrzymano cykl, aplikacja nie 'healthy'. Powód: {reason}", extra={"json_fields": {"cycle_id": cycle_id}})
-            return jsonify({"status": "error", "message": f"Service is unhealthy: {reason}"}), 503
+             reason = app.config.get('INITIALIZATION_FAILURE_REASON', 'Aplikacja niezainicjalizowana.')
+             logger.error(f"Zatrzymano cykl, aplikacja nie 'healthy'. Powód: {reason}", extra={"json_fields": {"cycle_id": cycle_id}})
+             return jsonify({"status": "error", "message": f"Service is unhealthy: {reason}"}), 503
         
         try:
+            # KROK 1: Przetwarzanie nowych alertów (tworzenie teczek)
+            last_ts = load_last_processed_timestamp()
+            new_alerts, new_ts = fetch_new_alerts_since(last_ts)
+            if new_alerts:
+                process_new_alerts(new_alerts)
+                if new_ts and (not last_ts or new_ts > last_ts):
+                    save_last_processed_timestamp(new_ts)
+            
+            # KROK 2: Analiza istniejących teczek
             run_analysis_cycle()
+
             logger.info(f"--- ZAKOŃCZENIE CYKLU BOTA --- ID cyklu: {cycle_id}")
             return jsonify({"status": "success", "cycle_id": cycle_id}), 200
         except Exception as e:
             logger.error(f"Krytyczny błąd w głównym cyklu bota: {e}", exc_info=True, extra={"json_fields": {"cycle_id": cycle_id}})
             return jsonify({"status": "error", "message": str(e), "cycle_id": cycle_id}), 500
+
+def initialize_app_services(app: Flask):
+    with app.app_context():
+        logger.info("Rozpoczynam konfigurację aplikacji bot_service wewnątrz kontekstu.")
+        
+        failure_reasons = []
+        
+        firebase_ok = False
+        for attempt in range(1, MAX_INIT_RETRIES + 1):
+            if initialize_firebase():
+                firebase_ok = True
+                break
+            if attempt < MAX_INIT_RETRIES: time.sleep(INIT_RETRY_DELAY_SECONDS)
+        if not firebase_ok:
+            failure_reasons.append("Failed to initialize Firebase/Firestore")
+        
+        bigquery_ok = False
+        for attempt in range(1, MAX_INIT_RETRIES + 1):
+            if initialize_bigquery():
+                bigquery_ok = True
+                break
+            if attempt < MAX_INIT_RETRIES: time.sleep(INIT_RETRY_DELAY_SECONDS)
+        if not bigquery_ok:
+            failure_reasons.append("Failed to initialize BigQuery")
+        
+        if not failure_reasons:
+            app.config['INITIALIZATION_SUCCESS'] = True
+            logger.info("Aplikacja Flask [bot_service] została pomyślnie utworzona i skonfigurowana.")
+        else:
+            app.config['INITIALIZATION_SUCCESS'] = False
+            final_reason = " & ".join(failure_reasons)
+            app.config['INITIALIZATION_FAILURE_REASON'] = final_reason
+            logger.critical(f"Krytyczny błąd podczas inicjalizacji. Powód: {final_reason}")
