@@ -1,8 +1,9 @@
 # Lokalizacja: shared_lib/models.py
 
-from pydantic import BaseModel, Field, validator
-from typing import Optional, Dict, Any, List
-from datetime import datetime
+
+from pydantic import BaseModel, Field, field_validator, ConfigDict
+from typing import Optional, Dict, Any
+from datetime import datetime, timezone
 
 class AlertData(BaseModel):
     id: Optional[str] = None
@@ -20,40 +21,22 @@ class AlertData(BaseModel):
     tp_3_0: float
     tp_4_0: float
     tp_5_0: float
-    
-    class Config:
-        allow_population_by_field_name = True
-        extra = 'ignore'
 
-    @validator('direction', pre=True, always=True)
-    def set_direction_from_code(cls, v, values):
-        if 'direction_code' in values:
-            code = values['direction_code']
+    model_config = ConfigDict(
+        populate_by_name=True,
+        extra='ignore'
+    )
+
+    @field_validator('direction', mode='before')
+    @classmethod
+    def set_direction_from_code(cls, v, info):
+        if 'directionCode' in info.data:
+            code = info.data['directionCode']
             if code == 1:
                 return "LONG"
             if code == -1:
                 return "SHORT"
         return "UNKNOWN"
-
-class SetupData(BaseModel):
-    alert_data: AlertData
-    entry_attempts: int = 0
-    is_position_open_on_this_setup: bool = False
-    is_reset_needed_after_loss: bool = False
-    updated_at: datetime
-
-class OpenTradeData(BaseModel):
-    trade_id: str
-    symbol: str
-    direction: str
-    ob_type: str
-    entry_price: float
-    sl_price: float
-    tp_price: float
-    opened_at_ms: int
-    opened_at_iso: str
-    alert_data_snapshot: Dict[str, Any]
-    bybit_order_id: str 
 
 class Kline(BaseModel):
     timestamp: int
@@ -61,31 +44,24 @@ class Kline(BaseModel):
     low: float
     close: float
 
-class AnalyzedTradeData(BaseModel):
-    trade_id: str
-    symbol: str
-    direction: str
-    ob_type: str
-    entry_price: float
-    original_sl: float
-    original_tp_5_0: Optional[float] = None
-    opened_at_ms: int
-    alert_data_snapshot: Dict[str, Any]
-    last_known_extreme_price: float
-    last_analysis_timestamp_ms: int
-    achieved_tps: List[str] = []
+class AnalyticalCaseResults(BaseModel):
+    tp_1_0: str = Field(default="UNRESOLVED")
+    tp_1_5: str = Field(default="UNRESOLVED")
+    tp_2_0: str = Field(default="UNRESOLVED")
+    tp_3_0: str = Field(default="UNRESOLVED")
+    tp_4_0: str = Field(default="UNRESOLVED")
+    tp_5_0: str = Field(default="UNRESOLVED")
 
-class OrderData(BaseModel):
+class AnalyticalCase(BaseModel):
+    alert_id: str
     symbol: str
-    direction: str
-    entry_price: float
-    sl_price: float
-    tp_price: float
-    margin_value_usdc: float
-    leverage: int
+    status: str = Field(default="PENDING")
+    alert_data: Dict[str, Any]
+    triggered_at: Optional[datetime] = None
+    results: AnalyticalCaseResults = Field(default_factory=AnalyticalCaseResults)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-    @validator('direction')
-    def direction_must_be_valid(cls, v):
-        if v.upper() not in ['LONG', 'SHORT']:
-            raise ValueError('Kierunek musi być "LONG" lub "SHORT"')
-        return v.upper()
+    class Config:
+        json_encoders = {
+            datetime: lambda v: v.isoformat(),
+        }
