@@ -35,18 +35,28 @@ class AlertData(BaseModel):
         extra='ignore'
     )
 
-    # --- POPRAWKA BŁĘDU #2: Użycie poprawnego klucza w walidatorze ---
+    # --- OSTATECZNA POPRAWKA WALIDATORA ---
     @field_validator('direction', mode='before')
     @classmethod
-    def set_direction_from_code(cls, v, info):
-        # W Pydantic v2, po aliasowaniu, w info.data jest już nazwa pola, a nie alias.
-        if 'direction_code' in info.data:
+    def set_direction_from_code(cls, v, info: ValidationInfo):
+        # W Pydantic v2, dostęp do surowych danych wejściowych uzyskujemy przez info.context
+        # lub przez info.data, ale musimy sprawdzić klucz aliasu.
+        # Najbezpieczniej jest sprawdzić oba.
+        code = None
+        if 'directionCode' in info.data:
+            code = info.data['directionCode']
+        elif 'direction_code' in info.data:
             code = info.data['direction_code']
+
+        if code is not None:
             if code == 1:
                 return "LONG"
             if code == -1:
                 return "SHORT"
+        
+        # Fallback, jeśli pole nie istnieje lub ma nieznaną wartość
         return "UNKNOWN"
+
 
 class Kline(BaseModel):
     timestamp: int
