@@ -47,43 +47,38 @@ def register_endpoints(app: Flask):
     @app.route('/run-bot-cycle', methods=['POST'])
     def run_bot_cycle_endpoint():
         cycle_id = str(uuid.uuid4())
-        logger.info(f"--- [DEBUG] KROK 1: Wejście do endpointu /run-bot-cycle. ID cyklu: {cycle_id} ---")
+        logger.info(f"--- ROZPOCZĘCIE CYKLU BOTA --- ID cyklu: {cycle_id}")
 
         if not app.config.get('INITIALIZATION_SUCCESS', False):
-             reason = app.config.get('INITIALIZATION_FAILURE_REASON', 'Aplikacja niezainicjalizowana.')
-             logger.error(f"[DEBUG] Zatrzymano cykl, ponieważ aplikacja nie jest 'healthy'. Powód: {reason}", extra={"json_fields": {"cycle_id": cycle_id}})
-             return jsonify({"status": "error", "message": f"Service is unhealthy: {reason}"}), 503
+            reason = app.config.get('INITIALIZATION_FAILURE_REASON', 'Aplikacja niezainicjalizowana.')
+            logger.error(f"Zatrzymano cykl, ponieważ aplikacja nie jest 'healthy'. Powód: {reason}", extra={"json_fields": {"cycle_id": cycle_id}})
+            return jsonify({"status": "error", "message": f"Service is unhealthy: {reason}"}), 503
         
-        logger.info(f"[DEBUG] KROK 2: Aplikacja jest 'healthy'. Rozpoczynam blok try...except.")
         try:
-            logger.info(f"[DEBUG] KROK 3: Wywołuję load_last_processed_timestamp().")
+            # --- KROK 1: Zawsze najpierw analizuj istniejące teczki ---
+            # To jest główna praca bota. Analizujemy teczki utworzone w POPRZEDNIM cyklu.
+            logger.info(f"[{cycle_id}] ETAP 1: Uruchamiam cykl analityczny dla istniejących teczek.")
+            run_analysis_cycle()
+
+            # --- KROK 2: Dopiero potem szukaj i twórz nowe teczki na następny cykl ---
+            logger.info(f"[{cycle_id}] ETAP 2: Sprawdzam, czy są nowe alerty do przetworzenia.")
             last_ts = load_last_processed_timestamp()
-            
-            logger.info(f"[DEBUG] KROK 4: Wywołuję fetch_new_alerts_since() z timestampem: {last_ts.isoformat() if last_ts else 'None'}.")
             new_alerts, new_ts = fetch_new_alerts_since(last_ts)
             
-            logger.info(f"[DEBUG] KROK 5: Otrzymano {len(new_alerts)} nowych alertów.")
             if new_alerts:
-                logger.info(f"[DEBUG] KROK 6: Warunek 'if new_alerts' jest prawdziwy. Wywołuję process_new_alerts().")
+                logger.info(f"[{cycle_id}] Znaleziono {len(new_alerts)} nowych alertów. Przetwarzam je, aby przygotować teczki na NASTĘPNY cykl.")
                 process_new_alerts(new_alerts)
                 
                 if new_ts and (not last_ts or new_ts > last_ts):
-                    logger.info(f"[DEBUG] KROK 7: Zapisuję nowy timestamp: {new_ts.isoformat()}.")
                     save_last_processed_timestamp(new_ts)
-                else:
-                    logger.warning(f"[DEBUG] KROK 7: Pomijam zapis timestampa (new_ts: {new_ts}, last_ts: {last_ts}).")
             else:
-                logger.info(f"[DEBUG] KROK 6: Warunek 'if new_alerts' jest fałszywy. Pomijam przetwarzanie.")
+                logger.info(f"[{cycle_id}] Brak nowych alertów do przetworzenia.")
 
-            logger.info(f"[DEBUG] KROK 8: Wywołuję run_analysis_cycle().")
-            run_analysis_cycle()
-
-            logger.info(f"--- [DEBUG] KROK 9: Cykl zakończony pomyślnie. Zwracam HTTP 200. ID cyklu: {cycle_id} ---")
+            logger.info(f"--- ZAKOŃCZENIE CYKLU BOTA --- ID cyklu: {cycle_id}")
             return jsonify({"status": "success", "cycle_id": cycle_id}), 200
         except Exception as e:
-            logger.error(f"[DEBUG] KRYTYCZNY BŁĄD w głównym cyklu bota: {e}", exc_info=True, extra={"json_fields": {"cycle_id": cycle_id}})
+            logger.error(f"Krytyczny błąd w głównym cyklu bota: {e}", exc_info=True, extra={"json_fields": {"cycle_id": cycle_id}})
             return jsonify({"status": "error", "message": str(e), "cycle_id": cycle_id}), 500
-
 def initialize_app_services(app: Flask):
     with app.app_context():
         logger.info("Rozpoczynam konfigurację aplikacji bot_service wewnątrz kontekstu.")
