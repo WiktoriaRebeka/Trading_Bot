@@ -32,20 +32,14 @@ class AlertData(BaseModel):
     @field_validator('direction', mode='before')
     @classmethod
     def set_direction_from_code(cls, v, info: ValidationInfo):
-        code = None
-        if 'directionCode' in info.data:
-            code = info.data['directionCode']
-        elif 'direction_code' in info.data:
-            code = info.data['direction_code']
+        code = info.data.get('directionCode')
 
-        if code is not None:
-            if code == 1:
-                return "LONG"
-            if code == -1:
-                return "SHORT"
-        
-        return "UNKNOWN"
+        if code == 1:
+            return "LONG"
+        if code == -1:
+            return "SHORT"
 
+        return None
 class Kline(BaseModel):
     timestamp: int
     high: float
