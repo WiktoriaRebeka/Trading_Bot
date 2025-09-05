@@ -1,9 +1,8 @@
 # Lokalizacja: shared_lib/models.py
 
-# Zmieniony import Pydantic
-from pydantic import BaseModel, Field, validator, ConfigDict
-from typing import Optional, Dict, Any
-from datetime import datetime, timezone
+from pydantic import BaseModel, Field, validator
+from typing import Optional, Dict, Any, List
+from datetime import datetime
 
 class AlertData(BaseModel):
     id: Optional[str] = None
@@ -21,12 +20,10 @@ class AlertData(BaseModel):
     tp_3_0: float
     tp_4_0: float
     tp_5_0: float
-
-    # Zmieniona konfiguracja Pydantic (naprawia ostrzeżenie)
-    model_config = ConfigDict(
-        populate_by_name=True,
-        extra='ignore'
-    )
+    
+    class Config:
+        allow_population_by_field_name = True
+        extra = 'ignore'
 
     @validator('direction', pre=True, always=True)
     def set_direction_from_code(cls, v, values):
@@ -38,33 +35,45 @@ class AlertData(BaseModel):
                 return "SHORT"
         return "UNKNOWN"
 
+class SetupData(BaseModel):
+    alert_data: AlertData
+    entry_attempts: int = 0
+    is_position_open_on_this_setup: bool = False
+    is_reset_needed_after_loss: bool = False
+    updated_at: datetime
+
+class OpenTradeData(BaseModel):
+    trade_id: str
+    symbol: str
+    direction: str
+    ob_type: str
+    entry_price: float
+    sl_price: float
+    tp_price: float
+    opened_at_ms: int
+    opened_at_iso: str
+    alert_data_snapshot: Dict[str, Any]
+
 class Kline(BaseModel):
     timestamp: int
     high: float
     low: float
     close: float
 
-class AnalyticalCaseResults(BaseModel):
-    tp_1_0: str = Field(default="UNRESOLVED")
-    tp_1_5: str = Field(default="UNRESOLVED")
-    tp_2_0: str = Field(default="UNRESOLVED")
-    tp_3_0: str = Field(default="UNRESOLVED")
-    tp_4_0: str = Field(default="UNRESOLVED")
-    tp_5_0: str = Field(default="UNRESOLVED")
-
-class AnalyticalCase(BaseModel):
+class AnalyzedTradeData(BaseModel):
     """
-    Reprezentuje pojedynczą "teczkę analityczną" w Firestore.
+    Ulepszony model "ducha" ze stanem do inkrementalnej analizy.
     """
-    alert_id: str
+    trade_id: str
     symbol: str
-    status: str = Field(default="PENDING")
-    alert_data: Dict[str, Any]
-    triggered_at: Optional[datetime] = None
-    results: AnalyticalCaseResults = Field(default_factory=AnalyticalCaseResults)
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-
-    class Config:
-        json_encoders = {
-            datetime: lambda v: v.isoformat(),
-        }
+    direction: str
+    ob_type: str
+    entry_price: float
+    original_sl: float
+    original_tp_5_0: Optional[float] = None
+    opened_at_ms: int
+    alert_data_snapshot: Dict[str, Any]
+    
+    last_known_extreme_price: float
+    last_analysis_timestamp_ms: int
+    achieved_tps: List[str] = []

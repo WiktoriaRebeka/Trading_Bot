@@ -31,7 +31,7 @@ async def _fetch_kline_for_symbol(session: aiohttp.ClientSession, symbol: str, c
                         "high": float(target_kline[2]), 
                         "low": float(target_kline[3]), 
                         "close": float(target_kline[4]), 
-                        "timestamp": int(target_kline[0]) # <-- POPRAWIONA NAZWA POLA
+                        "timestamp": int(target_kline[0])
                     }
                 else:
                     logger.warning(f"API Bybit zwróciło błąd: {data.get('retMsg', 'Brak wiadomości')}", extra=log_extra)
@@ -54,12 +54,12 @@ async def get_latest_klines_for_all_symbols(symbols_to_watch: List[str], cycle_i
     async with aiohttp.ClientSession() as session:
         tasks = [_fetch_kline_for_symbol(session, symbol, cycle_id) for symbol in symbols_to_watch]
         results = await asyncio.gather(*tasks, return_exceptions=True)
-    
+
     klines_data = {}
     for result in results:
         if result is not None and not isinstance(result, Exception):
             klines_data[result['symbol']] = result
-    
+
     logger.info(f"Pomyślnie pobrano dane kline dla {len(klines_data)}/{len(symbols_to_watch)} symboli.")
     return klines_data
 
@@ -69,11 +69,11 @@ def save_klines_to_firestore(klines_data: Dict[str, Dict[str, Any]], cycle_id: s
     if not klines_data:
         logger.info("Brak nowych danych kline do zapisania.")
         return
-        
+
     logger.info(f"Zapisywanie {len(klines_data)} rekordów kline do Firestore.")
     db = get_db()
     batch = db.batch()
-    
+
     for symbol, data in klines_data.items():
         doc_ref = db.collection(constants.LATEST_KLINES_COLLECTION).document(symbol)
         batch.set(doc_ref, data, merge=True)
@@ -91,15 +91,15 @@ async def run_data_collection_cycle(cycle_id: str) -> (str, int):
     i zapisuje je do cache'u w Firestore.
     """
     log_extra = {"json_fields": {"cycle_id": cycle_id}}
-    
+
     symbols_to_watch = get_symbols_to_watch_from_config()
     if not symbols_to_watch:
         logger.warning("Brak symboli do przetworzenia w konfiguracji.")
         return "Brak symboli do przetworzenia w konfiguracji.", 200
         
     klines = await get_latest_klines_for_all_symbols(symbols_to_watch, cycle_id)
-    
+
     if klines:
         save_klines_to_firestore(klines, cycle_id)
-    
+
     return f"Cykl kolektora danych zakończony. Przetworzono {len(klines)}/{len(symbols_to_watch)} symboli.", 200

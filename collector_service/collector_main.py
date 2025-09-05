@@ -4,27 +4,28 @@ import logging
 import sys
 import os
 
-# KROK 1: Załaduj konfigurację PRZED importem jakichkolwiek modułów aplikacji.
-from shared_lib.config_loader import load_config
-load_config()
+# Wstawienie ścieżki
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-# KROK 2: Skonfiguruj logowanie.
+# Minimalne importy
+from flask import Flask
+import google.cloud.logging
+
+# Konfiguracja logowania
 try:
-    import google.cloud.logging
     google.cloud.logging.Client().setup_logging()
     logging.info("Ustrukturyzowane logowanie Google Cloud (collector_service) skonfigurowane.")
 except Exception as e:
     logging.basicConfig(level=logging.INFO)
     logging.warning(f"Logowanie GCP nie powiodło się, używam podstawowej konfiguracji: {e}")
 
-# KROK 3: Teraz, gdy środowisko jest gotowe, importuj resztę aplikacji.
-from flask import Flask
+# Import logiki z nowego pliku
 from collector_service.app_setup import initialize_app_services, register_endpoints
 
 def create_app():
     """Tworzy i zwraca aplikację Flask dla kolektora."""
     app = Flask(__name__)
-
+    
     initialize_app_services(app)
     register_endpoints(app)
 
