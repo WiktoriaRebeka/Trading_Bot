@@ -1,11 +1,11 @@
-# Lokalizacja: collector_service/app_setup.py (NOWY PLIK)
+# Lokalizacja: collector_service/app_setup.py 
 
 import logging
 import uuid
 import asyncio
 from flask import Flask, jsonify
 
-# Importy
+
 from shared_lib.config_loader import load_config
 from shared_lib.firebase_client import initialize_firebase
 from collector_service.data_collector import run_data_collection_cycle
@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 def register_endpoints(app: Flask):
     """Rejestruje endpointy dla kolektora."""
-    
+
     @app.route('/')
     def health_check():
         return "Data Collector Service is running.", 200
@@ -46,7 +46,7 @@ def register_endpoints(app: Flask):
 def initialize_app_services(app: Flask):
     """Inicjalizuje usługi dla kolektora."""
     with app.app_context():
-        logger.info("Rozpoczynam konfigurację aplikacji collector_service wewnątrz kontekstu.")
+        logger.info("Rozpoczynam konfigurację aplikacji `collector_service` wewnątrz kontekstu.")
         load_config()
         if initialize_firebase():
             app.config['INITIALIZATION_SUCCESS'] = True

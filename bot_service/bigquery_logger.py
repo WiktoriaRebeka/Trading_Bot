@@ -1,3 +1,5 @@
+# Lokalizacja: bot_service/bigquery_logger.py
+
 import logging
 from typing import Dict, Any, Optional, Set
 from google.cloud import bigquery
@@ -76,7 +78,7 @@ def log_trade_to_bigquery(trade_data: Dict):
     except RuntimeError as e:
         logger.error(f"[BQ_LOGGER][{trade_data.get('trade_id')}] Nie można zalogować transakcji: {e}")
         return
-
+    
     sanitized_data = _validate_and_sanitize_data(trade_data)
     if not sanitized_data:
         logger.error(f"[BQ_LOGGER][{trade_data.get('trade_id')}] Dane nie przeszły walidacji. Pomijam zapis.")
@@ -112,7 +114,7 @@ def update_analyzed_trade_in_bigquery(trade_id: str, updates: Dict[str, Any]):
 
     set_clauses = [f"{key} = @{key}" for key in valid_updates.keys()]
     query = f"UPDATE `{TABLE_REF}` SET {', '.join(set_clauses)} WHERE trade_id = @trade_id"
-
+    
     params = [bigquery.ScalarQueryParameter("trade_id", "STRING", trade_id)]
     params.extend([bigquery.ScalarQueryParameter(key, _get_bq_type(value), value) for key, value in valid_updates.items()])
     job_config = bigquery.QueryJobConfig(query_parameters=params)

@@ -19,8 +19,7 @@ def initialize_firebase() -> bool:
         database_id = "trading-bot-data"
         logger.info(f"Inicjalizacja klienta Firestore dla projektu '{project_id}' i bazy '{database_id}'...")
         db_client = firestore.Client(project=project_id, database=database_id)
-        # Test connection
-        db_client.collection('test_connection').limit(1).get()
+        db_client.collection('_test_connection_').limit(1).get()
         logger.info("Inicjalizacja Firestore zakończona sukcesem.")
         return True
     except Exception as e:

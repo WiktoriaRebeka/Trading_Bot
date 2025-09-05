@@ -53,6 +53,7 @@ class OpenTradeData(BaseModel):
     opened_at_ms: int
     opened_at_iso: str
     alert_data_snapshot: Dict[str, Any]
+    bybit_order_id: str 
 
 class Kline(BaseModel):
     timestamp: int
@@ -61,9 +62,6 @@ class Kline(BaseModel):
     close: float
 
 class AnalyzedTradeData(BaseModel):
-    """
-    Ulepszony model "ducha" ze stanem do inkrementalnej analizy.
-    """
     trade_id: str
     symbol: str
     direction: str
@@ -73,7 +71,21 @@ class AnalyzedTradeData(BaseModel):
     original_tp_5_0: Optional[float] = None
     opened_at_ms: int
     alert_data_snapshot: Dict[str, Any]
-    
     last_known_extreme_price: float
     last_analysis_timestamp_ms: int
     achieved_tps: List[str] = []
+
+class OrderData(BaseModel):
+    symbol: str
+    direction: str
+    entry_price: float
+    sl_price: float
+    tp_price: float
+    margin_value_usdc: float
+    leverage: int
+
+    @validator('direction')
+    def direction_must_be_valid(cls, v):
+        if v.upper() not in ['LONG', 'SHORT']:
+            raise ValueError('Kierunek musi być "LONG" lub "SHORT"')
+        return v.upper()

@@ -1,11 +1,10 @@
 # Lokalizacja: /gcp-webhook/main.py
-# Lokalizacja: /gcp-webhook/main.py
 import os
 import logging
 import hmac
 import hashlib
 from google.cloud import firestore
-from datetime import datetime, timezone # <-- Dodaj ten import
+
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - WEBHOOK - %(levelname)s - %(message)s')
 
@@ -21,6 +20,7 @@ def get_db_client():
         try:
             logging.info(f"Inicjalizacja klienta Firestore dla projektu '{PROJECT_ID}' i bazy '{DATABASE_NAME}'.")
             db = firestore.Client(project=PROJECT_ID, database=DATABASE_NAME)
+            # Testowe zapytanie w celu weryfikacji połączenia
             db.collection('_test_connection_').limit(1).get()
             logging.info("Klient Firestore pomyślnie zainicjalizowany.")
         except Exception as e:
@@ -35,6 +35,7 @@ def firestore_webhook_receiver(request):
         logging.warning(f"Odrzucono żądanie z niedozwoloną metodą: {request.method}")
         return ('Dozwolone są tylko żądania POST', 405)
 
+    # --- Krok 1: Weryfikacja Sekretu ---
     if not WEBHOOK_SECRET:
         logging.critical("Sekret WEBHOOK_SECRET_TOKEN nie jest skonfigurowany w środowisku Cloud Function!")
         return ("Błąd konfiguracji serwera", 500)
@@ -56,21 +57,20 @@ def firestore_webhook_receiver(request):
         logging.error(f"Błąd podczas parsowania JSON lub autoryzacji: {e}", exc_info=True)
         return ("Nieprawidłowe żądanie", 400)
     
+    # --- Koniec Weryfikacji ---
+
     try:
         client = get_db_client()
     except Exception:
         return ("Błąd serwera: Klient Firestore niedostępny", 500)
 
     try:
-        required_keys = ["symbol", "directionCode", "entry", "sl", "tp", "timestamp"]
+        required_keys = ["symbol", "directionCode", "entry", "sl", "tp"]
         if not all(key in alert_data for key in required_keys):
             logging.error(f"Brak wymaganych kluczy w alercie: {alert_data}")
             return (f"Brakujące klucze w alercie. Wymagane: {required_keys}", 400)
 
         logging.info(f"Odebrano poprawny alert dla symbolu: {alert_data.get('symbol')}")
-        
-        # --- KLUCZOWA LINIA, KTÓRA NAPRAWIA PROBLEM ---
-        # Zapewnia, że pole, którego szuka bot, zawsze istnieje i ma poprawny typ.
         alert_data['received_at'] = firestore.SERVER_TIMESTAMP
         
         doc_ref = client.collection('alerts').document()
