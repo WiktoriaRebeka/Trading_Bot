@@ -3,7 +3,6 @@ import json
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone
 from pydantic import ValidationError
-from shared_lib.models import json_serializer
 from shared_lib.models import AlertData, Kline, AnalyticalCase
 from bot_service import state_manager
 from bot_service.bigquery_logger import log_analysis_result

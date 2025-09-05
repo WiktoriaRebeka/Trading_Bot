@@ -5,7 +5,6 @@ from typing import Iterable, Dict, Any, List, Optional, Tuple
 from datetime import datetime
 from google.cloud import firestore
 from google.cloud.firestore_v1.document import DocumentSnapshot
-import json
 
 from shared_lib.firebase_client import get_db
 from shared_lib import constants
@@ -40,10 +39,10 @@ def delete_case_by_id(case_id: str):
 def create_analytical_case(case_data: AnalyticalCase):
     """Tworzy nowy dokument teczki analitycznej w Firestore."""
     try:
+
         doc_ref = _get_db().collection(constants.ANALYTICAL_CASES_COLLECTION).document(case_data.alert_id)
-        # Pydantic model_dump() zwraca obiekty, które trzeba serializować (np. datetime)
-        # Używamy json.loads(model.json()) aby uzyskać słownik z poprawnymi typami
-        data_to_set = json.loads(case_data.json())
+        data_to_set = case_data.model_dump(mode='json')
+        
         doc_ref.set(data_to_set)
         logger.info(f"[{case_data.alert_id}] Utworzono nową teczkę analityczną dla {case_data.symbol}.")
     except Exception as e:
