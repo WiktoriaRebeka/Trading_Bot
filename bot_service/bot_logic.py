@@ -125,73 +125,61 @@ def _handle_pending_case(case_doc_snapshot: Any, kline: Kline):
         }
         state_manager.update_case_status_and_results(case_id, updates)
 
+
 def _handle_triggered_case(case_doc_snapshot: Any, kline: Kline):
     case_doc = case_doc_snapshot.to_dict()
     case_id = case_doc_snapshot.id
     symbol = case_doc.get('symbol')
     alert = AlertData.model_validate(case_doc.get('alert_data'))
     results = case_doc.get('results', {})
-    
+
     unresolved_targets = {k: v for k, v in results.items() if v == "UNRESOLVED"}
     if not unresolved_targets:
-        logger.info(f"[{case_id}] Wszystkie scenariusze rozstrzygnięte. Oznaczam do usunięcia.")
+        logger.info(f"[{case_id}] Wszystkie scenariusze rozstrzygnięte. Usuwam teczkę.")
         state_manager.delete_case_by_id(case_id)
         return
 
     sl_price = alert.sl
     direction = alert.direction
+    sl_hit = (direction == 'LONG' and kline.low <= sl_price) or (direction == 'SHORT' and kline.high >= sl_price)
     
-    sl_hit = (direction == 'LONG' and kline.low <= sl_price) or \
-             (direction == 'SHORT' and kline.high >= sl_price)
-
     resolved_scenarios = {}
     close_timestamp = datetime.fromtimestamp(kline.timestamp / 1000, tz=timezone.utc)
     
-    risk_perc = _calculate_risk_percentage(alert.entry, alert.sl)
+    # --- KLUCZOWA POPRAWKA: Użycie Pydantic do serializacji JSON ---
+    # Pydantic wie, jak konwertować datetime na stringi ISO, w przeciwieństwie do standardowego json.dumps()
+    raw_alert_json = alert.model_dump_json(by_alias=True)
 
     base_log_data = {
         "analysis_id": case_id, "symbol": symbol, "direction": direction,
         "entry_price": alert.entry, "sl_price": sl_price,
         "timestamp_alert": alert.received_at, "timestamp_entry": case_doc.get('triggered_at'),
-        "timestamp_close": close_timestamp, "raw_alert_data": json.dumps(alert.model_dump(by_alias=True)),
-        "risk_percentage": risk_perc
+        "timestamp_close": close_timestamp, "raw_alert_data": raw_alert_json
     }
 
     if sl_hit:
         logger.info(f"--- [SL HIT] --- [{symbol}] | ID: {case_id} | Wszystkie nierozstrzygnięte scenariusze = LOSE.")
         for target_level in unresolved_targets:
             log_data = base_log_data.copy()
-            log_data.update({
-                "target_level": target_level,
-                "target_price": getattr(alert, target_level),
-                "result": "LOSE"
-            })
+            log_data.update({"target_level": target_level, "target_price": getattr(alert, target_level), "result": "LOSE"})
             log_analysis_result(log_data)
             resolved_scenarios[f'results.{target_level}'] = "LOSE"
     else:
         for target_level in unresolved_targets:
             target_price = getattr(alert, target_level)
-            tp_hit = (direction == 'LONG' and kline.high >= target_price) or \
-                     (direction == 'SHORT' and kline.low <= target_price)
+            tp_hit = (direction == 'LONG' and kline.high >= target_price) or (direction == 'SHORT' and kline.low <= target_price)
             if tp_hit:
                 logger.info(f"--- [TP HIT] --- [{symbol}] | ID: {case_id} | Scenariusz {target_level} = WIN.")
                 log_data = base_log_data.copy()
-                log_data.update({
-                    "target_level": target_level,
-                    "target_price": target_price,
-                    "result": "WIN"
-                })
+                log_data.update({"target_level": target_level, "target_price": target_price, "result": "WIN"})
                 log_analysis_result(log_data)
                 resolved_scenarios[f'results.{target_level}'] = "WIN"
 
     if resolved_scenarios:
         state_manager.update_case_status_and_results(case_id, resolved_scenarios)
-        
         if len(results) - len(unresolved_targets) + len(resolved_scenarios) >= 6:
             logger.info(f"[{case_id}] Wszystkie 6 scenariuszy rozstrzygnięte. Finalne usunięcie teczki.")
             state_manager.delete_case_by_id(case_id)
-
-# Lokalizacja: bot_service/bot_logic.py
 
 def run_analysis_cycle():
     logger.info("Rozpoczynam główną pętlę cyklu analitycznego.")
