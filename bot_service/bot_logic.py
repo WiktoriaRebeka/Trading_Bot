@@ -18,15 +18,19 @@ def _calculate_risk_percentage(entry_price: float, sl_price: float) -> Optional[
     risk_distance = abs(entry_price - sl_price)
     return round((risk_distance / entry_price) * 100, 4)
 
+# Lokalizacja: bot_service/bot_logic.py
+
 def _correct_and_validate_alert(alert: AlertData) -> bool:
     """
     Waliduje logikę biznesową alertu. Zwraca True, jeśli jest poprawny, False w przeciwnym razie.
     """
-    # KROK 1: Sprawdzenie, czy pozycja jest logicznie poprawna.
-    # Dla LONG, Stop Loss MUSI być poniżej ceny wejścia.
-    # Dla SHORT, Stop Loss MUSI być powyżej ceny wejścia.
-    
-    # --- KLUCZOWA POPRAWKA: Odwrócenie operatorów porównania ---
+
+    if not alert.direction or alert.direction not in ["LONG", "SHORT"]:
+        logger.warning(
+            f"Odrzucono alert [{alert.symbol}]: Brak lub nieprawidłowy kierunek ('{alert.direction}'). "
+            f"Oryginalny directionCode: {alert.direction_code}."
+        )
+        return False
     is_long_ok = (alert.direction == 'LONG' and alert.sl < alert.entry)
     is_short_ok = (alert.direction == 'SHORT' and alert.sl > alert.entry)
 
@@ -36,8 +40,6 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
             f"Kierunek: {alert.direction}, Wejście: {alert.entry}, SL: {alert.sl}."
         )
         return False
-
-    # KROK 2: Sprawdzenie minimalnego ryzyka.
     risk_perc = _calculate_risk_percentage(alert.entry, alert.sl)
     if risk_perc is None or risk_perc < 0.05:
         logger.warning(
@@ -46,7 +48,6 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
         )
         return False
     
-    # Jeśli oba warunki są spełnione, alert jest prawidłowy.
     logger.info(
         f"Alert [{alert.symbol}] przeszedł walidację. "
         f"Kierunek: {alert.direction}, Ryzyko: {risk_perc}%."
