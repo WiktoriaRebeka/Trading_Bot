@@ -1,11 +1,12 @@
 # Lokalizacja: bot_service/app_setup.py
 
+
 import logging
 import uuid
 import time
 from flask import Flask, jsonify, request
 
-# --- KLUCZOWA ZMIANA: Usunięto import 'process_new_alerts' ---
+# Poprawiony import: Usunięto 'process_new_alerts' i inne niepotrzebne funkcje.
 from bot_service.bot_logic import run_analysis_cycle
 from shared_lib.firebase_client import initialize_firebase
 from bot_service.bigquery_logger import initialize_bigquery
@@ -54,8 +55,7 @@ def register_endpoints(app: Flask):
              return jsonify({"status": "error", "message": f"Service is unhealthy: {reason}"}), 503
         
         try:
-            # --- UPROSZCZONE WYWOŁANIE ---
-            # Wywołujemy tylko jedną, główną funkcję, która zarządza całym cyklem.
+            # Uproszczone wywołanie jedynej funkcji logicznej.
             run_analysis_cycle()
 
             logger.info(f"--- ZAKOŃCZENIE CYKLU BOTA --- ID cyklu: {cycle_id}")
