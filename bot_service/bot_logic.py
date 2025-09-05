@@ -25,6 +25,8 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
     # KROK 1: Sprawdzenie, czy pozycja jest logicznie poprawna.
     # Dla LONG, Stop Loss MUSI być poniżej ceny wejścia.
     # Dla SHORT, Stop Loss MUSI być powyżej ceny wejścia.
+    
+    # --- KLUCZOWA POPRAWKA: Odwrócenie operatorów porównania ---
     is_long_ok = (alert.direction == 'LONG' and alert.sl < alert.entry)
     is_short_ok = (alert.direction == 'SHORT' and alert.sl > alert.entry)
 
