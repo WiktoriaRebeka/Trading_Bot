@@ -1,17 +1,11 @@
 # Lokalizacja: shared_lib/models.py
 
 
-from pydantic import BaseModel, Field, field_validator, ConfigDict
+# Lokalizacja: shared_lib/models.py
+
+from pydantic import BaseModel, Field, field_validator, ConfigDict, ValidationInfo
 from typing import Optional, Dict, Any
 from datetime import datetime, timezone
-import json
-
-# --- NOWA FUNKCJA POMOCNICZA DO SERIALIZACJI ---
-def json_serializer(obj):
-    """Niestandardowy serializator JSON do obsługi obiektów datetime."""
-    if isinstance(obj, datetime):
-        return obj.isoformat()
-    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 class AlertData(BaseModel):
     id: Optional[str] = None
@@ -35,13 +29,9 @@ class AlertData(BaseModel):
         extra='ignore'
     )
 
-    # --- OSTATECZNA POPRAWKA WALIDATORA ---
     @field_validator('direction', mode='before')
     @classmethod
     def set_direction_from_code(cls, v, info: ValidationInfo):
-        # W Pydantic v2, dostęp do surowych danych wejściowych uzyskujemy przez info.context
-        # lub przez info.data, ale musimy sprawdzić klucz aliasu.
-        # Najbezpieczniej jest sprawdzić oba.
         code = None
         if 'directionCode' in info.data:
             code = info.data['directionCode']
@@ -54,9 +44,7 @@ class AlertData(BaseModel):
             if code == -1:
                 return "SHORT"
         
-        # Fallback, jeśli pole nie istnieje lub ma nieznaną wartość
         return "UNKNOWN"
-
 
 class Kline(BaseModel):
     timestamp: int
@@ -81,5 +69,7 @@ class AnalyticalCase(BaseModel):
     results: AnalyticalCaseResults = Field(default_factory=AnalyticalCaseResults)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-    # Usunięto starą klasę Config, ponieważ Pydantic v2 obsługuje to inaczej
-    # a serializację JSON obsłużymy bezpośrednio.
+    class Config:
+        json_encoders = {
+            datetime: lambda v: v.isoformat(),
+        }
