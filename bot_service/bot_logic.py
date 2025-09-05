@@ -191,6 +191,8 @@ def _handle_triggered_case(case_doc_snapshot: Any, kline: Kline):
             logger.info(f"[{case_id}] Wszystkie 6 scenariuszy rozstrzygnięte. Finalne usunięcie teczki.")
             state_manager.delete_case_by_id(case_id)
 
+# Lokalizacja: bot_service/bot_logic.py
+
 def run_analysis_cycle():
     logger.info("Rozpoczynam główną pętlę cyklu analitycznego.")
     
@@ -200,7 +202,7 @@ def run_analysis_cycle():
         return
 
     logger.info(f"[DIAGNOSTYKA] Znaleziono {len(all_cases_docs)} teczek analitycznych do przetworzenia.")
-    symbols_to_watch = {doc.to_dict().get('symbol') for doc in all_cases_docs}
+    symbols_to_watch = {doc.to_dict().get('symbol') for doc in all_cases_docs if doc.to_dict()}
     valid_symbols = {s for s in symbols_to_watch if s}
     
     if not valid_symbols:
@@ -229,10 +231,11 @@ def run_analysis_cycle():
                 logger.warning(f"Brak danych kline dla symbolu {symbol} (teczka {case_id}). Pomijam tę teczkę w cyklu.")
                 continue
             
+            # --- KLUCZOWA POPRAWKA: Użycie poprawnej nazwy zmiennej ---
             if status == 'PENDING':
-                _handle_pending_case(case_doc_snapshot, kline)
+                _handle_pending_case(case_doc_snapshot, latest_kline)
             elif status == 'TRIGGERED':
-                _handle_triggered_case(case_doc_snapshot, kline)
+                _handle_triggered_case(case_doc_snapshot, latest_kline)
         except Exception as e:
             logger.error(f"Błąd podczas przetwarzania teczki {case_id}: {e}", exc_info=True)
 
