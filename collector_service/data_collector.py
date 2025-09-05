@@ -20,9 +20,7 @@ async def _fetch_kline_for_symbol(session: aiohttp.ClientSession, symbol: str, c
 
     for attempt in range(max_retries):
         try:
-            kline_endpoint = "/v5/market/kline"
-            full_url = constants.BYBIT_API_URL_V5 + kline_endpoint
-            async with session.get(full_url, params=params, timeout=5) as response:
+            async with session.get(constants.BYBIT_API_URL_V5_KLINE, params=params, timeout=5) as response:
                 response.raise_for_status()
                 data = await response.json()
                 if data.get("retCode") == 0 and data.get("result") and data["result"].get("list"):
@@ -33,7 +31,7 @@ async def _fetch_kline_for_symbol(session: aiohttp.ClientSession, symbol: str, c
                         "high": float(target_kline[2]), 
                         "low": float(target_kline[3]), 
                         "close": float(target_kline[4]), 
-                        "timestamp": int(target_kline[0]) # 
+                        "timestamp": int(target_kline[0]) # <-- POPRAWIONA NAZWA POLA
                     }
                 else:
                     logger.warning(f"API Bybit zwróciło błąd: {data.get('retMsg', 'Brak wiadomości')}", extra=log_extra)
