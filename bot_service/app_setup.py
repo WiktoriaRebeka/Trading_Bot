@@ -5,11 +5,10 @@ import uuid
 import time
 from flask import Flask, jsonify, request
 
-from shared_lib.config_loader import load_config
+# --- KLUCZOWA ZMIANA: Usunięto import 'process_new_alerts' ---
+from bot_service.bot_logic import run_analysis_cycle
 from shared_lib.firebase_client import initialize_firebase
 from bot_service.bigquery_logger import initialize_bigquery
-from bot_service.bot_logic import process_new_alerts, run_analysis_cycle
-from bot_service.fetch_from_firestore import load_last_processed_timestamp, fetch_new_alerts_since, save_last_processed_timestamp
 
 logger = logging.getLogger(__name__)
 
@@ -50,13 +49,13 @@ def register_endpoints(app: Flask):
         logger.info(f"--- ROZPOCZĘCIE CYKLU BOTA --- ID cyklu: {cycle_id}")
 
         if not app.config.get('INITIALIZATION_SUCCESS', False):
-            reason = app.config.get('INITIALIZATION_FAILURE_REASON', 'Aplikacja niezainicjalizowana.')
-            logger.error(f"Zatrzymano cykl, aplikacja nie 'healthy'. Powód: {reason}", extra={"json_fields": {"cycle_id": cycle_id}})
-            return jsonify({"status": "error", "message": f"Service is unhealthy: {reason}"}), 503
+             reason = app.config.get('INITIALIZATION_FAILURE_REASON', 'Aplikacja niezainicjalizowana.')
+             logger.error(f"Zatrzymano cykl, aplikacja nie 'healthy'. Powód: {reason}", extra={"json_fields": {"cycle_id": cycle_id}})
+             return jsonify({"status": "error", "message": f"Service is unhealthy: {reason}"}), 503
         
         try:
-            # --- KLUCZOWA ZMIANA: JEDNO WYWOŁANIE GŁÓWNEJ LOGIKI ---
-            # Zamiast dwóch oddzielnych funkcji, wywołujemy jedną, która zarządza wszystkim.
+            # --- UPROSZCZONE WYWOŁANIE ---
+            # Wywołujemy tylko jedną, główną funkcję, która zarządza całym cyklem.
             run_analysis_cycle()
 
             logger.info(f"--- ZAKOŃCZENIE CYKLU BOTA --- ID cyklu: {cycle_id}")
@@ -64,7 +63,7 @@ def register_endpoints(app: Flask):
         except Exception as e:
             logger.error(f"Krytyczny błąd w głównym cyklu bota: {e}", exc_info=True, extra={"json_fields": {"cycle_id": cycle_id}})
             return jsonify({"status": "error", "message": str(e), "cycle_id": cycle_id}), 500
-            
+
 def initialize_app_services(app: Flask):
     with app.app_context():
         logger.info("Rozpoczynam konfigurację aplikacji bot_service wewnątrz kontekstu.")
