@@ -3,7 +3,7 @@ import json
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone
 from pydantic import ValidationError
-
+from shared_lib.models import json_serializer
 from shared_lib.models import AlertData, Kline, AnalyticalCase
 from bot_service import state_manager
 from bot_service.bigquery_logger import log_analysis_result
@@ -145,9 +145,7 @@ def _handle_triggered_case(case_doc_snapshot: Any, kline: Kline):
     
     resolved_scenarios = {}
     close_timestamp = datetime.fromtimestamp(kline.timestamp / 1000, tz=timezone.utc)
-    
-    # --- KLUCZOWA POPRAWKA: Użycie Pydantic do serializacji JSON ---
-    # Pydantic wie, jak konwertować datetime na stringi ISO, w przeciwieństwie do standardowego json.dumps()
+  
     raw_alert_json = alert.model_dump_json(by_alias=True)
 
     base_log_data = {

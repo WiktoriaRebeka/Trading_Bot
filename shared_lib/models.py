@@ -4,6 +4,14 @@
 from pydantic import BaseModel, Field, field_validator, ConfigDict
 from typing import Optional, Dict, Any
 from datetime import datetime, timezone
+import json
+
+# --- NOWA FUNKCJA POMOCNICZA DO SERIALIZACJI ---
+def json_serializer(obj):
+    """Niestandardowy serializator JSON do obsługi obiektów datetime."""
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 class AlertData(BaseModel):
     id: Optional[str] = None
@@ -27,11 +35,13 @@ class AlertData(BaseModel):
         extra='ignore'
     )
 
+    # --- POPRAWKA BŁĘDU #2: Użycie poprawnego klucza w walidatorze ---
     @field_validator('direction', mode='before')
     @classmethod
     def set_direction_from_code(cls, v, info):
-        if 'directionCode' in info.data:
-            code = info.data['directionCode']
+        # W Pydantic v2, po aliasowaniu, w info.data jest już nazwa pola, a nie alias.
+        if 'direction_code' in info.data:
+            code = info.data['direction_code']
             if code == 1:
                 return "LONG"
             if code == -1:
@@ -61,7 +71,5 @@ class AnalyticalCase(BaseModel):
     results: AnalyticalCaseResults = Field(default_factory=AnalyticalCaseResults)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-    class Config:
-        json_encoders = {
-            datetime: lambda v: v.isoformat(),
-        }
+    # Usunięto starą klasę Config, ponieważ Pydantic v2 obsługuje to inaczej
+    # a serializację JSON obsłużymy bezpośrednio.
