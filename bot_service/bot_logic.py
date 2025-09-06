@@ -150,11 +150,23 @@ def _handle_triggered_case(case_doc_snapshot: Any, kline: Kline):
   
     raw_alert_json = alert.model_dump_json(by_alias=True)
 
+    # --- POPRAWKA: Jawna konwersja obiektów datetime na stringi w formacie ISO ---
+    # Klient BigQuery `insert_rows_json` oczekuje danych serializowalnych do JSON.
+    # Obiekty `datetime` nie są domyślnie serializowalne.
+    # Używamy metody .isoformat() do konwersji, co jest standardem akceptowanym przez BigQuery
+    # dla kolumn typu TIMESTAMP. Dodajemy zabezpieczenia na wypadek, gdyby któraś
+    # z dat była None, aby uniknąć błędu AttributeError.
+    
+    triggered_at_dt = case_doc.get('triggered_at')
+    received_at_dt = alert.received_at
+
     base_log_data = {
         "analysis_id": case_id, "symbol": symbol, "direction": direction,
         "entry_price": alert.entry, "sl_price": sl_price,
-        "timestamp_alert": alert.received_at, "timestamp_entry": case_doc.get('triggered_at'),
-        "timestamp_close": close_timestamp, "raw_alert_data": raw_alert_json
+        "timestamp_alert": received_at_dt.isoformat() if received_at_dt else None,
+        "timestamp_entry": triggered_at_dt.isoformat() if triggered_at_dt else None,
+        "timestamp_close": close_timestamp.isoformat(),
+        "raw_alert_data": raw_alert_json
     }
 
     if sl_hit:
@@ -177,6 +189,7 @@ def _handle_triggered_case(case_doc_snapshot: Any, kline: Kline):
 
     if resolved_scenarios:
         state_manager.update_case_status_and_results(case_id, resolved_scenarios)
+        # Sprawdzamy, czy po aktualizacji wszystkie 6 scenariuszy jest już rozstrzygniętych
         if len(results) - len(unresolved_targets) + len(resolved_scenarios) >= 6:
             logger.info(f"[{case_id}] Wszystkie 6 scenariuszy rozstrzygnięte. Finalne usunięcie teczki.")
             state_manager.delete_case_by_id(case_id)
