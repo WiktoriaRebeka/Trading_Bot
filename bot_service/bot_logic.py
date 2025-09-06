@@ -147,8 +147,6 @@ def _handle_triggered_case(case_doc_snapshot: Any, kline: Kline):
     
     resolved_scenarios = {}
     close_timestamp = datetime.fromtimestamp(kline.timestamp / 1000, tz=timezone.utc)
-  
-    raw_alert_json = alert.model_dump_json(by_alias=True)
 
     # Przygotowanie danych do zapisu w BigQuery z jawną konwersją datetime na string
     triggered_at_dt = case_doc.get('triggered_at')
@@ -160,7 +158,6 @@ def _handle_triggered_case(case_doc_snapshot: Any, kline: Kline):
         "timestamp_alert": received_at_dt.isoformat() if received_at_dt else None,
         "timestamp_entry": triggered_at_dt.isoformat() if triggered_at_dt else None,
         "timestamp_close": close_timestamp.isoformat(),
-        "raw_alert_data": raw_alert_json
     }
 
     if sl_hit:

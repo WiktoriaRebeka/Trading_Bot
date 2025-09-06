@@ -26,7 +26,6 @@ NEW_TRADES_HISTORY_SCHEMA = [
     bigquery.SchemaField("timestamp_alert", "TIMESTAMP", mode="REQUIRED"),
     bigquery.SchemaField("timestamp_entry", "TIMESTAMP", mode="REQUIRED"),
     bigquery.SchemaField("timestamp_close", "TIMESTAMP", mode="REQUIRED"),
-    bigquery.SchemaField("raw_alert_data", "STRING", mode="NULLABLE"),
 ]
 
 def initialize_bigquery() -> bool:
