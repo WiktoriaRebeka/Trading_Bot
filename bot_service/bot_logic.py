@@ -150,13 +150,7 @@ def _handle_triggered_case(case_doc_snapshot: Any, kline: Kline):
   
     raw_alert_json = alert.model_dump_json(by_alias=True)
 
-    # --- POPRAWKA: Jawna konwersja obiektów datetime na stringi w formacie ISO ---
-    # Klient BigQuery `insert_rows_json` oczekuje danych serializowalnych do JSON.
-    # Obiekty `datetime` nie są domyślnie serializowalne.
-    # Używamy metody .isoformat() do konwersji, co jest standardem akceptowanym przez BigQuery
-    # dla kolumn typu TIMESTAMP. Dodajemy zabezpieczenia na wypadek, gdyby któraś
-    # z dat była None, aby uniknąć błędu AttributeError.
-    
+    # Przygotowanie danych do zapisu w BigQuery z jawną konwersją datetime na string
     triggered_at_dt = case_doc.get('triggered_at')
     received_at_dt = alert.received_at
 
