@@ -7,12 +7,17 @@ from pydantic import BaseModel, Field, field_validator, ConfigDict, ValidationIn
 from typing import Optional, Dict, Any
 from datetime import datetime, timezone
 
+# Lokalizacja: shared_lib/models.py
+
+from pydantic import BaseModel, Field, computed_field, ConfigDict
+from typing import Optional, Dict, Any
+from datetime import datetime, timezone
+
 class AlertData(BaseModel):
     id: Optional[str] = None
     received_at: Optional[datetime] = None
     symbol: str
     direction_code: int = Field(alias='directionCode')
-    direction: Optional[str] = None
     entry: float
     sl: float
     tp: float
@@ -29,17 +34,16 @@ class AlertData(BaseModel):
         extra='ignore'
     )
 
-    @field_validator('direction', mode='before')
-    @classmethod
-    def set_direction_from_code(cls, v, info: ValidationInfo):
-        code = info.data.get('directionCode')
-
-        if code == 1:
+    @computed_field
+    @property
+    def direction(self) -> Optional[str]:
+        if self.direction_code == 1:
             return "LONG"
-        if code == -1:
+        if self.direction_code == -1:
             return "SHORT"
-
         return None
+
+
 class Kline(BaseModel):
     timestamp: int
     high: float
