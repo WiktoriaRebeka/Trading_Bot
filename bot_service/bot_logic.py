@@ -147,17 +147,24 @@ def _handle_triggered_case(case_doc_snapshot: Any, kline: Kline):
     
     resolved_scenarios = {}
     close_timestamp = datetime.fromtimestamp(kline.timestamp / 1000, tz=timezone.utc)
+  
+    # --- POPRAWKA: Obliczamy risk_percentage tutaj, aby było dostępne do zapisu ---
+    risk_perc = _calculate_risk_percentage(alert.entry, alert.sl)
 
     # Przygotowanie danych do zapisu w BigQuery z jawną konwersją datetime na string
     triggered_at_dt = case_doc.get('triggered_at')
     received_at_dt = alert.received_at
 
     base_log_data = {
-        "analysis_id": case_id, "symbol": symbol, "direction": direction,
-        "entry_price": alert.entry, "sl_price": sl_price,
+        "analysis_id": case_id,
+        "symbol": symbol,
+        "direction": direction,
+        "entry_price": alert.entry,
+        "sl_price": sl_price,
         "timestamp_alert": received_at_dt.isoformat() if received_at_dt else None,
         "timestamp_entry": triggered_at_dt.isoformat() if triggered_at_dt else None,
         "timestamp_close": close_timestamp.isoformat(),
+        "risk_percentage": risk_perc
     }
 
     if sl_hit:
@@ -180,11 +187,9 @@ def _handle_triggered_case(case_doc_snapshot: Any, kline: Kline):
 
     if resolved_scenarios:
         state_manager.update_case_status_and_results(case_id, resolved_scenarios)
-        # Sprawdzamy, czy po aktualizacji wszystkie 6 scenariuszy jest już rozstrzygniętych
         if len(results) - len(unresolved_targets) + len(resolved_scenarios) >= 6:
             logger.info(f"[{case_id}] Wszystkie 6 scenariuszy rozstrzygnięte. Finalne usunięcie teczki.")
             state_manager.delete_case_by_id(case_id)
-
 def run_analysis_cycle():
     logger.info("Rozpoczynam główną pętlę cyklu analitycznego.")
     

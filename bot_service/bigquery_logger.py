@@ -26,6 +26,7 @@ NEW_TRADES_HISTORY_SCHEMA = [
     bigquery.SchemaField("timestamp_alert", "TIMESTAMP", mode="REQUIRED"),
     bigquery.SchemaField("timestamp_entry", "TIMESTAMP", mode="REQUIRED"),
     bigquery.SchemaField("timestamp_close", "TIMESTAMP", mode="REQUIRED"),
+    bigquery.SchemaField("risk_percentage", "FLOAT", mode="NULLABLE", description="Procentowa odległość od ceny wejścia do SL, obliczona przy walidacji alertu."),
 ]
 
 def initialize_bigquery() -> bool:
