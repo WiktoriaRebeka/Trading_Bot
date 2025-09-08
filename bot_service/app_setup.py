@@ -1,20 +1,25 @@
 # Lokalizacja: bot_service/app_setup.py
-
 import logging
+import os
 import uuid
 import time
 from flask import Flask, jsonify, request
 
-from shared_lib.config_loader import load_config
+# Nowe i zmienione importy
+from shared_lib.secret_manager import get_secret
 from shared_lib.firebase_client import initialize_firebase
 from bot_service.bigquery_logger import initialize_bigquery
-from bot_service.bot_logic import process_new_alerts, run_analysis_cycle
-from bot_service.fetch_from_firestore import load_last_processed_timestamp, fetch_new_alerts_since, save_last_processed_timestamp
+from bot_service.bot_logic import run_analytical_cycle, run_transactional_cycle, log_closed_positions_pnl
+from bot_service.bybit_executor import BybitExecutor
 
 logger = logging.getLogger(__name__)
 
+# --- Konfiguracja Aplikacji ---
 MAX_INIT_RETRIES = 3
 INIT_RETRY_DELAY_SECONDS = 5
+GCP_PROJECT_ID = os.getenv("GCP_PROJECT")
+TRADING_MODE = os.getenv("TRADING_MODE", "ANALYTICAL").upper()
+USE_TESTNET = os.getenv("USE_TESTNET", "true").lower() == "true"
 
 def register_endpoints(app: Flask):
     @app.before_request
@@ -47,71 +52,89 @@ def register_endpoints(app: Flask):
     @app.route('/run-bot-cycle', methods=['POST'])
     def run_bot_cycle_endpoint():
         cycle_id = str(uuid.uuid4())
-        logger.info(f"--- [DEBUG] KROK 1: Wejście do endpointu /run-bot-cycle. ID cyklu: {cycle_id} ---")
+        logger.info(f"--- Rozpoczynam cykl bota [ID: {cycle_id}, Tryb: {TRADING_MODE}] ---")
 
         if not app.config.get('INITIALIZATION_SUCCESS', False):
              reason = app.config.get('INITIALIZATION_FAILURE_REASON', 'Aplikacja niezainicjalizowana.')
-             logger.error(f"[DEBUG] Zatrzymano cykl, ponieważ aplikacja nie jest 'healthy'. Powód: {reason}", extra={"json_fields": {"cycle_id": cycle_id}})
+             logger.error(f"Zatrzymano cykl, ponieważ aplikacja nie jest 'healthy'. Powód: {reason}", extra={"json_fields": {"cycle_id": cycle_id}})
              return jsonify({"status": "error", "message": f"Service is unhealthy: {reason}"}), 503
         
-        logger.info(f"[DEBUG] KROK 2: Aplikacja jest 'healthy'. Rozpoczynam blok try...except.")
         try:
-            logger.info(f"[DEBUG] KROK 3: Wywołuję load_last_processed_timestamp().")
-            last_ts = load_last_processed_timestamp()
-            
-            logger.info(f"[DEBUG] KROK 4: Wywołuję fetch_new_alerts_since() z timestampem: {last_ts.isoformat() if last_ts else 'None'}.")
-            new_alerts, new_ts = fetch_new_alerts_since(last_ts)
-            
-            logger.info(f"[DEBUG] KROK 5: Otrzymano {len(new_alerts)} nowych alertów.")
-            if new_alerts:
-                logger.info(f"[DEBUG] KROK 6: Warunek 'if new_alerts' jest prawdziwy. Wywołuję process_new_alerts().")
-                process_new_alerts(new_alerts)
-                
-                if new_ts and (not last_ts or new_ts > last_ts):
-                    logger.info(f"[DEBUG] KROK 7: Zapisuję nowy timestamp: {new_ts.isoformat()}.")
-                    save_last_processed_timestamp(new_ts)
-                else:
-                    logger.warning(f"[DEBUG] KROK 7: Pomijam zapis timestampa (new_ts: {new_ts}, last_ts: {last_ts}).")
+            if TRADING_MODE == "TRANSACTIONAL":
+                bybit_executor = app.config.get('BYBIT_EXECUTOR')
+                if not bybit_executor:
+                    raise RuntimeError("BybitExecutor nie został poprawnie zainicjalizowany.")
+                run_transactional_cycle(bybit_executor)
             else:
-                logger.info(f"[DEBUG] KROK 6: Warunek 'if new_alerts' jest fałszywy. Pomijam przetwarzanie.")
+                run_analytical_cycle()
 
-            logger.info(f"[DEBUG] KROK 8: Wywołuję run_analysis_cycle().")
-            run_analysis_cycle()
-
-            logger.info(f"--- [DEBUG] KROK 9: Cykl zakończony pomyślnie. Zwracam HTTP 200. ID cyklu: {cycle_id} ---")
-            return jsonify({"status": "success", "cycle_id": cycle_id}), 200
+            logger.info(f"--- Cykl zakończony pomyślnie [ID: {cycle_id}, Tryb: {TRADING_MODE}] ---")
+            return jsonify({"status": "success", "cycle_id": cycle_id, "mode": TRADING_MODE}), 200
         except Exception as e:
-            logger.error(f"[DEBUG] KRYTYCZNY BŁĄD w głównym cyklu bota: {e}", exc_info=True, extra={"json_fields": {"cycle_id": cycle_id}})
+            logger.error(f"KRYTYCZNY BŁĄD w głównym cyklu bota: {e}", exc_info=True, extra={"json_fields": {"cycle_id": cycle_id}})
+            return jsonify({"status": "error", "message": str(e), "cycle_id": cycle_id}), 500
+
+    # --- NOWY ENDPOINT DO LOGOWANIA WYNIKÓW ---
+    @app.route('/log-pnl', methods=['POST'])
+    def log_pnl_endpoint():
+        cycle_id = str(uuid.uuid4())
+        logger.info(f"--- Rozpoczynam cykl logowania PnL [ID: {cycle_id}] ---")
+
+        if TRADING_MODE != "TRANSACTIONAL":
+            msg = "Endpoint /log-pnl jest dostępny tylko w trybie TRANSACTIONAL."
+            logger.warning(msg)
+            return jsonify({"status": "skipped", "message": msg}), 200
+
+        if not app.config.get('INITIALIZATION_SUCCESS', False):
+             reason = app.config.get('INITIALIZATION_FAILURE_REASON', 'Aplikacja niezainicjalizowana.')
+             logger.error(f"Zatrzymano cykl PnL, ponieważ aplikacja nie jest 'healthy'. Powód: {reason}", extra={"json_fields": {"cycle_id": cycle_id}})
+             return jsonify({"status": "error", "message": f"Service is unhealthy: {reason}"}), 503
+
+        try:
+            bybit_executor = app.config.get('BYBIT_EXECUTOR')
+            if not bybit_executor:
+                raise RuntimeError("BybitExecutor nie został poprawnie zainicjalizowany.")
+            
+            processed_count = log_closed_positions_pnl(bybit_executor)
+            
+            logger.info(f"--- Cykl logowania PnL zakończony. Przetworzono {processed_count} rekordów. [ID: {cycle_id}] ---")
+            return jsonify({"status": "success", "processed_records": processed_count, "cycle_id": cycle_id}), 200
+        except Exception as e:
+            logger.error(f"KRYTYCZNY BŁĄD w cyklu logowania PnL: {e}", exc_info=True, extra={"json_fields": {"cycle_id": cycle_id}})
             return jsonify({"status": "error", "message": str(e), "cycle_id": cycle_id}), 500
 
 def initialize_app_services(app: Flask):
     with app.app_context():
-        logger.info("Rozpoczynam konfigurację aplikacji bot_service wewnątrz kontekstu.")
+        logger.info(f"Rozpoczynam konfigurację aplikacji bot_service. Tryb: {TRADING_MODE}")
         
         failure_reasons = []
         
-        firebase_ok = False
-        for attempt in range(1, MAX_INIT_RETRIES + 1):
-            if initialize_firebase():
-                firebase_ok = True
-                break
-            logger.warning(f"Inicjalizacja Firebase nie powiodła się (próba {attempt}/{MAX_INIT_RETRIES}).")
-            if attempt < MAX_INIT_RETRIES:
-                time.sleep(INIT_RETRY_DELAY_SECONDS)
-        if not firebase_ok:
+        # Inicjalizacja Firebase
+        if not initialize_firebase():
             failure_reasons.append("Failed to initialize Firebase/Firestore")
         
-        bigquery_ok = False
-        for attempt in range(1, MAX_INIT_RETRIES + 1):
-            if initialize_bigquery():
-                bigquery_ok = True
-                break
-            logger.warning(f"Inicjalizacja BigQuery nie powiodła się (próba {attempt}/{MAX_INIT_RETRIES}).")
-            if attempt < MAX_INIT_RETRIES:
-                time.sleep(INIT_RETRY_DELAY_SECONDS)
-        if not bigquery_ok:
+        # Inicjalizacja BigQuery
+        if not initialize_bigquery():
             failure_reasons.append("Failed to initialize BigQuery")
         
+        # Inicjalizacja BybitExecutor w trybie transakcyjnym
+        if TRADING_MODE == "TRANSACTIONAL":
+            if not GCP_PROJECT_ID:
+                failure_reasons.append("Zmienna środowiskowa GCP_PROJECT nie jest ustawiona.")
+            else:
+                api_key = get_secret("bybit-api-key", GCP_PROJECT_ID)
+                api_secret = get_secret("bybit-api-secret", GCP_PROJECT_ID)
+
+                if api_key and api_secret:
+                    try:
+                        executor = BybitExecutor(api_key=api_key, api_secret=api_secret, testnet=USE_TESTNET)
+                        app.config['BYBIT_EXECUTOR'] = executor
+                        logger.info("BybitExecutor pomyślnie zainicjalizowany.")
+                    except Exception as e:
+                        failure_reasons.append(f"Błąd inicjalizacji BybitExecutor: {e}")
+                else:
+                    failure_reasons.append("Nie udało się pobrać kluczy API z Secret Manager.")
+
         if not failure_reasons:
             app.config['INITIALIZATION_SUCCESS'] = True
             logger.info("Aplikacja Flask [bot_service] została pomyślnie utworzona i skonfigurowana.")

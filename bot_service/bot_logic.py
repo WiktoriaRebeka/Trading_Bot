@@ -1,27 +1,24 @@
+# Lokalizacja: bot_service/bot_logic.py
+
 import logging
-import json
-from typing import Dict, Any, List, Optional
-from datetime import datetime, timezone
-from pydantic import ValidationError
-from shared_lib.models import AlertData, Kline, AnalyticalCase
-from bot_service import state_manager
-from bot_service.bigquery_logger import log_analysis_result
+import os
 import math
 from decimal import Decimal, ROUND_DOWN, ROUND_UP
+from typing import Dict, Any, List, Optional
+from datetime import datetime, timezone, timedelta
+from pydantic import ValidationError
+
+from shared_lib.models import AlertData, Kline, AnalyticalCase
 from shared_lib.firebase_client import get_instrument_rules
+from shared_lib.risk_manager import calculate_position_size
+from bot_service import state_manager
+from bot_service.bigquery_logger import log_analysis_result
+from bot_service.pnl_logger_real import log_real_trade_result
+from bot_service.bybit_executor import BybitExecutor
+from bot_service.fetch_from_firestore import fetch_new_alerts_since, save_last_processed_timestamp, load_last_processed_timestamp
 
 logger = logging.getLogger(__name__)
 
-# --- Faza 1: Przetwarzanie Nowych Alertów i Tworzenie Teczek PENDING ---
-
-def _calculate_risk_percentage(entry_price: float, sl_price: float) -> Optional[float]:
-    """Oblicza procentową odległość SL od ceny wejścia."""
-    if entry_price == 0:
-        return None
-    risk_distance = abs(entry_price - sl_price)
-    return round((risk_distance / entry_price) * 100, 4)
-
-# --- NOWA FUNKCJA POMOCNICZA DO PRECYZYJNEGO ZAOKRĄGLANIA ---
 def round_price_by_tick(price: float, tick_size: str, direction: str) -> float:
     """
     Zaokrągla cenę do najbliższego kroku (ticka) w dół ('down') lub w górę ('up').
@@ -31,14 +28,22 @@ def round_price_by_tick(price: float, tick_size: str, direction: str) -> float:
     tick_decimal = Decimal(tick_size)
     
     if direction == 'down':
-        # Dzieli cenę przez krok, zaokrągla w dół do liczby całkowitej, a następnie mnoży z powrotem.
         quantized = (price_decimal / tick_decimal).to_integral_value(rounding=ROUND_DOWN) * tick_decimal
     elif direction == 'up':
         quantized = (price_decimal / tick_decimal).to_integral_value(rounding=ROUND_UP) * tick_decimal
-    else: # Domyślne, standardowe zaokrąglenie
+    else: 
         quantized = round(price_decimal / tick_decimal) * tick_decimal
         
     return float(quantized)
+
+def _calculate_risk_percentage(entry_price: float, sl_price: float) -> Optional[float]:
+    """Oblicza procentową odległość SL od ceny wejścia."""
+    if entry_price == 0:
+        return None
+    risk_distance = abs(entry_price - sl_price)
+    return round((risk_distance / entry_price) * 100, 4)
+
+
 
 def _correct_and_validate_alert(alert: AlertData) -> bool:
     """
@@ -73,6 +78,137 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
         f"Kierunek: {alert.direction}, Ryzyko: {risk_perc}%."
     )
     return True
+
+def run_analytical_cycle():
+    """Główna pętla logiki dla trybu analitycznego."""
+    logger.info("Uruchamiam cykl w trybie ANALYTICAL.")
+    last_ts = load_last_processed_timestamp("analytical_last_fetch_state")
+    new_alerts, new_ts = fetch_new_alerts_since(last_ts)
+    
+    if new_alerts:
+        process_new_alerts_analytical(new_alerts)
+        if new_ts and (not last_ts or new_ts > last_ts):
+            save_last_processed_timestamp(new_ts, "analytical_last_fetch_state")
+    
+    _run_analysis_of_existing_cases()
+
+
+def process_new_alerts_analytical(newly_fetched_alerts: List[Dict[str, Any]]):
+    """Przetwarza nowe alerty, tworząc teczki analityczne (tryb analityczny)."""
+    if not newly_fetched_alerts:
+        return
+    logger.info(f"Przetwarzam {len(newly_fetched_alerts)} nowych alertów (tryb analityczny).")
+
+    instrument_rules = get_instrument_rules()
+    if not instrument_rules:
+        logger.error("Nie udało się wczytać zasad instrumentów z Firestore. Przerywam przetwarzanie alertów.")
+        return
+    for alert_dict in newly_fetched_alerts:
+        alert_id = alert_dict.get('id', 'unknown')
+        if alert_id == 'unknown':
+            logger.error("Otrzymano alert bez ID. Pomijam.", extra={"json_fields": {"alert_data": alert_dict}})
+            continue
+
+        try:
+            alert_data_model = AlertData.model_validate(alert_dict)
+            
+            symbol = alert_data_model.symbol
+            rule = instrument_rules.get(symbol)
+
+            if not rule or "tickSize" not in rule:
+                logger.warning(f"Brak reguły 'tickSize' dla symbolu {symbol}. Pomijam zaokrąglanie.")
+            else:
+                tick_size = rule["tickSize"]
+                
+                # Zastosowanie zasad zaokrąglania
+                if alert_data_model.direction == 'LONG':
+                    alert_data_model.entry = round_price_by_tick(alert_data_model.entry, tick_size, 'down')
+                    alert_data_model.sl = round_price_by_tick(alert_data_model.sl, tick_size, 'up')
+                    alert_data_model.tp_1_0 = round_price_by_tick(alert_data_model.tp_1_0, tick_size, 'down')
+                    alert_data_model.tp_1_5 = round_price_by_tick(alert_data_model.tp_1_5, tick_size, 'down')
+                    alert_data_model.tp_2_0 = round_price_by_tick(alert_data_model.tp_2_0, tick_size, 'down')
+                    alert_data_model.tp_3_0 = round_price_by_tick(alert_data_model.tp_3_0, tick_size, 'down')
+                    alert_data_model.tp_4_0 = round_price_by_tick(alert_data_model.tp_4_0, tick_size, 'down')
+                    alert_data_model.tp_5_0 = round_price_by_tick(alert_data_model.tp_5_0, tick_size, 'down')
+                elif alert_data_model.direction == 'SHORT':
+                    alert_data_model.entry = round_price_by_tick(alert_data_model.entry, tick_size, 'up')
+                    alert_data_model.sl = round_price_by_tick(alert_data_model.sl, tick_size, 'down')
+                    alert_data_model.tp_1_0 = round_price_by_tick(alert_data_model.tp_1_0, tick_size, 'up')
+                    alert_data_model.tp_1_5 = round_price_by_tick(alert_data_model.tp_1_5, tick_size, 'up')
+                    alert_data_model.tp_2_0 = round_price_by_tick(alert_data_model.tp_2_0, tick_size, 'up')
+                    alert_data_model.tp_3_0 = round_price_by_tick(alert_data_model.tp_3_0, tick_size, 'up')
+                    alert_data_model.tp_4_0 = round_price_by_tick(alert_data_model.tp_4_0, tick_size, 'up')
+                    alert_data_model.tp_5_0 = round_price_by_tick(alert_data_model.tp_5_0, tick_size, 'up')
+
+            existing_pending_case = state_manager.get_pending_case_for_symbol(alert_data_model.symbol)
+            if existing_pending_case:
+                logger.info(f"[{alert_data_model.symbol}] Nowy alert ({alert_id}) unieważnia istniejącą teczkę PENDING ({existing_pending_case.id}). Usuwam.")
+                state_manager.delete_case_by_id(existing_pending_case.id)
+
+            is_valid = _correct_and_validate_alert(alert_data_model)
+            
+            if is_valid:
+                logger.info(f"[{alert_data_model.symbol}] Alert ({alert_id}) przeszedł walidację. Tworzę teczkę PENDING.")
+                new_case = AnalyticalCase(
+                    alert_id=alert_data_model.id,
+                    symbol=alert_data_model.symbol,
+                    alert_data=alert_data_model.model_dump(by_alias=True)
+                )
+                state_manager.create_analytical_case(new_case)
+            else:
+                logger.warning(f"[{alert_data_model.symbol}] Nowy alert ({alert_id}) został odrzucony po walidacji. Nie tworzę nowej teczki PENDING.")
+
+        except ValidationError as e:
+            logger.error(f"Błąd walidacji Pydantic dla alertu ({alert_id}): {e}", extra={"json_fields": {"alert_id": alert_id, "alert_data": alert_dict}})
+        except Exception as e:
+            logger.error(f"Nieoczekiwany błąd podczas przetwarzania alertu ({alert_id}): {e}", exc_info=True, extra={"json_fields": {"alert_id": alert_id}})
+
+def _run_analysis_of_existing_cases():
+    logger.info("Rozpoczynam główną pętlę cyklu analitycznego.")
+    
+    all_cases_docs = list(state_manager.get_all_analytical_cases())
+    if not all_cases_docs:
+        logger.info("Brak aktywnych teczek analitycznych. Kończę cykl.")
+        return
+
+    logger.info(f"[DIAGNOSTYKA] Znaleziono {len(all_cases_docs)} teczek analitycznych do przetworzenia.")
+    symbols_to_watch = {doc.to_dict().get('symbol') for doc in all_cases_docs if doc.to_dict()}
+    valid_symbols = {s for s in symbols_to_watch if s}
+    
+    if not valid_symbols:
+        logger.info("Brak symboli do monitorowania w aktywnych teczkach.")
+        return
+
+    klines_data_from_cache = state_manager.get_latest_klines_from_cache(list(valid_symbols))
+    if not klines_data_from_cache:
+        logger.warning("Nie udało się pobrać danych kline z cache'u. Pomijam cykl.")
+        return
+
+    klines_models = {
+        symbol: Kline.model_validate(data) for symbol, data in klines_data_from_cache.items()
+    }
+    logger.info(f"[DIAGNOSTYKA] Pomyślnie pobrano {len(klines_models)} świec z cache'u.")
+
+    for case_doc_snapshot in all_cases_docs:
+        case_id = case_doc_snapshot.id
+        try:
+            case_doc = case_doc_snapshot.to_dict()
+            symbol = case_doc.get('symbol')
+            status = case_doc.get('status')
+            
+            latest_kline = klines_models.get(symbol)
+            if not latest_kline:
+                logger.warning(f"Brak danych kline dla symbolu {symbol} (teczka {case_id}). Pomijam tę teczkę w cyklu.")
+                continue
+            
+            if status == 'PENDING':
+                _handle_pending_case(case_doc_snapshot, latest_kline)
+            elif status == 'TRIGGERED':
+                _handle_triggered_case(case_doc_snapshot, latest_kline)
+        except Exception as e:
+            logger.error(f"Błąd podczas przetwarzania teczki {case_id}: {e}", exc_info=True)
+
+    logger.info("Zakończono główną pętlę cyklu analitycznego.")
 
 def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]]):
     """Przetwarza nowe alerty, zaokrągla ceny, waliduje i tworzy teczki."""
@@ -190,11 +326,7 @@ def _handle_triggered_case(case_doc_snapshot: Any, kline: Kline):
     
     resolved_scenarios = {}
     close_timestamp = datetime.fromtimestamp(kline.timestamp / 1000, tz=timezone.utc)
-  
-    # --- POPRAWKA: Obliczamy risk_percentage tutaj, aby było dostępne do zapisu ---
     risk_perc = _calculate_risk_percentage(alert.entry, alert.sl)
-
-    # Przygotowanie danych do zapisu w BigQuery z jawną konwersją datetime na string
     triggered_at_dt = case_doc.get('triggered_at')
     received_at_dt = alert.received_at
 
@@ -233,6 +365,8 @@ def _handle_triggered_case(case_doc_snapshot: Any, kline: Kline):
         if len(results) - len(unresolved_targets) + len(resolved_scenarios) >= 6:
             logger.info(f"[{case_id}] Wszystkie 6 scenariuszy rozstrzygnięte. Finalne usunięcie teczki.")
             state_manager.delete_case_by_id(case_id)
+
+
 def run_analysis_cycle():
     logger.info("Rozpoczynam główną pętlę cyklu analitycznego.")
     
@@ -271,7 +405,6 @@ def run_analysis_cycle():
                 logger.warning(f"Brak danych kline dla symbolu {symbol} (teczka {case_id}). Pomijam tę teczkę w cyklu.")
                 continue
             
-            # --- KLUCZOWA POPRAWKA: Użycie poprawnej nazwy zmiennej ---
             if status == 'PENDING':
                 _handle_pending_case(case_doc_snapshot, latest_kline)
             elif status == 'TRIGGERED':
@@ -280,3 +413,103 @@ def run_analysis_cycle():
             logger.error(f"Błąd podczas przetwarzania teczki {case_id}: {e}", exc_info=True)
 
     logger.info("Zakończono główną pętlę cyklu analitycznego.")
+
+
+# Lokalizacja: bot_service/bot_logic.py
+
+def run_transactional_cycle(executor: BybitExecutor):
+    """Główna pętla logiki dla trybu transakcyjnego."""
+    logger.info("Uruchamiam cykl w trybie TRANSACTIONAL.")
+    last_ts = load_last_processed_timestamp("transactional_last_fetch_state")
+    new_alerts, new_ts = fetch_new_alerts_since(last_ts)
+
+    if new_alerts:
+        process_alerts_transactional(new_alerts, executor)
+        if new_ts and (not last_ts or new_ts > last_ts):
+            save_last_processed_timestamp(new_ts, "transactional_last_fetch_state")
+    
+    logger.info("Cykl transakcyjny zakończony. Monitorowanie pozycji odbywa się w osobnym procesie (log-pnl).")
+
+def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitExecutor):
+    """Przetwarza alerty, składając realne zlecenia na giełdzie."""
+    # Używamy pętli zamiast nieistniejącej jeszcze funkcji batch
+    for alert_dict in alerts:
+        alert_id = alert_dict.get('id', 'unknown')
+        try:
+            alert = AlertData.model_validate(alert_dict)
+            symbol = alert.symbol
+            
+            if not _correct_and_validate_alert(alert): continue
+            if executor.has_open_position(symbol): continue
+            
+            executor.cancel_all_open_orders_for_symbol(symbol)
+            
+            rule = executor.get_instrument_info(symbol) # Pobieramy zasady dla jednego symbolu
+            if not rule or "tickSize" not in rule or "qtyStep" not in rule:
+                logger.warning(f"[{symbol}] Brak pełnych zasad handlu. Pomijam alert.")
+                continue
+            
+            tick_size, qty_step = rule["tickSize"], rule["qtyStep"]
+
+            # e. Zaokrąglenie cen
+            if alert.direction == 'LONG':
+                alert.entry = round_price_by_tick(alert.entry, tick_size, 'down')
+                alert.sl = round_price_by_tick(alert.sl, tick_size, 'up')
+                alert.tp_2_0 = round_price_by_tick(alert.tp_2_0, tick_size, 'down')
+            elif alert.direction == 'SHORT':
+                alert.entry = round_price_by_tick(alert.entry, tick_size, 'up')
+                alert.sl = round_price_by_tick(alert.sl, tick_size, 'down')
+                alert.tp_2_0 = round_price_by_tick(alert.tp_2_0, tick_size, 'up')
+
+            # f. Obliczenie wielkości pozycji
+            risk_usdt = float(os.getenv("RISK_PER_TRADE_USDT", "2.5"))
+            final_qty = calculate_position_size(
+                risk_per_trade_usdt=risk_usdt, entry_price=alert.entry,
+                sl_price=alert.sl, qty_step=qty_step
+            )
+
+            if not final_qty or final_qty <= 0:
+                logger.warning(f"[{symbol}] Obliczona ilość Qty ({final_qty}) jest nieprawidłowa. Pomijam alert.")
+                continue
+
+            # g. Złożenie zlecenia
+            order_params = {
+                "symbol": symbol, "side": alert.direction, "qty": final_qty,
+                "price": alert.entry, "stopLoss": alert.sl, "takeProfit": alert.tp_2_0
+            }
+            order_id = executor.place_limit_order(order_params)
+
+            # h. Zapis stanu
+            if order_id:
+                state_manager.save_active_order({"symbol": symbol, "orderId": order_id, "status": "NEW", "alert_id": alert_id})
+
+        except Exception as e:
+            logger.error(f"Nieoczekiwany błąd podczas transakcyjnego przetwarzania alertu {alert_id}: {e}", exc_info=True)
+
+def log_closed_positions_pnl(executor: BybitExecutor) -> int:
+    """Pobiera i loguje wyniki ostatnio zamkniętych pozycji."""
+    last_check_ts_dt = load_last_processed_timestamp("pnl_logger_last_fetch_state")
+    if not last_check_ts_dt:
+        last_check_ts_dt = datetime.now(timezone.utc) - timedelta(hours=1)
+    
+    start_time_ms = int(last_check_ts_dt.timestamp() * 1000)
+    pnl_records = executor.get_closed_pnl_history(start_time_ms=start_time_ms)
+    
+    if not pnl_records:
+        logger.info("Brak nowych zamkniętych pozycji do zalogowania.")
+        return 0
+
+    new_max_ts = last_check_ts_dt
+    processed_count = 0
+    for record in pnl_records:
+        # Tutaj można dodać logikę, aby nie logować już przetworzonych transakcji
+        log_real_trade_result(record)
+        processed_count += 1
+        updated_time_ms = int(record.get("updatedTime", 0))
+        if updated_time_ms > 0:
+            record_ts = datetime.fromtimestamp(updated_time_ms / 1000, tz=timezone.utc)
+            if record_ts > new_max_ts:
+                new_max_ts = record_ts
+    
+    save_last_processed_timestamp(new_max_ts + timedelta(seconds=1), "pnl_logger_last_fetch_state")
+    return processed_count
