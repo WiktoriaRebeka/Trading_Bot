@@ -4,10 +4,10 @@ from datetime import datetime, timezone, timedelta
 import logging
 
 from shared_lib.firebase_client import get_db 
+# Zaktualizowane importy - usuwamy LAST_FETCH_STATE_DOC_ID
 from shared_lib.constants import (
     FIRESTORE_COLLECTION_ALERTS,
     BOT_CONFIG_COLLECTION,
-    LAST_FETCH_STATE_DOC_ID,
     LAST_PROCESSED_TS_FIELD
 )
 
@@ -29,7 +29,6 @@ def load_last_processed_timestamp(doc_id: str) -> datetime:
     except Exception as e:
         logger.error(f"[FETCHER_ERROR] Nie udało się odczytać timestampa z '{doc_id}': {e}", exc_info=True)
     
-    # Zwraca datę sprzed godziny jako bezpieczny fallback
     fallback_ts = datetime.now(timezone.utc) - timedelta(hours=1)
     logger.warning(f"[FETCHER] Nie znaleziono timestampa w '{doc_id}', używam wartości domyślnej: {fallback_ts.isoformat()}")
     return fallback_ts
@@ -47,6 +46,7 @@ def save_last_processed_timestamp(timestamp_dt: datetime, doc_id: str):
         logger.error(f"[FETCHER_ERROR] Nie udało się zapisać timestampu do '{doc_id}': {e}", exc_info=True)
 
 def fetch_new_alerts_since(last_ts_dt: datetime):
+    """Pobiera wszystkie nowe alerty od podanego timestampu."""
     db = get_db()
     new_alerts_list = []
     new_max_ts = last_ts_dt
