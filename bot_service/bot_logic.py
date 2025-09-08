@@ -19,6 +19,27 @@ from bot_service.fetch_from_firestore import fetch_new_alerts_since, save_last_p
 
 logger = logging.getLogger(__name__)
 
+
+def run_combined_cycle(executor: BybitExecutor):
+    """
+    Główna, połączona pętla logiki. Wykonuje zarówno analizę, jak i logikę transakcyjną.
+    """
+    logger.info("Uruchamiam połączony cykl analityczno-transakcyjny.")
+    last_ts = load_last_processed_timestamp("main_cycle_last_fetch_state")
+    new_alerts, new_ts = fetch_new_alerts_since(last_ts)
+
+    if new_alerts:
+        logger.info("Rozpoczynam przetwarzanie transakcyjne nowych alertów.")
+        process_alerts_transactional(new_alerts, executor)
+        logger.info("Rozpoczynam przetwarzanie analityczne nowych alertów.")
+        process_new_alerts_analytical(new_alerts)
+        
+        if new_ts and (not last_ts or new_ts > last_ts):
+            save_last_processed_timestamp(new_ts, "main_cycle_last_fetch_state")
+    _run_analysis_of_existing_cases()
+
+    logger.info("Zakończono połączony cykl analityczno-transakcyjny.")
+
 def round_price_by_tick(price: float, tick_size: str, direction: str) -> float:
     """
     Zaokrągla cenę do najbliższego kroku (ticka) w dół ('down') lub w górę ('up').
@@ -42,7 +63,6 @@ def _calculate_risk_percentage(entry_price: float, sl_price: float) -> Optional[
         return None
     risk_distance = abs(entry_price - sl_price)
     return round((risk_distance / entry_price) * 100, 4)
-
 
 
 def _correct_and_validate_alert(alert: AlertData) -> bool:
@@ -79,19 +99,65 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
     )
     return True
 
-def run_analytical_cycle():
-    """Główna pętla logiki dla trybu analitycznego."""
-    logger.info("Uruchamiam cykl w trybie ANALYTICAL.")
-    last_ts = load_last_processed_timestamp("analytical_last_fetch_state")
-    new_alerts, new_ts = fetch_new_alerts_since(last_ts)
-    
-    if new_alerts:
-        process_new_alerts_analytical(new_alerts)
-        if new_ts and (not last_ts or new_ts > last_ts):
-            save_last_processed_timestamp(new_ts, "analytical_last_fetch_state")
-    
-    _run_analysis_of_existing_cases()
+def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitExecutor):
+    """Przetwarza alerty, składając realne zlecenia na giełdzie."""
+    if not alerts:
+        return
 
+    for alert_dict in alerts:
+        alert_id = alert_dict.get('id', 'unknown')
+        try:
+            alert = AlertData.model_validate(alert_dict)
+            symbol = alert.symbol
+            
+            if not _correct_and_validate_alert(alert):
+                logger.info(f"[{symbol}] Alert ({alert_id}) odrzucony w walidacji, pomijam w cyklu transakcyjnym.")
+                continue
+            
+            if executor.has_open_position(symbol):
+                logger.info(f"[{symbol}] Wykryto otwartą pozycję, pomijam nowy alert ({alert_id}).")
+                continue
+            
+            logger.info(f"[{symbol}] Anulowanie istniejących zleceń przed złożeniem nowego dla alertu ({alert_id}).")
+            executor.cancel_all_open_orders_for_symbol(symbol)
+            
+            rule = executor.get_instrument_info(symbol)
+            if not rule or "tickSize" not in rule or "qtyStep" not in rule:
+                logger.warning(f"[{symbol}] Brak pełnych zasad handlu. Pomijam alert ({alert_id}).")
+                continue
+            
+            tick_size, qty_step = rule["tickSize"], rule["qtyStep"]
+
+            if alert.direction == 'LONG':
+                alert.entry = round_price_by_tick(alert.entry, tick_size, 'down')
+                alert.sl = round_price_by_tick(alert.sl, tick_size, 'up')
+                alert.tp_2_0 = round_price_by_tick(alert.tp_2_0, tick_size, 'down')
+            elif alert.direction == 'SHORT':
+                alert.entry = round_price_by_tick(alert.entry, tick_size, 'up')
+                alert.sl = round_price_by_tick(alert.sl, tick_size, 'down')
+                alert.tp_2_0 = round_price_by_tick(alert.tp_2_0, tick_size, 'up')
+
+            risk_usdt = float(os.getenv("RISK_PER_TRADE_USDT", "2.5"))
+            final_qty = calculate_position_size(
+                risk_per_trade_usdt=risk_usdt, entry_price=alert.entry,
+                sl_price=alert.sl, qty_step=qty_step
+            )
+
+            if not final_qty or final_qty <= 0:
+                logger.warning(f"[{symbol}] Obliczona ilość Qty ({final_qty}) jest nieprawidłowa. Pomijam alert ({alert_id}).")
+                continue
+
+            order_params = {
+                "symbol": symbol, "side": alert.direction, "qty": final_qty,
+                "price": alert.entry, "stopLoss": alert.sl, "takeProfit": alert.tp_2_0
+            }
+            order_id = executor.place_limit_order(order_params)
+
+            if order_id:
+                state_manager.save_active_order({"symbol": symbol, "orderId": order_id, "status": "NEW", "alert_id": alert_id})
+
+        except Exception as e:
+            logger.error(f"Nieoczekiwany błąd podczas transakcyjnego przetwarzania alertu {alert_id}: {e}", exc_info=True)
 
 def process_new_alerts_analytical(newly_fetched_alerts: List[Dict[str, Any]]):
     """Przetwarza nowe alerty, tworząc teczki analityczne (tryb analityczny)."""
@@ -163,6 +229,7 @@ def process_new_alerts_analytical(newly_fetched_alerts: List[Dict[str, Any]]):
         except Exception as e:
             logger.error(f"Nieoczekiwany błąd podczas przetwarzania alertu ({alert_id}): {e}", exc_info=True, extra={"json_fields": {"alert_id": alert_id}})
 
+
 def _run_analysis_of_existing_cases():
     logger.info("Rozpoczynam główną pętlę cyklu analitycznego.")
     
@@ -210,77 +277,6 @@ def _run_analysis_of_existing_cases():
 
     logger.info("Zakończono główną pętlę cyklu analitycznego.")
 
-def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]]):
-    """Przetwarza nowe alerty, zaokrągla ceny, waliduje i tworzy teczki."""
-    if not newly_fetched_alerts:
-        return
-    logger.info(f"Przetwarzam {len(newly_fetched_alerts)} nowych alertów.")
-
-    instrument_rules = get_instrument_rules()
-    if not instrument_rules:
-        logger.error("Nie udało się wczytać zasad instrumentów z Firestore. Przerywam przetwarzanie alertów.")
-        return
-
-    for alert_dict in newly_fetched_alerts:
-        alert_id = alert_dict.get('id', 'unknown')
-        if alert_id == 'unknown':
-            logger.error("Otrzymano alert bez ID. Pomijam.", extra={"json_fields": {"alert_data": alert_dict}})
-            continue
-
-        try:
-            alert_data_model = AlertData.model_validate(alert_dict)
-            
-            symbol = alert_data_model.symbol
-            rule = instrument_rules.get(symbol)
-
-            if not rule or "tickSize" not in rule:
-                logger.warning(f"Brak reguły 'tickSize' dla symbolu {symbol}. Pomijam zaokrąglanie.")
-            else:
-                tick_size = rule["tickSize"]
-                
-                # Zastosowanie zasad zaokrąglania
-                if alert_data_model.direction == 'LONG':
-                    alert_data_model.entry = round_price_by_tick(alert_data_model.entry, tick_size, 'down')
-                    alert_data_model.sl = round_price_by_tick(alert_data_model.sl, tick_size, 'up')
-                    alert_data_model.tp_1_0 = round_price_by_tick(alert_data_model.tp_1_0, tick_size, 'down')
-                    alert_data_model.tp_1_5 = round_price_by_tick(alert_data_model.tp_1_5, tick_size, 'down')
-                    alert_data_model.tp_2_0 = round_price_by_tick(alert_data_model.tp_2_0, tick_size, 'down')
-                    alert_data_model.tp_3_0 = round_price_by_tick(alert_data_model.tp_3_0, tick_size, 'down')
-                    alert_data_model.tp_4_0 = round_price_by_tick(alert_data_model.tp_4_0, tick_size, 'down')
-                    alert_data_model.tp_5_0 = round_price_by_tick(alert_data_model.tp_5_0, tick_size, 'down')
-                elif alert_data_model.direction == 'SHORT':
-                    alert_data_model.entry = round_price_by_tick(alert_data_model.entry, tick_size, 'up')
-                    alert_data_model.sl = round_price_by_tick(alert_data_model.sl, tick_size, 'down')
-                    alert_data_model.tp_1_0 = round_price_by_tick(alert_data_model.tp_1_0, tick_size, 'up')
-                    alert_data_model.tp_1_5 = round_price_by_tick(alert_data_model.tp_1_5, tick_size, 'up')
-                    alert_data_model.tp_2_0 = round_price_by_tick(alert_data_model.tp_2_0, tick_size, 'up')
-                    alert_data_model.tp_3_0 = round_price_by_tick(alert_data_model.tp_3_0, tick_size, 'up')
-                    alert_data_model.tp_4_0 = round_price_by_tick(alert_data_model.tp_4_0, tick_size, 'up')
-                    alert_data_model.tp_5_0 = round_price_by_tick(alert_data_model.tp_5_0, tick_size, 'up')
-
-            existing_pending_case = state_manager.get_pending_case_for_symbol(alert_data_model.symbol)
-            if existing_pending_case:
-                logger.info(f"[{alert_data_model.symbol}] Nowy alert ({alert_id}) unieważnia istniejącą teczkę PENDING ({existing_pending_case.id}). Usuwam.")
-                state_manager.delete_case_by_id(existing_pending_case.id)
-
-            is_valid = _correct_and_validate_alert(alert_data_model)
-            
-            if is_valid:
-                logger.info(f"[{alert_data_model.symbol}] Alert ({alert_id}) przeszedł walidację. Tworzę teczkę PENDING.")
-                new_case = AnalyticalCase(
-                    alert_id=alert_data_model.id,
-                    symbol=alert_data_model.symbol,
-                    alert_data=alert_data_model.model_dump(by_alias=True)
-                )
-                state_manager.create_analytical_case(new_case)
-            else:
-                logger.warning(f"[{alert_data_model.symbol}] Nowy alert ({alert_id}) został odrzucony po walidacji. Nie tworzę nowej teczki PENDING.")
-
-        except ValidationError as e:
-            logger.error(f"Błąd walidacji Pydantic dla alertu ({alert_id}): {e}", extra={"json_fields": {"alert_id": alert_id, "alert_data": alert_dict}})
-        except Exception as e:
-            logger.error(f"Nieoczekiwany błąd podczas przetwarzania alertu ({alert_id}): {e}", exc_info=True, extra={"json_fields": {"alert_id": alert_id}})
-
 def _handle_pending_case(case_doc_snapshot: Any, kline: Kline):
     case_doc = case_doc_snapshot.to_dict()
     case_id = case_doc_snapshot.id
@@ -305,6 +301,7 @@ def _handle_pending_case(case_doc_snapshot: Any, kline: Kline):
             "triggered_at": datetime.now(timezone.utc)
         }
         state_manager.update_case_status_and_results(case_id, updates)
+
 
 
 def _handle_triggered_case(case_doc_snapshot: Any, kline: Kline):
@@ -367,124 +364,6 @@ def _handle_triggered_case(case_doc_snapshot: Any, kline: Kline):
             state_manager.delete_case_by_id(case_id)
 
 
-def run_analysis_cycle():
-    logger.info("Rozpoczynam główną pętlę cyklu analitycznego.")
-    
-    all_cases_docs = list(state_manager.get_all_analytical_cases())
-    if not all_cases_docs:
-        logger.info("Brak aktywnych teczek analitycznych. Kończę cykl.")
-        return
-
-    logger.info(f"[DIAGNOSTYKA] Znaleziono {len(all_cases_docs)} teczek analitycznych do przetworzenia.")
-    symbols_to_watch = {doc.to_dict().get('symbol') for doc in all_cases_docs if doc.to_dict()}
-    valid_symbols = {s for s in symbols_to_watch if s}
-    
-    if not valid_symbols:
-        logger.info("Brak symboli do monitorowania w aktywnych teczkach.")
-        return
-
-    klines_data_from_cache = state_manager.get_latest_klines_from_cache(list(valid_symbols))
-    if not klines_data_from_cache:
-        logger.warning("Nie udało się pobrać danych kline z cache'u. Pomijam cykl.")
-        return
-
-    klines_models = {
-        symbol: Kline.model_validate(data) for symbol, data in klines_data_from_cache.items()
-    }
-    logger.info(f"[DIAGNOSTYKA] Pomyślnie pobrano {len(klines_models)} świec z cache'u.")
-
-    for case_doc_snapshot in all_cases_docs:
-        case_id = case_doc_snapshot.id
-        try:
-            case_doc = case_doc_snapshot.to_dict()
-            symbol = case_doc.get('symbol')
-            status = case_doc.get('status')
-            
-            latest_kline = klines_models.get(symbol)
-            if not latest_kline:
-                logger.warning(f"Brak danych kline dla symbolu {symbol} (teczka {case_id}). Pomijam tę teczkę w cyklu.")
-                continue
-            
-            if status == 'PENDING':
-                _handle_pending_case(case_doc_snapshot, latest_kline)
-            elif status == 'TRIGGERED':
-                _handle_triggered_case(case_doc_snapshot, latest_kline)
-        except Exception as e:
-            logger.error(f"Błąd podczas przetwarzania teczki {case_id}: {e}", exc_info=True)
-
-    logger.info("Zakończono główną pętlę cyklu analitycznego.")
-
-
-# Lokalizacja: bot_service/bot_logic.py
-
-def run_transactional_cycle(executor: BybitExecutor):
-    """Główna pętla logiki dla trybu transakcyjnego."""
-    logger.info("Uruchamiam cykl w trybie TRANSACTIONAL.")
-    last_ts = load_last_processed_timestamp("transactional_last_fetch_state")
-    new_alerts, new_ts = fetch_new_alerts_since(last_ts)
-
-    if new_alerts:
-        process_alerts_transactional(new_alerts, executor)
-        if new_ts and (not last_ts or new_ts > last_ts):
-            save_last_processed_timestamp(new_ts, "transactional_last_fetch_state")
-    
-    logger.info("Cykl transakcyjny zakończony. Monitorowanie pozycji odbywa się w osobnym procesie (log-pnl).")
-
-def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitExecutor):
-    """Przetwarza alerty, składając realne zlecenia na giełdzie."""
-    # Używamy pętli zamiast nieistniejącej jeszcze funkcji batch
-    for alert_dict in alerts:
-        alert_id = alert_dict.get('id', 'unknown')
-        try:
-            alert = AlertData.model_validate(alert_dict)
-            symbol = alert.symbol
-            
-            if not _correct_and_validate_alert(alert): continue
-            if executor.has_open_position(symbol): continue
-            
-            executor.cancel_all_open_orders_for_symbol(symbol)
-            
-            rule = executor.get_instrument_info(symbol) # Pobieramy zasady dla jednego symbolu
-            if not rule or "tickSize" not in rule or "qtyStep" not in rule:
-                logger.warning(f"[{symbol}] Brak pełnych zasad handlu. Pomijam alert.")
-                continue
-            
-            tick_size, qty_step = rule["tickSize"], rule["qtyStep"]
-
-            # e. Zaokrąglenie cen
-            if alert.direction == 'LONG':
-                alert.entry = round_price_by_tick(alert.entry, tick_size, 'down')
-                alert.sl = round_price_by_tick(alert.sl, tick_size, 'up')
-                alert.tp_2_0 = round_price_by_tick(alert.tp_2_0, tick_size, 'down')
-            elif alert.direction == 'SHORT':
-                alert.entry = round_price_by_tick(alert.entry, tick_size, 'up')
-                alert.sl = round_price_by_tick(alert.sl, tick_size, 'down')
-                alert.tp_2_0 = round_price_by_tick(alert.tp_2_0, tick_size, 'up')
-
-            # f. Obliczenie wielkości pozycji
-            risk_usdt = float(os.getenv("RISK_PER_TRADE_USDT", "2.5"))
-            final_qty = calculate_position_size(
-                risk_per_trade_usdt=risk_usdt, entry_price=alert.entry,
-                sl_price=alert.sl, qty_step=qty_step
-            )
-
-            if not final_qty or final_qty <= 0:
-                logger.warning(f"[{symbol}] Obliczona ilość Qty ({final_qty}) jest nieprawidłowa. Pomijam alert.")
-                continue
-
-            # g. Złożenie zlecenia
-            order_params = {
-                "symbol": symbol, "side": alert.direction, "qty": final_qty,
-                "price": alert.entry, "stopLoss": alert.sl, "takeProfit": alert.tp_2_0
-            }
-            order_id = executor.place_limit_order(order_params)
-
-            # h. Zapis stanu
-            if order_id:
-                state_manager.save_active_order({"symbol": symbol, "orderId": order_id, "status": "NEW", "alert_id": alert_id})
-
-        except Exception as e:
-            logger.error(f"Nieoczekiwany błąd podczas transakcyjnego przetwarzania alertu {alert_id}: {e}", exc_info=True)
 
 def log_closed_positions_pnl(executor: BybitExecutor) -> int:
     """Pobiera i loguje wyniki ostatnio zamkniętych pozycji."""
@@ -513,3 +392,6 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
     
     save_last_processed_timestamp(new_max_ts + timedelta(seconds=1), "pnl_logger_last_fetch_state")
     return processed_count
+
+
+
