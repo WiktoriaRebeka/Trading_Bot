@@ -13,30 +13,38 @@ from shared_lib.constants import (
 
 logger = logging.getLogger(__name__)
 
-def load_last_processed_timestamp() -> datetime:
+def load_last_processed_timestamp(doc_id: str) -> datetime:
+    """
+    Wczytuje ostatni przetworzony timestamp z określonego dokumentu w kolekcji konfiguracyjnej.
+    """
     db = get_db()
     try:
-        doc_ref = db.collection(BOT_CONFIG_COLLECTION).document(LAST_FETCH_STATE_DOC_ID)
+        doc_ref = db.collection(BOT_CONFIG_COLLECTION).document(doc_id)
         doc = doc_ref.get()
         if doc.exists:
             timestamp = doc.get(LAST_PROCESSED_TS_FIELD)
             if timestamp:
-                logger.info(f"[FETCHER] Odczytano ostatni timestamp z Firestore: {timestamp.isoformat()}")
+                logger.info(f"[FETCHER] Odczytano ostatni timestamp z '{doc_id}': {timestamp.isoformat()}")
                 return timestamp
     except Exception as e:
-        logger.error(f"[FETCHER_ERROR] Nie udało się odczytać timestampa z Firestore: {e}", exc_info=True)
-    fallback_ts = datetime.now(timezone.utc) - timedelta(days=1)
-    logger.warning(f"[FETCHER] Nie znaleziono timestampa w Firestore, używam wartości domyślnej: {fallback_ts.isoformat()}")
+        logger.error(f"[FETCHER_ERROR] Nie udało się odczytać timestampa z '{doc_id}': {e}", exc_info=True)
+    
+    # Zwraca datę sprzed godziny jako bezpieczny fallback
+    fallback_ts = datetime.now(timezone.utc) - timedelta(hours=1)
+    logger.warning(f"[FETCHER] Nie znaleziono timestampa w '{doc_id}', używam wartości domyślnej: {fallback_ts.isoformat()}")
     return fallback_ts
 
-def save_last_processed_timestamp(timestamp_dt: datetime):
+def save_last_processed_timestamp(timestamp_dt: datetime, doc_id: str):
+    """
+    Zapisuje nowy timestamp do określonego dokumentu w kolekcji konfiguracyjnej.
+    """
     db = get_db()
     try:
-        doc_ref = db.collection(BOT_CONFIG_COLLECTION).document(LAST_FETCH_STATE_DOC_ID)
+        doc_ref = db.collection(BOT_CONFIG_COLLECTION).document(doc_id)
         doc_ref.set({LAST_PROCESSED_TS_FIELD: timestamp_dt}, merge=True)
-        logger.info(f"[FETCHER] Zapisano nowy timestamp do Firestore: {timestamp_dt.isoformat()}")
+        logger.info(f"[FETCHER] Zapisano nowy timestamp do '{doc_id}': {timestamp_dt.isoformat()}")
     except Exception as e:
-        logger.error(f"[FETCHER_ERROR] Nie udało się zapisać timestampu {timestamp_dt.isoformat()} do Firestore: {e}", exc_info=True)
+        logger.error(f"[FETCHER_ERROR] Nie udało się zapisać timestampu do '{doc_id}': {e}", exc_info=True)
 
 def fetch_new_alerts_since(last_ts_dt: datetime):
     db = get_db()
