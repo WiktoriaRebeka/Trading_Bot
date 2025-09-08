@@ -6,6 +6,9 @@ from pydantic import ValidationError
 from shared_lib.models import AlertData, Kline, AnalyticalCase
 from bot_service import state_manager
 from bot_service.bigquery_logger import log_analysis_result
+import math
+from decimal import Decimal, ROUND_DOWN, ROUND_UP
+from shared_lib.firebase_client import get_instrument_rules
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +21,24 @@ def _calculate_risk_percentage(entry_price: float, sl_price: float) -> Optional[
     risk_distance = abs(entry_price - sl_price)
     return round((risk_distance / entry_price) * 100, 4)
 
-# Lokalizacja: bot_service/bot_logic.py
+# --- NOWA FUNKCJA POMOCNICZA DO PRECYZYJNEGO ZAOKRĄGLANIA ---
+def round_price_by_tick(price: float, tick_size: str, direction: str) -> float:
+    """
+    Zaokrągla cenę do najbliższego kroku (ticka) w dół ('down') lub w górę ('up').
+    Używa Decimal dla precyzji.
+    """
+    price_decimal = Decimal(str(price))
+    tick_decimal = Decimal(tick_size)
+    
+    if direction == 'down':
+        # Dzieli cenę przez krok, zaokrągla w dół do liczby całkowitej, a następnie mnoży z powrotem.
+        quantized = (price_decimal / tick_decimal).to_integral_value(rounding=ROUND_DOWN) * tick_decimal
+    elif direction == 'up':
+        quantized = (price_decimal / tick_decimal).to_integral_value(rounding=ROUND_UP) * tick_decimal
+    else: # Domyślne, standardowe zaokrąglenie
+        quantized = round(price_decimal / tick_decimal) * tick_decimal
+        
+    return float(quantized)
 
 def _correct_and_validate_alert(alert: AlertData) -> bool:
     """
@@ -55,10 +75,15 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
     return True
 
 def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]]):
-    """Przetwarza nowe alerty, bezwzględnie stosując regułę zastępowania, a następnie waliduje i tworzy nowe teczki."""
+    """Przetwarza nowe alerty, zaokrągla ceny, waliduje i tworzy teczki."""
     if not newly_fetched_alerts:
         return
     logger.info(f"Przetwarzam {len(newly_fetched_alerts)} nowych alertów.")
+
+    instrument_rules = get_instrument_rules()
+    if not instrument_rules:
+        logger.error("Nie udało się wczytać zasad instrumentów z Firestore. Przerywam przetwarzanie alertów.")
+        return
 
     for alert_dict in newly_fetched_alerts:
         alert_id = alert_dict.get('id', 'unknown')
@@ -67,31 +92,49 @@ def process_new_alerts(newly_fetched_alerts: List[Dict[str, Any]]):
             continue
 
         try:
-            # Krok 1: Walidacja danych przychodzących do modelu AlertData
             alert_data_model = AlertData.model_validate(alert_dict)
             
-            # Krok 2: Sprawdzenie i usunięcie istniejącej teczki PENDING (reguła zastępowania)
+            symbol = alert_data_model.symbol
+            rule = instrument_rules.get(symbol)
+
+            if not rule or "tickSize" not in rule:
+                logger.warning(f"Brak reguły 'tickSize' dla symbolu {symbol}. Pomijam zaokrąglanie.")
+            else:
+                tick_size = rule["tickSize"]
+                
+                # Zastosowanie zasad zaokrąglania
+                if alert_data_model.direction == 'LONG':
+                    alert_data_model.entry = round_price_by_tick(alert_data_model.entry, tick_size, 'down')
+                    alert_data_model.sl = round_price_by_tick(alert_data_model.sl, tick_size, 'up')
+                    alert_data_model.tp_1_0 = round_price_by_tick(alert_data_model.tp_1_0, tick_size, 'down')
+                    alert_data_model.tp_1_5 = round_price_by_tick(alert_data_model.tp_1_5, tick_size, 'down')
+                    alert_data_model.tp_2_0 = round_price_by_tick(alert_data_model.tp_2_0, tick_size, 'down')
+                    alert_data_model.tp_3_0 = round_price_by_tick(alert_data_model.tp_3_0, tick_size, 'down')
+                    alert_data_model.tp_4_0 = round_price_by_tick(alert_data_model.tp_4_0, tick_size, 'down')
+                    alert_data_model.tp_5_0 = round_price_by_tick(alert_data_model.tp_5_0, tick_size, 'down')
+                elif alert_data_model.direction == 'SHORT':
+                    alert_data_model.entry = round_price_by_tick(alert_data_model.entry, tick_size, 'up')
+                    alert_data_model.sl = round_price_by_tick(alert_data_model.sl, tick_size, 'down')
+                    alert_data_model.tp_1_0 = round_price_by_tick(alert_data_model.tp_1_0, tick_size, 'up')
+                    alert_data_model.tp_1_5 = round_price_by_tick(alert_data_model.tp_1_5, tick_size, 'up')
+                    alert_data_model.tp_2_0 = round_price_by_tick(alert_data_model.tp_2_0, tick_size, 'up')
+                    alert_data_model.tp_3_0 = round_price_by_tick(alert_data_model.tp_3_0, tick_size, 'up')
+                    alert_data_model.tp_4_0 = round_price_by_tick(alert_data_model.tp_4_0, tick_size, 'up')
+                    alert_data_model.tp_5_0 = round_price_by_tick(alert_data_model.tp_5_0, tick_size, 'up')
+
             existing_pending_case = state_manager.get_pending_case_for_symbol(alert_data_model.symbol)
             if existing_pending_case:
-                logger.info(
-                    f"[{alert_data_model.symbol}] Nowy alert ({alert_id}) unieważnia istniejącą teczkę PENDING ({existing_pending_case.id}). Usuwam."
-                )
+                logger.info(f"[{alert_data_model.symbol}] Nowy alert ({alert_id}) unieważnia istniejącą teczkę PENDING ({existing_pending_case.id}). Usuwam.")
                 state_manager.delete_case_by_id(existing_pending_case.id)
 
-            # Krok 3: Walidacja logiki biznesowej (ryzyko, poprawność SL/Entry)
-            # Ważne: przekazujemy model Pydantic, który może być modyfikowany wewnątrz funkcji
             is_valid = _correct_and_validate_alert(alert_data_model)
             
             if is_valid:
                 logger.info(f"[{alert_data_model.symbol}] Alert ({alert_id}) przeszedł walidację. Tworzę teczkę PENDING.")
-                
-                # --- KLUCZOWA POPRAWKA ---
-                # Tworzymy obiekt AnalyticalCase, jawnie mapując pola.
-                # Cały oryginalny słownik alertu (już zwalidowany) trafia do pola `alert_data`.
                 new_case = AnalyticalCase(
                     alert_id=alert_data_model.id,
                     symbol=alert_data_model.symbol,
-                    alert_data=alert_data_model.model_dump(by_alias=True) # Używamy danych ze zwalidowanego i potencjalnie skorygowanego modelu
+                    alert_data=alert_data_model.model_dump(by_alias=True)
                 )
                 state_manager.create_analytical_case(new_case)
             else:

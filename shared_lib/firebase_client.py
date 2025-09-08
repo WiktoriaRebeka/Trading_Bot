@@ -50,3 +50,22 @@ def get_symbols_to_watch_from_config() -> list[str]:
     except Exception as e:
         logger.error(f"Błąd podczas odczytu konfiguracji symboli: {e}", exc_info=True)
         return []
+
+
+def get_instrument_rules() -> dict:
+    """Pobiera zasady handlu (np. tickSize, qtyStep) dla instrumentów z Firestore."""
+    logger.info("Pobieranie zasad handlu instrumentów z Firestore.")
+    try:
+        db = get_db()
+        doc_ref = db.collection(constants.BOT_CONFIG_COLLECTION).document("instrument_rules")
+        doc = doc_ref.get()
+        if doc.exists:
+            rules = doc.to_dict().get("rules", {})
+            if isinstance(rules, dict) and rules:
+                logger.info(f"Znaleziono zasady dla {len(rules)} instrumentów.")
+                return rules
+        logger.warning("Dokument 'instrument_rules' nie został znaleziony lub jest pusty w Firestore.")
+        return {}
+    except Exception as e:
+        logger.error(f"Błąd podczas odczytu zasad instrumentów: {e}", exc_info=True)
+        return {}
