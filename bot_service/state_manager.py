@@ -102,3 +102,24 @@ def save_active_order(order_data: Dict[str, Any]):
     except Exception as e:
         logger.error(f"Błąd podczas zapisu aktywnego zlecenia {order_data.get('orderId')}: {e}", exc_info=True)
 
+
+
+def get_active_order_by_id(order_id: str) -> Optional[Dict[str, Any]]:
+    """Pobiera dane aktywnego zlecenia na podstawie jego ID."""
+    try:
+        doc_ref = _get_db().collection(constants.ACTIVE_ORDERS_COLLECTION).document(order_id)
+        doc = doc_ref.get()
+        if doc.exists:
+            return doc.to_dict()
+        return None
+    except Exception as e:
+        logger.error(f"Błąd podczas pobierania aktywnego zlecenia {order_id}: {e}", exc_info=True)
+        return None
+
+def delete_active_order_by_id(order_id: str):
+    """Usuwa dokument aktywnego zlecenia na podstawie jego ID."""
+    try:
+        _get_db().collection(constants.ACTIVE_ORDERS_COLLECTION).document(order_id).delete()
+        logger.info(f"[{order_id}] Pomyślnie usunięto przetworzone zlecenie z kolekcji active_orders.")
+    except Exception as e:
+        logger.error(f"Błąd podczas usuwania aktywnego zlecenia {order_id}: {e}", exc_info=True)

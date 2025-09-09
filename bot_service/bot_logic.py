@@ -365,11 +365,13 @@ def _handle_triggered_case(case_doc_snapshot: Any, kline: Kline):
 
 
 
+# Lokalizacja: bot_service/bot_logic.py
+
 def log_closed_positions_pnl(executor: BybitExecutor) -> int:
-    """Pobiera i loguje wyniki ostatnio zamkniętych pozycji."""
+    """
+    Pobiera historię zamkniętych pozycji, wzbogaca ją o alert_id z Firestore i loguje do BigQuery.
+    """
     last_check_ts_dt = load_last_processed_timestamp("pnl_logger_last_fetch_state")
-    if not last_check_ts_dt:
-        last_check_ts_dt = datetime.now(timezone.utc) - timedelta(hours=1)
     
     start_time_ms = int(last_check_ts_dt.timestamp() * 1000)
     pnl_records = executor.get_closed_pnl_history(start_time_ms=start_time_ms)
@@ -380,18 +382,41 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
 
     new_max_ts = last_check_ts_dt
     processed_count = 0
-    for record in pnl_records:
-        # Tutaj można dodać logikę, aby nie logować już przetworzonych transakcji
-        log_real_trade_result(record)
+    
+    for pnl_record in pnl_records:
+        order_id = pnl_record.get("orderId")
+        if not order_id:
+            logger.warning("Pominięto rekord PnL bez orderId.", extra={"json_fields": {"pnl_record": pnl_record}})
+            continue
+
+        # KROK 1: Wzbogać dane o alert_id z naszej bazy danych
+        active_order_data = state_manager.get_active_order_by_id(order_id)
+        
+        if not active_order_data:
+            logger.warning(f"Nie znaleziono dopasowania dla orderId {order_id} w kolekcji active_orders. Prawdopodobnie ręczna transakcja. Pomijam.")
+            continue
+
+        # KROK 2: Połącz dane z Bybit i z Firestore
+        enriched_pnl_data = pnl_record.copy()
+        enriched_pnl_data['alert_id'] = active_order_data.get('alert_id', 'unknown')
+        
+        # KROK 3: Zaloguj wzbogacone dane
+        log_real_trade_result(enriched_pnl_data)
         processed_count += 1
-        updated_time_ms = int(record.get("updatedTime", 0))
+        
+        # KROK 4: Usuń przetworzony rekord, aby uniknąć duplikatów
+        state_manager.delete_active_order_by_id(order_id)
+
+        # Aktualizuj timestamp do zapisu
+        updated_time_ms = int(pnl_record.get("updatedTime", 0))
         if updated_time_ms > 0:
             record_ts = datetime.fromtimestamp(updated_time_ms / 1000, tz=timezone.utc)
             if record_ts > new_max_ts:
                 new_max_ts = record_ts
     
-    save_last_processed_timestamp(new_max_ts + timedelta(seconds=1), "pnl_logger_last_fetch_state")
+    if new_max_ts > last_check_ts_dt:
+        save_last_processed_timestamp(new_max_ts + timedelta(seconds=1), "pnl_logger_last_fetch_state")
+        
     return processed_count
-
 
 
