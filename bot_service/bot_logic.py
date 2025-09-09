@@ -102,7 +102,7 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
     return True
 
 def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitExecutor):
-    """Przetwarza alerty, składając realne zlecenia na giełdzie."""
+    """Przetwarza alerty, składając realne zlecenia na giełdzie z użyciem orderLinkId."""
     if not alerts:
         return
 
@@ -125,14 +125,15 @@ def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitEx
             
             tick_size, qty_step = rule["tickSize"], rule["qtyStep"]
 
+            # === ZMIENIONA LOGIKA ZAOKRĄGLANIA ===
             if alert.direction == 'LONG':
-                alert.entry = round_price_by_tick(alert.entry, tick_size, 'down')
-                alert.sl = round_price_by_tick(alert.sl, tick_size, 'up')
-                alert.tp_2_0 = round_price_by_tick(alert.tp_2_0, tick_size, 'down')
-            elif alert.direction == 'SHORT':
                 alert.entry = round_price_by_tick(alert.entry, tick_size, 'up')
                 alert.sl = round_price_by_tick(alert.sl, tick_size, 'down')
                 alert.tp_2_0 = round_price_by_tick(alert.tp_2_0, tick_size, 'up')
+            elif alert.direction == 'SHORT':
+                alert.entry = round_price_by_tick(alert.entry, tick_size, 'down')
+                alert.sl = round_price_by_tick(alert.sl, tick_size, 'up')
+                alert.tp_2_0 = round_price_by_tick(alert.tp_2_0, tick_size, 'down')
 
             risk_usdt = float(os.getenv("RISK_PER_TRADE_USDT", "2.5"))
             final_qty = calculate_position_size(
@@ -154,7 +155,7 @@ def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitEx
             if order_response and order_response.get("orderId"):
                 order_id = order_response.get("orderId")
                 state_manager.save_active_order(
-                    order_id,  # Używamy orderId jako ID dokumentu
+                    order_id,
                     {
                         "symbol": symbol, 
                         "orderId": order_id,
@@ -165,6 +166,7 @@ def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitEx
                 )
         except Exception as e:
             logger.error(f"Nieoczekiwany błąd podczas transakcyjnego przetwarzania alertu {alert_id}: {e}", exc_info=True)
+
 
 def log_closed_positions_pnl(executor: BybitExecutor) -> int:
     """
@@ -249,17 +251,8 @@ def process_new_alerts_analytical(newly_fetched_alerts: List[Dict[str, Any]]):
             else:
                 tick_size = rule["tickSize"]
                 
-                # Zastosowanie zasad zaokrąglania
+                # === ZMIENIONA LOGIKA ZAOKRĄGLANIA ===
                 if alert_data_model.direction == 'LONG':
-                    alert_data_model.entry = round_price_by_tick(alert_data_model.entry, tick_size, 'down')
-                    alert_data_model.sl = round_price_by_tick(alert_data_model.sl, tick_size, 'up')
-                    alert_data_model.tp_1_0 = round_price_by_tick(alert_data_model.tp_1_0, tick_size, 'down')
-                    alert_data_model.tp_1_5 = round_price_by_tick(alert_data_model.tp_1_5, tick_size, 'down')
-                    alert_data_model.tp_2_0 = round_price_by_tick(alert_data_model.tp_2_0, tick_size, 'down')
-                    alert_data_model.tp_3_0 = round_price_by_tick(alert_data_model.tp_3_0, tick_size, 'down')
-                    alert_data_model.tp_4_0 = round_price_by_tick(alert_data_model.tp_4_0, tick_size, 'down')
-                    alert_data_model.tp_5_0 = round_price_by_tick(alert_data_model.tp_5_0, tick_size, 'down')
-                elif alert_data_model.direction == 'SHORT':
                     alert_data_model.entry = round_price_by_tick(alert_data_model.entry, tick_size, 'up')
                     alert_data_model.sl = round_price_by_tick(alert_data_model.sl, tick_size, 'down')
                     alert_data_model.tp_1_0 = round_price_by_tick(alert_data_model.tp_1_0, tick_size, 'up')
@@ -268,6 +261,15 @@ def process_new_alerts_analytical(newly_fetched_alerts: List[Dict[str, Any]]):
                     alert_data_model.tp_3_0 = round_price_by_tick(alert_data_model.tp_3_0, tick_size, 'up')
                     alert_data_model.tp_4_0 = round_price_by_tick(alert_data_model.tp_4_0, tick_size, 'up')
                     alert_data_model.tp_5_0 = round_price_by_tick(alert_data_model.tp_5_0, tick_size, 'up')
+                elif alert_data_model.direction == 'SHORT':
+                    alert_data_model.entry = round_price_by_tick(alert_data_model.entry, tick_size, 'down')
+                    alert_data_model.sl = round_price_by_tick(alert_data_model.sl, tick_size, 'up')
+                    alert_data_model.tp_1_0 = round_price_by_tick(alert_data_model.tp_1_0, tick_size, 'down')
+                    alert_data_model.tp_1_5 = round_price_by_tick(alert_data_model.tp_1_5, tick_size, 'down')
+                    alert_data_model.tp_2_0 = round_price_by_tick(alert_data_model.tp_2_0, tick_size, 'down')
+                    alert_data_model.tp_3_0 = round_price_by_tick(alert_data_model.tp_3_0, tick_size, 'down')
+                    alert_data_model.tp_4_0 = round_price_by_tick(alert_data_model.tp_4_0, tick_size, 'down')
+                    alert_data_model.tp_5_0 = round_price_by_tick(alert_data_model.tp_5_0, tick_size, 'down')
 
             existing_pending_case = state_manager.get_pending_case_for_symbol(alert_data_model.symbol)
             if existing_pending_case:
@@ -292,7 +294,7 @@ def process_new_alerts_analytical(newly_fetched_alerts: List[Dict[str, Any]]):
         except Exception as e:
             logger.error(f"Nieoczekiwany błąd podczas przetwarzania alertu ({alert_id}): {e}", exc_info=True, extra={"json_fields": {"alert_id": alert_id}})
 
-
+            
 def _run_analysis_of_existing_cases():
     logger.info("Rozpoczynam główną pętlę cyklu analitycznego.")
     
