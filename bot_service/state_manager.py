@@ -88,10 +88,9 @@ def get_latest_klines_from_cache(symbols: Iterable[str]) -> Dict[str, Dict[str, 
         logger.warning(f"[KLINE_CACHE] Nie udało się pobrać rekordów kline z cache'u dla {unique_symbols}.")
     return klines_cache
 
-def save_active_order(order_data: Dict[str, Any]):
-    """Zapisuje informacje o aktywnym zleceniu do Firestore."""
+def save_active_order(order_id: str, order_data: Dict[str, Any]):
+    """Zapisuje informacje o aktywnym zleceniu do Firestore, używając orderId jako ID dokumentu."""
     try:
-        order_id = order_data.get("orderId")
         if not order_id:
             logger.error("Próba zapisu aktywnego zlecenia bez orderId.")
             return
@@ -100,26 +99,20 @@ def save_active_order(order_data: Dict[str, Any]):
         doc_ref.set(order_data)
         logger.info(f"Zapisano aktywne zlecenie {order_id} dla symbolu {order_data.get('symbol')}.")
     except Exception as e:
-        logger.error(f"Błąd podczas zapisu aktywnego zlecenia {order_data.get('orderId')}: {e}", exc_info=True)
+        logger.error(f"Błąd podczas zapisu aktywnego zlecenia {order_id}: {e}", exc_info=True)
 
-
-
-def get_active_order_by_link_id(order_link_id: str) -> Optional[Dict[str, Any]]:
-    """Pobiera dane aktywnego zlecenia na podstawie jego orderLinkId."""
+def get_active_order_by_id(order_id: str) -> Optional[Dict[str, Any]]:
+    """Pobiera dane aktywnego zlecenia na podstawie jego ID."""
     try:
-        docs_query = _get_db().collection(constants.ACTIVE_ORDERS_COLLECTION) \
-            .where('orderLinkId', '==', order_link_id) \
-            .limit(1)
-        
-        docs = docs_query.stream()
-        doc = next(docs, None)
-        
-        if doc:
+        doc_ref = _get_db().collection(constants.ACTIVE_ORDERS_COLLECTION).document(order_id)
+        doc = doc_ref.get()
+        if doc.exists:
             return doc.to_dict()
         return None
     except Exception as e:
-        logger.error(f"Błąd podczas pobierania zlecenia po orderLinkId {order_link_id}: {e}", exc_info=True)
+        logger.error(f"Błąd podczas pobierania aktywnego zlecenia {order_id}: {e}", exc_info=True)
         return None
+
 
 def delete_active_order_by_id(order_id: str):
     """Usuwa dokument aktywnego zlecenia na podstawie jego ID."""

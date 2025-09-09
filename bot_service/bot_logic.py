@@ -102,7 +102,7 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
     return True
 
 def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitExecutor):
-    """Przetwarza alerty, składając realne zlecenia na giełdzie z użyciem orderLinkId."""
+    """Przetwarza alerty, składając realne zlecenia na giełdzie."""
     if not alerts:
         return
 
@@ -113,19 +113,14 @@ def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitEx
             symbol = alert.symbol
             
             if not _correct_and_validate_alert(alert):
-                logger.info(f"[{symbol}] Alert ({alert_id}) odrzucony w walidacji, pomijam w cyklu transakcyjnym.")
                 continue
-            
             if executor.has_open_position(symbol):
-                logger.info(f"[{symbol}] Wykryto otwartą pozycję, pomijam nowy alert ({alert_id}).")
                 continue
             
-            logger.info(f"[{symbol}] Anulowanie istniejących zleceń przed złożeniem nowego dla alertu ({alert_id}).")
             executor.cancel_all_open_orders_for_symbol(symbol)
             
             rule = executor.get_instrument_info(symbol)
             if not rule or "tickSize" not in rule or "qtyStep" not in rule:
-                logger.warning(f"[{symbol}] Brak pełnych zasad handlu. Pomijam alert ({alert_id}).")
                 continue
             
             tick_size, qty_step = rule["tickSize"], rule["qtyStep"]
@@ -146,10 +141,8 @@ def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitEx
             )
 
             if not final_qty or final_qty <= 0:
-                logger.warning(f"[{symbol}] Obliczona ilość Qty ({final_qty}) jest nieprawidłowa. Pomijam alert ({alert_id}).")
                 continue
 
-            # === ZMIANA 1: Generowanie i przekazywanie orderLinkId ===
             client_order_id = f"tradebot_{alert_id.replace('-', '')[:16]}_{int(datetime.now().timestamp())}"
             order_params = {
                 "symbol": symbol, "side": alert.direction, "qty": final_qty,
@@ -158,18 +151,75 @@ def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitEx
             }
             order_response = executor.place_limit_order(order_params)
 
-            # === ZMIANA 2: Zapis obu ID do Firestore ===
             if order_response and order_response.get("orderId"):
-                state_manager.save_active_order({
-                    "symbol": symbol, 
-                    "orderId": order_response.get("orderId"),      # ID z Bybit
-                    "orderLinkId": client_order_id,                 # Nasze unikalne ID
-                    "status": "NEW", 
-                    "alert_id": alert_id
-                })
-
+                order_id = order_response.get("orderId")
+                state_manager.save_active_order(
+                    order_id,  # Używamy orderId jako ID dokumentu
+                    {
+                        "symbol": symbol, 
+                        "orderId": order_id,
+                        "orderLinkId": client_order_id,
+                        "status": "NEW", 
+                        "alert_id": alert_id
+                    }
+                )
         except Exception as e:
             logger.error(f"Nieoczekiwany błąd podczas transakcyjnego przetwarzania alertu {alert_id}: {e}", exc_info=True)
+
+def log_closed_positions_pnl(executor: BybitExecutor) -> int:
+    """
+    Pobiera historię zamkniętych pozycji, dopasowuje je po orderId z Firestore i loguje do BigQuery.
+    """
+    logger.info("[PNL_LOGGER] Rozpoczynam cykl logowania PnL.")
+    last_check_ts_dt = load_last_processed_timestamp("pnl_logger_last_fetch_state")
+    logger.info(f"[PNL_LOGGER] Sprawdzam zamknięte pozycje od: {last_check_ts_dt.isoformat()}")
+    
+    start_time_ms = int(last_check_ts_dt.timestamp() * 1000)
+    pnl_records = executor.get_closed_pnl_history(start_time_ms=start_time_ms)
+    
+    if not pnl_records:
+        logger.info("[PNL_LOGGER] Nie znaleziono nowych zamkniętych pozycji na Bybit od ostatniego sprawdzenia.")
+        return 0
+
+    logger.info(f"[PNL_LOGGER] Znaleziono {len(pnl_records)} nowych zamkniętych pozycji na Bybit. Rozpoczynam przetwarzanie.")
+    new_max_ts = last_check_ts_dt
+    processed_count = 0
+    
+    for pnl_record in pnl_records:
+        order_id = pnl_record.get("orderId")
+        if not order_id:
+            logger.warning("[PNL_LOGGER] Pominięto rekord PnL bez orderId.", extra={"json_fields": {"pnl_record": pnl_record}})
+            continue
+
+        active_order_data = state_manager.get_active_order_by_id(order_id)
+        
+        if not active_order_data:
+            logger.warning(f"[PNL_LOGGER] Nie znaleziono dopasowania dla orderId {order_id} w Firestore. Pomijam.")
+            continue
+
+        alert_id = active_order_data.get('alert_id', 'unknown')
+        logger.info(f"[PNL_LOGGER] Pomyślnie dopasowano orderId {order_id} do alert_id {alert_id}.")
+
+        enriched_pnl_data = pnl_record.copy()
+        enriched_pnl_data['alert_id'] = alert_id
+        
+        log_real_trade_result(enriched_pnl_data)
+        processed_count += 1
+        
+        state_manager.delete_active_order_by_id(order_id)
+
+        updated_time_ms = int(pnl_record.get("updatedTime", 0))
+        if updated_time_ms > 0:
+            record_ts = datetime.fromtimestamp(updated_time_ms / 1000, tz=timezone.utc)
+            if record_ts > new_max_ts:
+                new_max_ts = record_ts
+    
+    if new_max_ts > last_check_ts_dt:
+        logger.info(f"[PNL_LOGGER] Zapisuję nowy timestamp ostatniego sprawdzenia: {new_max_ts.isoformat()}")
+        save_last_processed_timestamp(new_max_ts + timedelta(seconds=1), "pnl_logger_last_fetch_state")
+        
+    logger.info(f"[PNL_LOGGER] Zakończono cykl. Przetworzono i zalogowano {processed_count} rekordów.")
+    return processed_count
 
 
 def process_new_alerts_analytical(newly_fetched_alerts: List[Dict[str, Any]]):
@@ -377,60 +427,4 @@ def _handle_triggered_case(case_doc_snapshot: Any, kline: Kline):
             state_manager.delete_case_by_id(case_id)
 
 
-def log_closed_positions_pnl(executor: BybitExecutor) -> int:
-    """
-    Pobiera historię zamkniętych pozycji, wzbogaca ją o alert_id z Firestore i loguje do BigQuery.
-    """
-    logger.info("[PNL_LOGGER] Rozpoczynam cykl logowania PnL.")
-    last_check_ts_dt = load_last_processed_timestamp("pnl_logger_last_fetch_state")
-    logger.info(f"[PNL_LOGGER] Sprawdzam zamknięte pozycje od: {last_check_ts_dt.isoformat()}")
-    
-    start_time_ms = int(last_check_ts_dt.timestamp() * 1000)
-    pnl_records = executor.get_closed_pnl_history(start_time_ms=start_time_ms)
-    
-    if not pnl_records:
-        logger.info("[PNL_LOGGER] Nie znaleziono nowych zamkniętych pozycji na Bybit od ostatniego sprawdzenia.")
-        return 0
-
-    logger.info(f"[PNL_LOGGER] Znaleziono {len(pnl_records)} nowych zamkniętych pozycji na Bybit. Rozpoczynam przetwarzanie.")
-    new_max_ts = last_check_ts_dt
-    processed_count = 0
-    
-    for pnl_record in pnl_records:
-        # === ZMIANA 3: Używamy orderLinkId do dopasowania ===
-        order_link_id = pnl_record.get("orderLinkId")
-        if not order_link_id:
-            logger.warning("[PNL_LOGGER] Pominięto rekord PnL bez orderLinkId.", extra={"json_fields": {"pnl_record": pnl_record}})
-            continue
-
-        active_order_data = state_manager.get_active_order_by_link_id(order_link_id)
-        
-        if not active_order_data:
-            logger.warning(f"[PNL_LOGGER] Nie znaleziono dopasowania dla orderLinkId {order_link_id} w Firestore. Pomijam.")
-            continue
-
-        alert_id = active_order_data.get('alert_id', 'unknown')
-        order_id = active_order_data.get('orderId', 'unknown') # Pobieramy oryginalny orderId do logów
-        logger.info(f"[PNL_LOGGER] Pomyślnie dopasowano orderLinkId {order_link_id} do alert_id {alert_id}.")
-
-        enriched_pnl_data = pnl_record.copy()
-        enriched_pnl_data['alert_id'] = alert_id
-        
-        log_real_trade_result(enriched_pnl_data)
-        processed_count += 1
-        
-        state_manager.delete_active_order_by_id(order_id) # Usuwamy po głównym ID z Bybit
-
-        updated_time_ms = int(pnl_record.get("updatedTime", 0))
-        if updated_time_ms > 0:
-            record_ts = datetime.fromtimestamp(updated_time_ms / 1000, tz=timezone.utc)
-            if record_ts > new_max_ts:
-                new_max_ts = record_ts
-    
-    if new_max_ts > last_check_ts_dt:
-        logger.info(f"[PNL_LOGGER] Zapisuję nowy timestamp ostatniego sprawdzenia: {new_max_ts.isoformat()}")
-        save_last_processed_timestamp(new_max_ts + timedelta(seconds=1), "pnl_logger_last_fetch_state")
-        
-    logger.info(f"[PNL_LOGGER] Zakończono cykl. Przetworzono i zalogowano {processed_count} rekordów.")
-    return processed_count
 
