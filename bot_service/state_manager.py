@@ -104,16 +104,21 @@ def save_active_order(order_data: Dict[str, Any]):
 
 
 
-def get_active_order_by_id(order_id: str) -> Optional[Dict[str, Any]]:
-    """Pobiera dane aktywnego zlecenia na podstawie jego ID."""
+def get_active_order_by_link_id(order_link_id: str) -> Optional[Dict[str, Any]]:
+    """Pobiera dane aktywnego zlecenia na podstawie jego orderLinkId."""
     try:
-        doc_ref = _get_db().collection(constants.ACTIVE_ORDERS_COLLECTION).document(order_id)
-        doc = doc_ref.get()
-        if doc.exists:
+        docs_query = _get_db().collection(constants.ACTIVE_ORDERS_COLLECTION) \
+            .where('orderLinkId', '==', order_link_id) \
+            .limit(1)
+        
+        docs = docs_query.stream()
+        doc = next(docs, None)
+        
+        if doc:
             return doc.to_dict()
         return None
     except Exception as e:
-        logger.error(f"Błąd podczas pobierania aktywnego zlecenia {order_id}: {e}", exc_info=True)
+        logger.error(f"Błąd podczas pobierania zlecenia po orderLinkId {order_link_id}: {e}", exc_info=True)
         return None
 
 def delete_active_order_by_id(order_id: str):

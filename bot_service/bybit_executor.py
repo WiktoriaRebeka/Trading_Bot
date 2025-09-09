@@ -103,41 +103,47 @@ class BybitExecutor:
         except (RequestException, BybitAPIError):
             return None
 
-    def place_limit_order(self, order_params: Dict[str, Any]) -> Optional[str]:
-        """Składa zlecenie LIMIT z jednoczesnym ustawieniem TP/SL."""
-        symbol = order_params.get('symbol')
-        if not symbol:
-            logger.error("Brak 'symbol' w parametrach zlecenia.")
-            return None
+    def place_limit_order(self, order_params: Dict[str, Any]) -> Optional[Dict[str, str]]:
+            """Składa zlecenie LIMIT z jednoczesnym ustawieniem TP/SL, używając orderLinkId."""
+            symbol = order_params.get('symbol')
+            if not symbol:
+                logger.error("Brak 'symbol' w parametrach zlecenia.")
+                return None
+                
+            api_symbol = symbol.replace('.P', '')
+            side_map = {"LONG": "Buy", "SHORT": "Sell"}
             
-        api_symbol = symbol.replace('.P', '')
-        side_map = {"LONG": "Buy", "SHORT": "Sell"}
-        
-        payload = {
-            "category": "linear",
-            "symbol": api_symbol,
-            "side": side_map[order_params['side']],
-            "orderType": "Limit",
-            "qty": str(order_params['qty']),
-            "price": str(order_params['price']),
-            "takeProfit": str(order_params['takeProfit']),
-            "stopLoss": str(order_params['stopLoss']),
-            "timeInForce": "GTC"
-        }
-        
-        logger.info(f"[{symbol}] Wysyłanie zlecenia do Bybit z parametrami: {payload}")
-        try:
-            result = self._send_request("POST", "/v5/order/create", params=payload)
-            order_id = result.get("orderId")
-            if order_id:
-                logger.info(f"[{symbol}] Zlecenie pomyślnie złożone. Order ID: {order_id}")
-                return order_id
+            payload = {
+                "category": "linear",
+                "symbol": api_symbol,
+                "side": side_map[order_params['side']],
+                "orderType": "Limit",
+                "qty": str(order_params['qty']),
+                "price": str(order_params['price']),
+                "takeProfit": str(order_params['takeProfit']),
+                "stopLoss": str(order_params['stopLoss']),
+                "orderLinkId": order_params['orderLinkId'], # <-- DODANA LINIA
+                "timeInForce": "GTC"
+            }
             
-            logger.error(f"[{symbol}] API Bybit nie zwróciło orderId. Pełna odpowiedź 'result': {result}")
-            return None
-        except (RequestException, BybitAPIError) as e:
-            logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD podczas składania zlecenia. Błąd: {e}", exc_info=True)
-            return None
+            logger.info(f"[{symbol}] Wysyłanie zlecenia do Bybit z parametrami: {payload}")
+            try:
+                result = self._send_request("POST", "/v5/order/create", params=payload)
+                order_id = result.get("orderId")
+                order_link_id = result.get("orderLinkId")
+
+                if order_id:
+                    logger.info(f"[{symbol}] Zlecenie pomyślnie złożone. Order ID: {order_id}, OrderLinkID: {order_link_id}")
+                    return {
+                        "orderId": order_id,
+                        "orderLinkId": order_link_id
+                    }
+                
+                logger.error(f"[{symbol}] API Bybit nie zwróciło orderId. Pełna odpowiedź 'result': {result}")
+                return None
+            except (RequestException, BybitAPIError) as e:
+                logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD podczas składania zlecenia. Błąd: {e}", exc_info=True)
+                return None
 
     def cancel_all_open_orders_for_symbol(self, symbol: str) -> bool:
         """Anuluje WSZYSTKIE aktywne zlecenia dla danego symbolu."""
