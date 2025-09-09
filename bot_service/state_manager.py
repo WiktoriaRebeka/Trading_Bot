@@ -100,7 +100,7 @@ def save_active_order(order_id: str, order_data: Dict[str, Any]):
         logger.info(f"Zapisano aktywne zlecenie {order_id} dla symbolu {order_data.get('symbol')}.")
     except Exception as e:
         logger.error(f"Błąd podczas zapisu aktywnego zlecenia {order_id}: {e}", exc_info=True)
-
+        
 def get_active_order_by_id(order_id: str) -> Optional[Dict[str, Any]]:
     """Pobiera dane aktywnego zlecenia na podstawie jego ID."""
     try:

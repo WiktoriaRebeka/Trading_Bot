@@ -188,6 +188,7 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
     processed_count = 0
     
     for pnl_record in pnl_records:
+        # === KLUCZOWA ZMIANA: Wracamy do dopasowywania po orderId ===
         order_id = pnl_record.get("orderId")
         if not order_id:
             logger.warning("[PNL_LOGGER] Pominięto rekord PnL bez orderId.", extra={"json_fields": {"pnl_record": pnl_record}})
@@ -294,7 +295,7 @@ def process_new_alerts_analytical(newly_fetched_alerts: List[Dict[str, Any]]):
         except Exception as e:
             logger.error(f"Nieoczekiwany błąd podczas przetwarzania alertu ({alert_id}): {e}", exc_info=True, extra={"json_fields": {"alert_id": alert_id}})
 
-            
+
 def _run_analysis_of_existing_cases():
     logger.info("Rozpoczynam główną pętlę cyklu analitycznego.")
     
