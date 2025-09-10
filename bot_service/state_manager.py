@@ -151,3 +151,17 @@ def get_active_order_by_symbol(symbol: str) -> Optional[Dict[str, Any]]:
     except Exception as e:
         logger.error(f"Błąd podczas pobierania aktywnego zlecenia dla symbolu {symbol}: {e}", exc_info=True)
         return None
+
+# === NOWA, KLUCZOWA FUNKCJA, KTÓREJ BRAKOWAŁO ===
+def get_alert_data_by_id(alert_id: str) -> Optional[Dict[str, Any]]:
+    """Pobiera surowe dane alertu na podstawie jego ID z kolekcji 'alerts'."""
+    try:
+        doc_ref = _get_db().collection(constants.FIRESTORE_COLLECTION_ALERTS).document(alert_id)
+        doc = doc_ref.get()
+        if doc.exists:
+            return doc.to_dict()
+        logger.warning(f"Nie znaleziono dokumentu alertu o ID: {alert_id}")
+        return None
+    except Exception as e:
+        logger.error(f"Błąd podczas pobierania danych alertu {alert_id}: {e}", exc_info=True)
+        return None
