@@ -1,38 +1,56 @@
+# Lokalizacja: bot_service/pnl_logger_real.py
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 from datetime import datetime, timezone
 from google.cloud import bigquery
 from decimal import Decimal
 
 from bot_service.bigquery_logger import get_bigquery_client
 from shared_lib import constants
-from bot_service import state_manager # Upewnij się, że ten import istnieje
 
 logger = logging.getLogger(__name__)
 
+# Definicja referencji do tabeli jest pobierana z centralnego miejsca
 REAL_TABLE_REF = f"{constants.BIGQUERY_PROJECT_ID}.{constants.BIGQUERY_DATASET_ID}.{constants.BIGQUERY_REAL_TRADES_TABLE_ID}"
 
+# ======================================================================================
+# === OSTATECZNA, ROZBUDOWANA SCHEMA DLA PEŁNEJ ANALIZY TRANSAKCJI ===
+# ======================================================================================
+# Należy zastąpić starą definicję REAL_TRADES_HISTORY_SCHEMA tą nową
+
 REAL_TRADES_HISTORY_SCHEMA = [
-    # ... (pełna, zaktualizowana schema, którą podałem wcześniej)
-    bigquery.SchemaField("alert_id", "STRING", mode="REQUIRED"),
-    bigquery.SchemaField("order_id", "STRING", mode="REQUIRED"),
+    # --- Identyfikatory ---
+    bigquery.SchemaField("alert_id", "STRING", mode="REQUIRED", description="ID alertu z naszego systemu, który wygenerował transakcję."),
+    bigquery.SchemaField("order_id", "STRING", mode="REQUIRED", description="ID zlecenia wejścia zwrócone przez giełdę."),
+    
+    # --- Parametry Transakcji ---
     bigquery.SchemaField("symbol", "STRING", mode="REQUIRED"),
-    bigquery.SchemaField("direction", "STRING", mode="REQUIRED"),
-    bigquery.SchemaField("qty", "NUMERIC", mode="REQUIRED"),
-    bigquery.SchemaField("leverage", "INTEGER", mode="NULLABLE"),
-    bigquery.SchemaField("avg_entry_price", "NUMERIC", mode="REQUIRED"),
-    bigquery.SchemaField("avg_exit_price", "NUMERIC", mode="REQUIRED"),
-    bigquery.SchemaField("entry_value_usdt", "NUMERIC", mode="REQUIRED"),
-    bigquery.SchemaField("exit_value_usdt", "NUMERIC", mode="REQUIRED"),
-    bigquery.SchemaField("gross_pnl_usdt", "NUMERIC", mode="REQUIRED"),
-    bigquery.SchemaField("commission_usdt", "NUMERIC", mode="REQUIRED"),
-    bigquery.SchemaField("net_pnl_usdt", "NUMERIC", mode="REQUIRED"),
-    bigquery.SchemaField("exit_type", "STRING", mode="NULLABLE"),
-    bigquery.SchemaField("timestamp_entry", "TIMESTAMP", mode="REQUIRED"),
-    bigquery.SchemaField("timestamp_close", "TIMESTAMP", mode="REQUIRED"),
-    bigquery.SchemaField("sl_price", "NUMERIC", mode="NULLABLE"),
-    bigquery.SchemaField("planned_risk_usdt", "NUMERIC", mode="NULLABLE"),
-    bigquery.SchemaField("realized_rrr", "NUMERIC", mode="NULLABLE"),
+    bigquery.SchemaField("direction", "STRING", mode="REQUIRED", description="Kierunek transakcji: LONG lub SHORT."),
+    bigquery.SchemaField("qty", "NUMERIC", mode="REQUIRED", description="Wielkość pozycji w jednostkach kryptowaluty (np. 0.1 BTC)."),
+    bigquery.SchemaField("leverage", "INTEGER", mode="NULLABLE", description="Użyta dźwignia."),
+    
+    # --- Ceny ---
+    bigquery.SchemaField("avg_entry_price", "NUMERIC", mode="REQUIRED", description="Rzeczywista, średnia cena wejścia."),
+    bigquery.SchemaField("avg_exit_price", "NUMERIC", mode="REQUIRED", description="Rzeczywista, średnia cena wyjścia."),
+    
+    # --- Wartości Pozycji (Obliczone) ---
+    bigquery.SchemaField("entry_value_usdt", "NUMERIC", mode="REQUIRED", description="Wartość pozycji w USDT w momencie wejścia (qty * avg_entry_price)."),
+    bigquery.SchemaField("exit_value_usdt", "NUMERIC", mode="REQUIRED", description="Wartość pozycji w USDT w momencie wyjścia (qty * avg_exit_price)."),
+
+    # --- Wyniki Finansowe ---
+    bigquery.SchemaField("gross_pnl_usdt", "NUMERIC", mode="REQUIRED", description="Zysk/strata brutto w USDT, przed prowizjami (net_pnl_usdt + commission_usdt)."),
+    bigquery.SchemaField("commission_usdt", "NUMERIC", mode="REQUIRED", description="Łączna prowizja zapłacona za otwarcie i zamknięcie pozycji."),
+    bigquery.SchemaField("net_pnl_usdt", "NUMERIC", mode="REQUIRED", description="Zysk/strata netto w USDT, po odjęciu prowizji (oficjalna wartość z Bybit)."),
+
+    # --- Metadane ---
+    bigquery.SchemaField("exit_type", "STRING", mode="NULLABLE", description="Powód zamknięcia pozycji (np. TakeProfit, StopLoss, Manual)."),
+    bigquery.SchemaField("timestamp_entry", "TIMESTAMP", mode="REQUIRED", description="Timestamp otwarcia pozycji."),
+    bigquery.SchemaField("timestamp_close", "TIMESTAMP", mode="REQUIRED", description="Timestamp zamknięcia pozycji."),
+
+    # --- NOWE POLA: Analiza Ryzyka i R:R ---
+    bigquery.SchemaField("sl_price", "NUMERIC", mode="NULLABLE", description="Planowana cena Stop Loss z oryginalnego alertu."),
+    bigquery.SchemaField("planned_risk_usdt", "NUMERIC", mode="NULLABLE", description="Rzeczywiste ryzyko w USDT, obliczone na podstawie avg_entry_price i sl_price."),
+    bigquery.SchemaField("realized_rrr", "NUMERIC", mode="NULLABLE", description="Rzeczywisty, zrealizowany stosunek ryzyka do zysku (net_pnl_usdt / planned_risk_usdt)."),
 ]
 
 def log_real_trade_result(enriched_pnl_data: Dict[str, Any]):
@@ -58,6 +76,7 @@ def log_real_trade_result(enriched_pnl_data: Dict[str, Any]):
 
         qty = Decimal(enriched_pnl_data.get("qty", "0.0"))
         avg_entry_price = Decimal(enriched_pnl_data.get("avgEntryPrice", "0.0"))
+        avg_exit_price = Decimal(enriched_pnl_data.get("avgExitPrice", "0.0"))
         commission = Decimal(enriched_pnl_data.get("cumCommission") or "0.0")
         net_pnl = Decimal(enriched_pnl_data.get("closedPnl") or "0.0")
 
@@ -72,7 +91,7 @@ def log_real_trade_result(enriched_pnl_data: Dict[str, Any]):
                 realized_rrr = net_pnl / planned_risk_usdt
         
         # === KLUCZOWA POPRAWKA: Zaokrąglanie wartości przed konwersją na float ===
-        # Zaokrąglamy do 6 miejsc po przecinku, co jest bezpieczną i wystarczającą precyzją.
+        # Zaokrąglamy do 6 miejsc po przecinku, co jest bezpieczną i wystarczającą precyzją dla BigQuery.
         
         transformed_data = {
             "alert_id": alert_id,
@@ -82,9 +101,9 @@ def log_real_trade_result(enriched_pnl_data: Dict[str, Any]):
             "qty": float(qty),
             "leverage": int(float(enriched_pnl_data.get("leverage", 1))),
             "avg_entry_price": float(avg_entry_price),
-            "avg_exit_price": float(Decimal(enriched_pnl_data.get("avgExitPrice", "0.0"))),
+            "avg_exit_price": float(avg_exit_price),
             "entry_value_usdt": float(round(qty * avg_entry_price, 6)),
-            "exit_value_usdt": float(round(qty * Decimal(enriched_pnl_data.get("avgExitPrice", "0.0")), 6)),
+            "exit_value_usdt": float(round(qty * avg_exit_price, 6)),
             "gross_pnl_usdt": float(round(net_pnl + commission, 6)),
             "commission_usdt": float(commission),
             "net_pnl_usdt": float(net_pnl),
