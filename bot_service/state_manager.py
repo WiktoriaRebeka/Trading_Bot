@@ -121,3 +121,33 @@ def delete_active_order_by_id(order_id: str):
         logger.info(f"[{order_id}] Pomyślnie usunięto przetworzone zlecenie z kolekcji active_orders.")
     except Exception as e:
         logger.error(f"Błąd podczas usuwania aktywnego zlecenia {order_id}: {e}", exc_info=True)
+
+# Należy dodać tę nową funkcję w pliku bot_service/state_manager.py
+
+def get_active_order_by_symbol(symbol: str) -> Optional[Dict[str, Any]]:
+    """
+    Pobiera dane aktywnego zlecenia na podstawie jego symbolu.
+    Zakłada, że może istnieć tylko jedno aktywne zlecenie na dany symbol.
+    """
+    try:
+        # Zmieniamy nazwę symbolu z formatu Bybit (np. KASUSDT) na nasz wewnętrzny format (np. KASUSDT.P)
+        # jeśli jest taka potrzeba. Na podstawie logów wydaje się, że symbol z PnL jest bez ".P",
+        # a w active_orders zapisujemy z ".P". Ta logika to uwzględni.
+        symbol_with_p = symbol if symbol.endswith('.P') else f"{symbol}.P"
+
+        docs_stream = _get_db().collection(constants.ACTIVE_ORDERS_COLLECTION) \
+            .where('symbol', '==', symbol_with_p) \
+            .limit(1) \
+            .stream()
+        
+        doc = next(docs_stream, None)
+        
+        if doc and doc.exists:
+            logger.info(f"Znaleziono dopasowanie w active_orders dla symbolu {symbol_with_p} (ID dokumentu: {doc.id})")
+            return doc.to_dict()
+        
+        logger.warning(f"Nie znaleziono dokumentu w active_orders dla symbolu {symbol_with_p}")
+        return None
+    except Exception as e:
+        logger.error(f"Błąd podczas pobierania aktywnego zlecenia dla symbolu {symbol}: {e}", exc_info=True)
+        return None
