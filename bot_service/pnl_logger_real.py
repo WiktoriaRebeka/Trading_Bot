@@ -50,21 +50,35 @@ def log_real_trade_result(enriched_pnl_data: Dict[str, Any]):
     """Transformuje wzbogacone dane PnL z Bybit, oblicza dodatkowe metryki i zapisuje je do BigQuery."""
     
     try:
+        # --- POPRAWKA #1: Bardziej odporna logika określania kierunku ---
+        # Pole 'side' z historii PnL oznacza stronę oryginalnej pozycji.
+        # 'Buy' -> LONG, 'Sell' -> SHORT. Dodajemy jawne sprawdzenie obu wartości.
+        side = enriched_pnl_data.get("side")
+        if side == "Buy":
+            direction = "LONG"
+        elif side == "Sell":
+            direction = "SHORT"
+        else:
+            logger.warning(f"Nieznana wartość 'side' ({side}) w rekordzie PnL. Pomijam kierunek.", extra={"json_fields": {"pnl_data": enriched_pnl_data}})
+            direction = "UNKNOWN"
+
         # Używamy Decimal do precyzyjnych obliczeń finansowych
         qty = Decimal(enriched_pnl_data.get("qty", "0.0"))
         avg_entry_price = Decimal(enriched_pnl_data.get("avgEntryPrice", "0.0"))
         avg_exit_price = Decimal(enriched_pnl_data.get("avgExitPrice", "0.0"))
         
-        # Obliczamy wymagane wartości
+        # --- POPRAWKA #2: Poprawne odczytanie prowizji i PnL Netto ---
+        # Używamy `or "0.0"` aby obsłużyć przypadki, gdy pole jest None lub puste.
+        commission = Decimal(enriched_pnl_data.get("cumCommission") or "0.0")
+        net_pnl = Decimal(enriched_pnl_data.get("closedPnl") or "0.0")
+
+        # Obliczamy wartości pozycji
         entry_value = qty * avg_entry_price
         exit_value = qty * avg_exit_price
         
-        # Dla pozycji SHORT, PnL brutto to (wartość wejścia - wartość wyjścia)
-        direction = "LONG" if enriched_pnl_data.get("side") == "Buy" else "SHORT"
-        if direction == "SHORT":
-            gross_pnl = entry_value - exit_value
-        else: # LONG
-            gross_pnl = exit_value - entry_value
+        # --- POPRAWKA #3: Bardziej niezawodne obliczanie PnL Brutto ---
+        # PnL Brutto = PnL Netto + Prowizja. To jest matematycznie pewne i odporne na błędy zaokrągleń.
+        gross_pnl = net_pnl + commission
 
         transformed_data = {
             "alert_id": enriched_pnl_data.get("alert_id", "unknown"),
@@ -78,8 +92,8 @@ def log_real_trade_result(enriched_pnl_data: Dict[str, Any]):
             "entry_value_usdt": float(entry_value),
             "exit_value_usdt": float(exit_value),
             "gross_pnl_usdt": float(gross_pnl),
-            "commission_usdt": float(Decimal(enriched_pnl_data.get("cumCommission", "0.0"))),
-            "net_pnl_usdt": float(Decimal(enriched_pnl_data.get("closedPnl", "0.0"))),
+            "commission_usdt": float(commission), # Używamy poprawnie odczytanej wartości
+            "net_pnl_usdt": float(net_pnl), # Używamy poprawnie odczytanej wartości
             "exit_type": enriched_pnl_data.get("exitType"),
             "timestamp_entry": datetime.fromtimestamp(int(enriched_pnl_data.get("createdTime")) / 1000, tz=timezone.utc).isoformat(),
             "timestamp_close": datetime.fromtimestamp(int(enriched_pnl_data.get("updatedTime")) / 1000, tz=timezone.utc).isoformat(),
