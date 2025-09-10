@@ -40,7 +40,6 @@ def log_real_trade_result(enriched_pnl_data: Dict[str, Any]):
     
     alert_id = enriched_pnl_data.get("alert_id", "unknown")
     
-    # KROK 1: Pobranie danych oryginalnego alertu
     original_alert_data = state_manager.get_alert_data_by_id(alert_id)
     if not original_alert_data:
         logger.error(f"Nie można obliczyć R:R, ponieważ nie znaleziono oryginalnego alertu o ID: {alert_id}")
@@ -62,7 +61,6 @@ def log_real_trade_result(enriched_pnl_data: Dict[str, Any]):
         commission = Decimal(enriched_pnl_data.get("cumCommission") or "0.0")
         net_pnl = Decimal(enriched_pnl_data.get("closedPnl") or "0.0")
 
-        # KROK 2: Obliczenia Rzeczywistego Ryzyka i R:R
         planned_risk_usdt = Decimal("0.0")
         realized_rrr = Decimal("0.0")
 
@@ -73,6 +71,9 @@ def log_real_trade_result(enriched_pnl_data: Dict[str, Any]):
             if planned_risk_usdt > 0:
                 realized_rrr = net_pnl / planned_risk_usdt
         
+        # === KLUCZOWA POPRAWKA: Zaokrąglanie wartości przed konwersją na float ===
+        # Zaokrąglamy do 6 miejsc po przecinku, co jest bezpieczną i wystarczającą precyzją.
+        
         transformed_data = {
             "alert_id": alert_id,
             "order_id": enriched_pnl_data.get("orderId", "unknown"),
@@ -82,18 +83,17 @@ def log_real_trade_result(enriched_pnl_data: Dict[str, Any]):
             "leverage": int(float(enriched_pnl_data.get("leverage", 1))),
             "avg_entry_price": float(avg_entry_price),
             "avg_exit_price": float(Decimal(enriched_pnl_data.get("avgExitPrice", "0.0"))),
-            "entry_value_usdt": float(qty * avg_entry_price),
-            "exit_value_usdt": float(qty * Decimal(enriched_pnl_data.get("avgExitPrice", "0.0"))),
-            "gross_pnl_usdt": float(net_pnl + commission),
+            "entry_value_usdt": float(round(qty * avg_entry_price, 6)),
+            "exit_value_usdt": float(round(qty * Decimal(enriched_pnl_data.get("avgExitPrice", "0.0")), 6)),
+            "gross_pnl_usdt": float(round(net_pnl + commission, 6)),
             "commission_usdt": float(commission),
             "net_pnl_usdt": float(net_pnl),
             "exit_type": enriched_pnl_data.get("exitType"),
             "timestamp_entry": datetime.fromtimestamp(int(enriched_pnl_data.get("createdTime")) / 1000, tz=timezone.utc).isoformat(),
             "timestamp_close": datetime.fromtimestamp(int(enriched_pnl_data.get("updatedTime")) / 1000, tz=timezone.utc).isoformat(),
-            # KROK 3: Dodanie nowych pól do zapisu
             "sl_price": float(sl_price_from_alert),
-            "planned_risk_usdt": float(planned_risk_usdt),
-            "realized_rrr": float(realized_rrr)
+            "planned_risk_usdt": float(round(planned_risk_usdt, 6)),
+            "realized_rrr": float(round(realized_rrr, 6)) # <--- To jest bezpośrednia naprawa błędu
         }
     except Exception as e:
         logger.error(f"Błąd podczas transformacji danych PnL dla alertu {alert_id}: {e}", exc_info=True, extra={"json_fields": {"pnl_data": enriched_pnl_data}})
