@@ -4,7 +4,7 @@ from typing import Dict, Any
 from datetime import datetime, timezone
 from google.cloud import bigquery
 from decimal import Decimal
-
+from bot_service import state_manager 
 from bot_service.bigquery_logger import get_bigquery_client
 from shared_lib import constants
 
