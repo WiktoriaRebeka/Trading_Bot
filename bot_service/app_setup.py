@@ -1,6 +1,5 @@
 # Lokalizacja: bot_service/app_setup.py
 
-# Lokalizacja: bot_service/app_setup.py
 import logging
 import os
 import uuid

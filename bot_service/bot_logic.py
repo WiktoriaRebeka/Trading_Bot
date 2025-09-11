@@ -1,3 +1,4 @@
+
 # Lokalizacja: bot_service/bot_logic.py
 
 import logging
@@ -23,19 +24,23 @@ logger = logging.getLogger(__name__)
 
 
 def run_combined_cycle(executor: BybitExecutor):
-    """Główna, połączona pętla logiki."""
+    """
+    Główna, połączona pętla logiki. Wykonuje zarówno analizę, jak i logikę transakcyjną.
+    """
     logger.info("Uruchamiam połączony cykl analityczno-transakcyjny.")
-    
     last_ts = load_last_processed_timestamp("main_cycle_last_fetch_state")
     new_alerts, new_ts = fetch_new_alerts_since(last_ts)
 
     if new_alerts:
+        logger.info("Rozpoczynam przetwarzanie transakcyjne nowych alertów.")
         process_alerts_transactional(new_alerts, executor)
+        logger.info("Rozpoczynam przetwarzanie analityczne nowych alertów.")
         process_new_alerts_analytical(new_alerts)
+        
         if new_ts and (not last_ts or new_ts > last_ts):
             save_last_processed_timestamp(new_ts, "main_cycle_last_fetch_state")
-    
     _run_analysis_of_existing_cases()
+
     logger.info("Zakończono połączony cykl analityczno-transakcyjny.")
 
 def round_price_by_tick(price: float, tick_size: str, direction: str) -> float:
@@ -98,7 +103,7 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
     return True
 
 def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitExecutor):
-    """Przetwarza alerty, składając zlecenia z wbudowanym TP/SL."""
+    """Przetwarza alerty, składając realne zlecenia na giełdzie z użyciem orderLinkId."""
     if not alerts:
         return
 
@@ -108,28 +113,28 @@ def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitEx
             alert = AlertData.model_validate(alert_dict)
             symbol = alert.symbol
             
-            if executor.has_open_position(symbol):
-                logger.info(f"[{symbol}] ZABEZPIECZENIE: Wykryto otwartą pozycję. Nowy alert ({alert_id}) zostaje zignorowany.")
-                continue
-            
             if not _correct_and_validate_alert(alert):
                 continue
-
+            if executor.has_open_position(symbol):
+                continue
+            
             executor.cancel_all_open_orders_for_symbol(symbol)
             
             rule = executor.get_instrument_info(symbol)
-            if not rule: continue
+            if not rule or "tickSize" not in rule or "qtyStep" not in rule:
+                continue
             
             tick_size, qty_step = rule["tickSize"], rule["qtyStep"]
 
+            # === ZMIENIONA LOGIKA ZAOKRĄGLANIA ===
             if alert.direction == 'LONG':
                 alert.entry = round_price_by_tick(alert.entry, tick_size, 'up')
                 alert.sl = round_price_by_tick(alert.sl, tick_size, 'down')
-                alert.tp_3_0 = round_price_by_tick(alert.tp_3_0, tick_size, 'up')
+                alert.tp_2_0 = round_price_by_tick(alert.tp_2_0, tick_size, 'up')
             elif alert.direction == 'SHORT':
                 alert.entry = round_price_by_tick(alert.entry, tick_size, 'down')
                 alert.sl = round_price_by_tick(alert.sl, tick_size, 'up')
-                alert.tp_3_0 = round_price_by_tick(alert.tp_3_0, tick_size, 'down')
+                alert.tp_2_0 = round_price_by_tick(alert.tp_2_0, tick_size, 'down')
 
             risk_usdt = float(os.getenv("RISK_PER_TRADE_USDT", "2.5"))
             final_qty = calculate_position_size(
@@ -137,28 +142,34 @@ def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitEx
                 sl_price=alert.sl, qty_step=qty_step
             )
 
-            if not final_qty or final_qty <= 0: continue
+            if not final_qty or final_qty <= 0:
+                continue
 
             client_order_id = f"tradebot_{alert_id.replace('-', '')[:16]}_{int(datetime.now().timestamp())}"
-            
             order_params = {
                 "symbol": symbol, "side": alert.direction, "qty": final_qty,
-                "price": alert.entry, "stopLoss": alert.sl, 
-                "takeProfit": alert.tp_3_0,
+                "price": alert.entry, "stopLoss": alert.sl, "takeProfit": alert.tp_2_0,
                 "orderLinkId": client_order_id
             }
-            
             order_response = executor.place_limit_order(order_params)
 
             if order_response and order_response.get("orderId"):
                 order_id = order_response.get("orderId")
                 state_manager.save_active_order(
                     order_id,
-                    {"symbol": symbol, "orderId": order_id, "status": "FILLED", "alert_id": alert_id}
+                    {
+                        "symbol": symbol, 
+                        "orderId": order_id,
+                        "orderLinkId": client_order_id,
+                        "status": "NEW", 
+                        "alert_id": alert_id
+                    }
                 )
         except Exception as e:
             logger.error(f"Nieoczekiwany błąd podczas transakcyjnego przetwarzania alertu {alert_id}: {e}", exc_info=True)
 
+
+# Należy zastąpić całą funkcję log_closed_positions_pnl w pliku bot_service/bot_logic.py
 
 def log_closed_positions_pnl(executor: BybitExecutor) -> int:
     """
@@ -430,6 +441,3 @@ def _handle_triggered_case(case_doc_snapshot: Any, kline: Kline):
         if len(results) - len(unresolved_targets) + len(resolved_scenarios) >= 6:
             logger.info(f"[{case_id}] Wszystkie 6 scenariuszy rozstrzygnięte. Finalne usunięcie teczki.")
             state_manager.delete_case_by_id(case_id)
-
-
-

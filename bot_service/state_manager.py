@@ -165,16 +165,3 @@ def get_alert_data_by_id(alert_id: str) -> Optional[Dict[str, Any]]:
     except Exception as e:
         logger.error(f"Błąd podczas pobierania danych alertu {alert_id}: {e}", exc_info=True)
         return None
-
-def get_orders_by_status(status: str) -> Iterable[DocumentSnapshot]:
-    """Pobiera wszystkie zlecenia o danym statusie."""
-    return _get_db().collection(constants.ACTIVE_ORDERS_COLLECTION).where('status', '==', status).stream()
-
-def update_active_order(order_id: str, updates: Dict[str, Any]):
-    """Aktualizuje dokument aktywnego zlecenia."""
-    try:
-        doc_ref = _get_db().collection(constants.ACTIVE_ORDERS_COLLECTION).document(order_id)
-        doc_ref.update(updates)
-        logger.info(f"Zaktualizowano aktywne zlecenie {order_id} z danymi: {updates}")
-    except Exception as e:
-        logger.error(f"Błąd podczas aktualizacji zlecenia {order_id}: {e}", exc_info=True)
