@@ -75,6 +75,7 @@ def _monitor_and_manage_positions(executor: BybitExecutor):
                 side = "Sell" if alert_data.get('direction') == "LONG" else "Buy"
                 qty = str(order_status_data.get('cumExecQty'))
                 
+                # Zlecenie Take Profit (LIMIT) - pozostaje bez zmian
                 tp_params = {
                     "category": "linear", "symbol": symbol.replace('.P', ''),
                     "side": side, "orderType": "Limit", "qty": qty,
@@ -85,10 +86,13 @@ def _monitor_and_manage_positions(executor: BybitExecutor):
                     "orderLinkId": f"tp_{alert_id[:16]}"
                 }
 
+                # === KLUCZOWA ZMIANA: Stop Loss wraca na typ MARKET dla bezpieczeństwa ===
                 sl_params = {
                     "category": "linear", "symbol": symbol.replace('.P', ''),
-                    "side": side, "orderType": "Limit", "price": str(alert_data.get('sl')),
-                    "qty": qty, "triggerPrice": str(alert_data.get('sl')),
+                    "side": side,
+                    "orderType": "Market", # <--- ZMIANA Z POWROTEM NA "Market"
+                    "qty": qty,
+                    "triggerPrice": str(alert_data.get('sl')),
                     "triggerDirection": 2 if side == "Sell" else 1,
                     "reduceOnly": True, "closeOnTrigger": True,
                     "orderLinkId": f"sl_{alert_id[:16]}"
@@ -105,7 +109,7 @@ def _monitor_and_manage_positions(executor: BybitExecutor):
                         "sl_order_id": sl_response.get('orderId')
                     }
                     state_manager.update_active_order(order_id, updates)
-                    logger.info(f"[{symbol}] Pomyślnie ustawiono TP (LIMIT) i SL (LIMIT) dla pozycji.")
+                    logger.info(f"[{symbol}] Pomyślnie ustawiono TP (LIMIT) i SL (MARKET) dla pozycji.")
                 else:
                     logger.error(f"[{symbol}] Nie udało się ustawić TP/SL. Zamykam pozycję awaryjnie.")
                     executor.close_position_market(symbol, qty, side)
