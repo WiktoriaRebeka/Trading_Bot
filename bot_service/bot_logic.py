@@ -38,7 +38,6 @@ def run_combined_cycle(executor: BybitExecutor):
     _run_analysis_of_existing_cases()
     logger.info("Zakończono połączony cykl analityczno-transakcyjny.")
 
-
 def round_price_by_tick(price: float, tick_size: str, direction: str) -> float:
     """
     Zaokrągla cenę do najbliższego kroku (ticka) w dół ('down') lub w górę ('up').
