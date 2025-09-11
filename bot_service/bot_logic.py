@@ -26,8 +26,6 @@ def run_combined_cycle(executor: BybitExecutor):
     """Główna, połączona pętla logiki."""
     logger.info("Uruchamiam połączony cykl analityczno-transakcyjny.")
     
-    _monitor_and_manage_positions(executor)
-
     last_ts = load_last_processed_timestamp("main_cycle_last_fetch_state")
     new_alerts, new_ts = fetch_new_alerts_since(last_ts)
 
@@ -40,83 +38,6 @@ def run_combined_cycle(executor: BybitExecutor):
     _run_analysis_of_existing_cases()
     logger.info("Zakończono połączony cykl analityczno-transakcyjny.")
 
-def _monitor_and_manage_positions(executor: BybitExecutor):
-    """Sprawdza status zleceń 'NEW' i ustawia TP/SL dla tych, które zostały zrealizowane."""
-    logger.info("[POSITION_MANAGER] Rozpoczynam cykl monitorowania zleceň.")
-    new_orders = state_manager.get_orders_by_status('NEW')
-    
-    active_orders_list = list(new_orders)
-    if not active_orders_list:
-        logger.info("[POSITION_MANAGER] Brak nowych zleceń do monitorowania.")
-        return
-    
-    logger.info(f"[POSITION_MANAGER] Znaleziono {len(active_orders_list)} zleceń ze statusem 'NEW'.")
-
-    for order_doc in active_orders_list:
-        order_data = order_doc.to_dict()
-        order_id = order_data.get('orderId')
-        symbol = order_data.get('symbol')
-        alert_id = order_data.get('alert_id')
-
-        try:
-            order_status_data = executor.get_order_status(order_id)
-            if not order_status_data:
-                logger.warning(f"[{symbol}] Nie udało się pobrać statusu dla zlecenia {order_id}.")
-                continue
-
-            if order_status_data.get('orderStatus') == 'Filled':
-                logger.info(f"[{symbol}] SUKCES! Zlecenie wejścia {order_id} zostało zrealizowane. Ustawiam TP/SL.")
-                
-                alert_data = state_manager.get_alert_data_by_id(alert_id)
-                if not alert_data:
-                    logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Nie można ustawić TP/SL, ponieważ nie znaleziono alertu {alert_id}!")
-                    continue
-
-                side = "Sell" if alert_data.get('direction') == "LONG" else "Buy"
-                qty = str(order_status_data.get('cumExecQty'))
-                
-                # Zlecenie Take Profit (LIMIT) - pozostaje bez zmian
-                tp_params = {
-                    "category": "linear", "symbol": symbol.replace('.P', ''),
-                    "side": side, "orderType": "Limit", "qty": qty,
-                    "triggerPrice": str(alert_data.get('tp_3_0')),
-                    "price": str(alert_data.get('tp_3_0')),
-                    "triggerDirection": 1 if side == "Sell" else 2,
-                    "reduceOnly": True, "closeOnTrigger": True,
-                    "orderLinkId": f"tp_{alert_id[:16]}"
-                }
-
-                # === KLUCZOWA ZMIANA: Stop Loss wraca na typ MARKET dla bezpieczeństwa ===
-                sl_params = {
-                    "category": "linear", "symbol": symbol.replace('.P', ''),
-                    "side": side,
-                    "orderType": "Market", # <--- ZMIANA Z POWROTEM NA "Market"
-                    "qty": qty,
-                    "triggerPrice": str(alert_data.get('sl')),
-                    "triggerDirection": 2 if side == "Sell" else 1,
-                    "reduceOnly": True, "closeOnTrigger": True,
-                    "orderLinkId": f"sl_{alert_id[:16]}"
-                }
-                
-                tp_response = executor.place_conditional_order(tp_params)
-                sl_response = executor.place_conditional_order(sl_params)
-
-                if tp_response and sl_response:
-                    updates = {
-                        "status": "ACTIVE_POSITION",
-                        "avg_entry_price": float(order_status_data.get('avgPrice', '0.0')),
-                        "tp_order_id": tp_response.get('orderId'),
-                        "sl_order_id": sl_response.get('orderId')
-                    }
-                    state_manager.update_active_order(order_id, updates)
-                    logger.info(f"[{symbol}] Pomyślnie ustawiono TP (LIMIT) i SL (MARKET) dla pozycji.")
-                else:
-                    logger.error(f"[{symbol}] Nie udało się ustawić TP/SL. Zamykam pozycję awaryjnie.")
-                    executor.close_position_market(symbol, qty, side)
-                    state_manager.delete_active_order_by_id(order_id)
-
-        except Exception as e:
-            logger.error(f"Błąd podczas monitorowania zlecenia {order_id}: {e}", exc_info=True)
 
 def round_price_by_tick(price: float, tick_size: str, direction: str) -> float:
     """
@@ -178,7 +99,7 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
     return True
 
 def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitExecutor):
-    """Przetwarza alerty, składając zlecenia wejścia BEZ zintegrowanego TP/SL."""
+    """Przetwarza alerty, składając zlecenia z wbudowanym TP/SL."""
     if not alerts:
         return
 
@@ -195,7 +116,6 @@ def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitEx
             if not _correct_and_validate_alert(alert):
                 continue
 
-            logger.info(f"[{symbol}] Brak otwartej pozycji. Anuluję wszystkie oczekujące zlecenia LIMIT przed złożeniem nowego.")
             executor.cancel_all_open_orders_for_symbol(symbol)
             
             rule = executor.get_instrument_info(symbol)
@@ -221,17 +141,21 @@ def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitEx
             if not final_qty or final_qty <= 0: continue
 
             client_order_id = f"tradebot_{alert_id.replace('-', '')[:16]}_{int(datetime.now().timestamp())}"
+            
             order_params = {
                 "symbol": symbol, "side": alert.direction, "qty": final_qty,
-                "price": alert.entry, "orderLinkId": client_order_id
+                "price": alert.entry, "stopLoss": alert.sl, 
+                "takeProfit": alert.tp_3_0,
+                "orderLinkId": client_order_id
             }
+            
             order_response = executor.place_limit_order(order_params)
 
             if order_response and order_response.get("orderId"):
                 order_id = order_response.get("orderId")
                 state_manager.save_active_order(
                     order_id,
-                    {"symbol": symbol, "orderId": order_id, "status": "NEW", "alert_id": alert_id}
+                    {"symbol": symbol, "orderId": order_id, "status": "FILLED", "alert_id": alert_id}
                 )
         except Exception as e:
             logger.error(f"Nieoczekiwany błąd podczas transakcyjnego przetwarzania alertu {alert_id}: {e}", exc_info=True)

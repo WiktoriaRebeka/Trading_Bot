@@ -103,7 +103,7 @@ class BybitExecutor:
             return None
 
     def place_limit_order(self, order_params: Dict[str, Any]) -> Optional[Dict[str, str]]:
-        """Składa zlecenie wejścia LIMIT, używając opcji PostOnly (BEZ TP/SL)."""
+        """Składa zlecenie wejścia LIMIT z zaawansowanymi opcjami TP/SL."""
         symbol = order_params.get('symbol')
         api_symbol = symbol.replace('.P', '')
         side_map = {"LONG": "Buy", "SHORT": "Sell"}
@@ -116,10 +116,18 @@ class BybitExecutor:
             "qty": str(order_params['qty']),
             "price": str(order_params['price']),
             "orderLinkId": order_params.get('orderLinkId'),
-            "timeInForce": "PostOnly"
+            "timeInForce": "PostOnly",
+            
+            # === NOWA, KLUCZOWA LOGIKA TP/SL ===
+            "tpslMode": "Partial", # Umożliwia różne typy zleceň dla TP i SL
+            "takeProfit": str(order_params['takeProfit']),
+            "tpOrderType": "Limit", # Ustawiamy TP jako zlecenie LIMIT
+            "tpLimitPrice": str(order_params['takeProfit']), # Cena dla zlecenia TP LIMIT
+            "stopLoss": str(order_params['stopLoss']),
+            "slOrderType": "Market" # Ustawiamy SL jako zlecenie MARKET
         }
         
-        logger.info(f"[{symbol}] Wysyłanie zlecenia Post-Only LIMIT do Bybit: {payload}")
+        logger.info(f"[{symbol}] Wysyłanie zlecenia Post-Only LIMIT z zaawansowanym TP/SL: {payload}")
         try:
             result = self._send_request("POST", "/v5/order/create", params=payload)
             order_id = result.get("orderId")
@@ -128,8 +136,11 @@ class BybitExecutor:
                 return {"orderId": order_id, "orderLinkId": result.get("orderLinkId")}
             return None
         except BybitAPIError as e:
-            if e.ret_code == 110004:
-                logger.warning(f"[{symbol}] Zlecenie Post-Only odrzucone (alert spóźniony). To oczekiwane zachowanie.")
+            if e.ret_code == 110004: # Post-Only rejected
+                logger.warning(f"[{symbol}] Zlecenie Post-Only odrzucone (alert spóźniony).")
+                return None
+            if e.ret_code == 10001: # Liquidation error
+                logger.error(f"[{symbol}] Zlecenie odrzucone przez giełdę z powodu ryzyka likwidacji (kod 10001).")
                 return None
             logger.critical(f"[{symbol}] Błąd API podczas składania zlecenia: {e}", exc_info=True)
             return None
