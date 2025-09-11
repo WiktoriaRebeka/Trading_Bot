@@ -111,6 +111,11 @@ def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitEx
         alert_id = alert_dict.get('id', 'unknown')
         try:
             alert = AlertData.model_validate(alert_dict)
+            
+            # === KLUCZOWA POPRAWKA: Ujednolicenie symbolu na początku ===
+            if not alert.symbol.endswith('.P'):
+                alert.symbol += '.P'
+            
             symbol = alert.symbol
             
             if not _correct_and_validate_alert(alert):
@@ -257,6 +262,10 @@ def process_new_alerts_analytical(newly_fetched_alerts: List[Dict[str, Any]]):
         try:
             alert_data_model = AlertData.model_validate(alert_dict)
             
+            # === KLUCZOWA POPRAWKA: Ujednolicenie symbolu na początku ===
+            if not alert_data_model.symbol.endswith('.P'):
+                alert_data_model.symbol += '.P'
+
             symbol = alert_data_model.symbol
             rule = instrument_rules.get(symbol)
 

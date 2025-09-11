@@ -26,12 +26,16 @@ async def _fetch_kline_for_symbol(session: aiohttp.ClientSession, symbol: str, c
                 if data.get("retCode") == 0 and data.get("result") and data["result"].get("list"):
                     kline_list = data["result"]["list"]
                     target_kline = kline_list[1] if len(kline_list) > 1 else kline_list[0]
+                    
+                    # === KLUCZOWA POPRAWKA: Zapewnienie spójności nazwy symbolu ===
+                    symbol_with_p = symbol if symbol.endswith('.P') else f"{symbol}.P"
+                    
                     return {
-                        "symbol": symbol, 
+                        "symbol": symbol_with_p, # <--- Zawsze zwracamy symbol z .P
                         "high": float(target_kline[2]), 
                         "low": float(target_kline[3]), 
                         "close": float(target_kline[4]), 
-                        "timestamp": int(target_kline[0]) # <-- POPRAWIONA NAZWA POLA
+                        "timestamp": int(target_kline[0])
                     }
                 else:
                     logger.warning(f"API Bybit zwróciło błąd: {data.get('retMsg', 'Brak wiadomości')}", extra=log_extra)
