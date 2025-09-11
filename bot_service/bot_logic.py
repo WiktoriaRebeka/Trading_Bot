@@ -103,7 +103,12 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
     return True
 
 def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitExecutor):
-    """Przetwarza alerty, składając realne zlecenia na giełdzie z użyciem orderLinkId."""
+    """
+    Przetwarza alerty, składając zlecenia w nowym, trzystopniowym procesie:
+    1. Zlecenie wejściowe LIMIT.
+    2. Warunkowe zlecenie TP typu LIMIT (precyzyjne wyjście).
+    3. Warunkowe zlecenie SL typu MARKET (bezpieczne wyjście).
+    """
     if not alerts:
         return
 
@@ -112,7 +117,6 @@ def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitEx
         try:
             alert = AlertData.model_validate(alert_dict)
             
-            # === KLUCZOWA POPRAWKA: Ujednolicenie symbolu na początku ===
             if not alert.symbol.endswith('.P'):
                 alert.symbol += '.P'
             
@@ -121,17 +125,19 @@ def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitEx
             if not _correct_and_validate_alert(alert):
                 continue
             if executor.has_open_position(symbol):
+                logger.warning(f"[{symbol}] Wykryto istniejącą pozycję. Pomijam nowy alert, aby uniknąć konfliktu.")
                 continue
             
+            # Anulowanie starych zleceń jest teraz jeszcze ważniejsze
             executor.cancel_all_open_orders_for_symbol(symbol)
             
             rule = executor.get_instrument_info(symbol)
             if not rule or "tickSize" not in rule or "qtyStep" not in rule:
+                logger.error(f"[{symbol}] Nie udało się pobrać zasad instrumentu. Pomijam alert.")
                 continue
             
             tick_size, qty_step = rule["tickSize"], rule["qtyStep"]
 
-            # === ZMIENIONA LOGIKA ZAOKRĄGLANIA ===
             if alert.direction == 'LONG':
                 alert.entry = round_price_by_tick(alert.entry, tick_size, 'up')
                 alert.sl = round_price_by_tick(alert.sl, tick_size, 'down')
@@ -148,33 +154,78 @@ def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitEx
             )
 
             if not final_qty or final_qty <= 0:
+                logger.warning(f"[{symbol}] Obliczona wielkość pozycji wynosi zero lub mniej. Pomijam alert.")
                 continue
 
-            client_order_id = f"tradebot_{alert_id.replace('-', '')[:16]}_{int(datetime.now().timestamp())}"
-            order_params = {
-                "symbol": symbol, "side": alert.direction, "qty": final_qty,
-                "price": alert.entry, "stopLoss": alert.sl, "takeProfit": alert.tp_2_0,
-                "orderLinkId": client_order_id
-            }
-            order_response = executor.place_limit_order(order_params)
+            # === NOWA, TRZYSTOPNIOWA LOGIKA SKŁADANIA ZLECEŃ ===
 
-            if order_response and order_response.get("orderId"):
-                order_id = order_response.get("orderId")
-                state_manager.save_active_order(
-                    order_id,
-                    {
-                        "symbol": symbol, 
-                        "orderId": order_id,
-                        "orderLinkId": client_order_id,
-                        "status": "NEW", 
-                        "alert_id": alert_id
-                    }
-                )
+            # KROK 1: Złóż zlecenie wejściowe (bez TP/SL)
+            entry_order_id = f"entry_{alert_id.replace('-', '')[:12]}_{int(datetime.now().timestamp())}"
+            entry_params = {
+                "symbol": symbol, 
+                "side": alert.direction, 
+                "qty": final_qty,
+                "price": alert.entry, 
+                "orderLinkId": entry_order_id
+            }
+            entry_response = executor.place_limit_order(entry_params)
+
+            if not entry_response or not entry_response.get("orderId"):
+                logger.error(f"[{symbol}] Nie udało się złożyć zlecenia wejściowego. Przerywam proces dla tego alertu.")
+                continue
+
+            logger.info(f"[{symbol}] Zlecenie wejściowe pomyślnie złożone. ID: {entry_response.get('orderId')}. Składam zlecenia wyjściowe.")
+
+            # KROK 2: Złóż warunkowe zlecenie Take Profit (jako LIMIT)
+            tp_params = {
+                "symbol": symbol,
+                "orderType": "Limit",
+                "position_side": alert.direction,
+                "qty": final_qty,
+                "price": alert.tp_2_0,
+                "triggerPrice": alert.tp_2_0,
+                "triggerDirection": "Rising" if alert.direction == "LONG" else "Falling"
+            }
+            tp_response = executor.place_conditional_order(tp_params)
+            if tp_response:
+                logger.info(f"[{symbol}] Zlecenie warunkowe TP (LIMIT) pomyślnie złożone.")
+            else:
+                logger.error(f"[{symbol}] Nie udało się złożyć zlecenia warunkowego TP. Anuluję zlecenie wejściowe dla bezpieczeństwa.")
+                # Można dodać logikę anulowania zlecenia wejściowego w razie błędu
+                continue
+
+            # KROK 3: Złóż warunkowe zlecenie Stop Loss (jako MARKET)
+            sl_params = {
+                "symbol": symbol,
+                "orderType": "Market",
+                "position_side": alert.direction,
+                "qty": final_qty,
+                "triggerPrice": alert.sl,
+                "triggerDirection": "Falling" if alert.direction == "LONG" else "Rising"
+            }
+            sl_response = executor.place_conditional_order(sl_params)
+            if sl_response:
+                logger.info(f"[{symbol}] Zlecenie warunkowe SL (MARKET) pomyślnie złożone.")
+            else:
+                logger.error(f"[{symbol}] Nie udało się złożyć zlecenia warunkowego SL. Anuluję zlecenie wejściowe dla bezpieczeństwa.")
+                # Można dodać logikę anulowania zlecenia wejściowego w razie błędu
+                continue
+
+            # Zapisujemy do Firestore tylko informacje o zleceniu wejściowym.
+            # Logika PnL i tak dopasowuje pozycje po symbolu, więc to wystarczy.
+            state_manager.save_active_order(
+                entry_response.get("orderId"),
+                {
+                    "symbol": symbol, 
+                    "orderId": entry_response.get("orderId"),
+                    "orderLinkId": entry_order_id,
+                    "status": "NEW", 
+                    "alert_id": alert_id
+                }
+            )
         except Exception as e:
             logger.error(f"Nieoczekiwany błąd podczas transakcyjnego przetwarzania alertu {alert_id}: {e}", exc_info=True)
 
-
-# Należy zastąpić całą funkcję log_closed_positions_pnl w pliku bot_service/bot_logic.py
 
 def log_closed_positions_pnl(executor: BybitExecutor) -> int:
     """

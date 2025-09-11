@@ -103,12 +103,18 @@ class BybitExecutor:
         except (RequestException, BybitAPIError):
             return None
 
+# ... (importy i reszta klasy BybitExecutor bez zmian) ...
+
     def place_limit_order(self, order_params: Dict[str, Any]) -> Optional[Dict[str, str]]:
         """
-        Składa jedno, kompletne zlecenie wejścia LIMIT (Post-Only)
-        z wbudowanym zleceniem Take Profit typu LIMIT i Stop Loss typu MARKET.
+        Składa proste zlecenie LIMIT (tylko wejście).
+        Ta funkcja NIE ustawia już TP/SL.
         """
         symbol = order_params.get('symbol')
+        if not symbol:
+            logger.error("Brak 'symbol' w parametrach zlecenia.")
+            return None
+            
         api_symbol = symbol.replace('.P', '')
         side_map = {"LONG": "Buy", "SHORT": "Sell"}
         
@@ -120,41 +126,82 @@ class BybitExecutor:
             "qty": str(order_params['qty']),
             "price": str(order_params['price']),
             "orderLinkId": order_params.get('orderLinkId'),
-            "timeInForce": "PostOnly",
-            
-            # === POPRAWIONA, OSTATECZNA LOGIKA TP/SL ===
-            # Ten parametr "odblokowuje" możliwość ustawiania różnych typów zleceň dla TP i SL.
-            "tpslMode": "Partial", 
-            
-            # Parametry dla Take Profit
-            "takeProfit": str(order_params['takeProfit']),
-            "tpOrderType": "Limit",  # <-- Zapewnia, że TP jest zleceniem LIMIT
-            "tpLimitPrice": str(order_params['takeProfit']), # <-- Cena dla zlecenia TP LIMIT
-            
-            # Parametry dla Stop Loss
-            "stopLoss": str(order_params['stopLoss']),
-            "slOrderType": "Market"  # <-- Zapewnia, że SL jest zleceniem MARKET dla bezpieczeństwa
+            "timeInForce": "GTC"
         }
         
-        # Uwaga: Parametr `reduceOnly` jest domyślnie i niejawnie stosowany przez Bybit 
-        # dla zintegrowanych zleceń TP/SL, więc nie trzeba go dodawać ręcznie.
+        logger.info(f"[{symbol}] Wysyłanie zlecenia WEJŚCIOWEGO do Bybit z parametrami: {payload}")
+        try:
+            result = self._send_request("POST", "/v5/order/create", params=payload)
+            order_id = result.get("orderId")
+            order_link_id = result.get("orderLinkId")
+
+            if order_id:
+                logger.info(f"[{symbol}] Zlecenie wejściowe pomyślnie złożone. Order ID: {order_id}, OrderLinkID: {order_link_id}")
+                return {
+                    "orderId": order_id,
+                    "orderLinkId": order_link_id
+                }
+            
+            logger.error(f"[{symbol}] API Bybit nie zwróciło orderId dla zlecenia wejściowego. Pełna odpowiedź 'result': {result}")
+            return None
+        except (RequestException, BybitAPIError) as e:
+            logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD podczas składania zlecenia wejściowego. Błąd: {e}", exc_info=True)
+            return None
+
+    def place_conditional_order(self, params: Dict[str, Any]) -> Optional[Dict[str, str]]:
+        """
+        Składa zaawansowane, warunkowe zlecenie wyjścia (TP lub SL).
+        Kluczowe jest użycie 'reduceOnly' dla bezpieczeństwa.
+        """
+        symbol = params.get('symbol')
+        if not symbol:
+            logger.error("Brak 'symbol' w parametrach zlecenia warunkowego.")
+            return None
+
+        api_symbol = symbol.replace('.P', '')
+        # Logika 'side' jest odwrócona, bo zamykamy pozycję
+        side_map = {"LONG": "Sell", "SHORT": "Buy"}
         
-        logger.info(f"[{symbol}] Wysyłanie zlecenia Post-Only LIMIT z zaawansowanym TP/SL: {payload}")
+        payload = {
+            "category": "linear",
+            "symbol": api_symbol,
+            "side": side_map[params['position_side']],
+            "orderType": params['orderType'], # "Limit" dla TP, "Market" dla SL
+            "qty": str(params['qty']),
+            
+            # --- KLUCZOWE PARAMETRY DLA ZLECEŃ WARUNKOWYCH ---
+            "triggerPrice": str(params['triggerPrice']),
+            # 1: Rising (cena rośnie do triggera), 2: Falling (cena spada do triggera)
+            "triggerDirection": 1 if params.get('triggerDirection') == 'Rising' else 2,
+            "reduceOnly": True, # KRYTYCZNE DLA BEZPIECZEŃSTWA!
+            "closeOnTrigger": True, # Dobra praktyka, anuluje inne zlecenia po aktywacji
+            "tpslMode": "Full" # Ustawia TP/SL dla całej pozycji
+        }
+
+        # Dla zleceń LIMIT (nasz precyzyjny TP) musimy podać cenę realizacji
+        if params['orderType'] == 'Limit':
+            if 'price' not in params:
+                logger.error("Zlecenie warunkowe typu LIMIT musi mieć zdefiniowany 'price'.")
+                return None
+            payload['price'] = str(params['price'])
+
+        logger.info(f"[{symbol}] Wysyłanie zlecenia WARUNKOWEGO ({params['orderType']}) do Bybit: {payload}")
         try:
             result = self._send_request("POST", "/v5/order/create", params=payload)
             order_id = result.get("orderId")
             if order_id:
-                logger.info(f"[{symbol}] Zlecenie pomyślnie złożone. Order ID: {order_id}")
-                return {"orderId": order_id, "orderLinkId": result.get("orderLinkId")}
+                logger.info(f"[{symbol}] Zlecenie warunkowe pomyślnie złożone. Order ID: {order_id}")
+                return {"orderId": order_id}
+            
+            logger.error(f"[{symbol}] API Bybit nie zwróciło orderId dla zlecenia warunkowego. Pełna odpowiedź 'result': {result}")
             return None
-        except BybitAPIError as e:
-            if e.ret_code in [110004, 10001]: # Obsługa błędów Post-Only i ryzyka likwidacji
-                logger.error(f"[{symbol}] Zlecenie odrzucone przez giełdę: {e.ret_msg} (Kod: {e.ret_code})")
-                return None
-            logger.critical(f"[{symbol}] Błąd API podczas składania zlecenia: {e}", exc_info=True)
-            return None
-        except RequestException as e:
-            logger.critical(f"[{symbol}] Błąd sieciowy podczas składania zlecenia: {e}", exc_info=True)
+        except (RequestException, BybitAPIError) as e:
+            # Kod 110045 oznacza, że identyczne zlecenie warunkowe już istnieje. To nie jest błąd krytyczny.
+            if isinstance(e, BybitAPIError) and e.ret_code == 110045:
+                logger.warning(f"[{symbol}] Zlecenie warunkowe już istnieje (kod 110045). Prawdopodobnie z poprzedniego cyklu. Ignoruję.")
+                return {"orderId": "already_exists"}
+            
+            logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD podczas składania zlecenia warunkowego. Błąd: {e}", exc_info=True)
             return None
 
     def cancel_all_open_orders_for_symbol(self, symbol: str) -> bool:
