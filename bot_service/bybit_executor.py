@@ -104,12 +104,11 @@ class BybitExecutor:
             return None
 
     def place_limit_order(self, order_params: Dict[str, Any]) -> Optional[Dict[str, str]]:
-        """Składa zlecenie LIMIT z jednoczesnym ustawieniem TP/SL, używając orderLinkId."""
+        """
+        Składa jedno, kompletne zlecenie wejścia LIMIT (Post-Only)
+        z wbudowanym zleceniem Take Profit typu LIMIT i Stop Loss typu MARKET.
+        """
         symbol = order_params.get('symbol')
-        if not symbol:
-            logger.error("Brak 'symbol' w parametrach zlecenia.")
-            return None
-            
         api_symbol = symbol.replace('.P', '')
         side_map = {"LONG": "Buy", "SHORT": "Sell"}
         
@@ -120,29 +119,42 @@ class BybitExecutor:
             "orderType": "Limit",
             "qty": str(order_params['qty']),
             "price": str(order_params['price']),
-            "takeProfit": str(order_params['takeProfit']),
-            "stopLoss": str(order_params['stopLoss']),
             "orderLinkId": order_params.get('orderLinkId'),
-            "timeInForce": "GTC"
+            "timeInForce": "PostOnly",
+            
+            # === POPRAWIONA, OSTATECZNA LOGIKA TP/SL ===
+            # Ten parametr "odblokowuje" możliwość ustawiania różnych typów zleceň dla TP i SL.
+            "tpslMode": "Partial", 
+            
+            # Parametry dla Take Profit
+            "takeProfit": str(order_params['takeProfit']),
+            "tpOrderType": "Limit",  # <-- Zapewnia, że TP jest zleceniem LIMIT
+            "tpLimitPrice": str(order_params['takeProfit']), # <-- Cena dla zlecenia TP LIMIT
+            
+            # Parametry dla Stop Loss
+            "stopLoss": str(order_params['stopLoss']),
+            "slOrderType": "Market"  # <-- Zapewnia, że SL jest zleceniem MARKET dla bezpieczeństwa
         }
         
-        logger.info(f"[{symbol}] Wysyłanie zlecenia do Bybit z parametrami: {payload}")
+        # Uwaga: Parametr `reduceOnly` jest domyślnie i niejawnie stosowany przez Bybit 
+        # dla zintegrowanych zleceń TP/SL, więc nie trzeba go dodawać ręcznie.
+        
+        logger.info(f"[{symbol}] Wysyłanie zlecenia Post-Only LIMIT z zaawansowanym TP/SL: {payload}")
         try:
             result = self._send_request("POST", "/v5/order/create", params=payload)
             order_id = result.get("orderId")
-            order_link_id = result.get("orderLinkId")
-
             if order_id:
-                logger.info(f"[{symbol}] Zlecenie pomyślnie złożone. Order ID: {order_id}, OrderLinkID: {order_link_id}")
-                return {
-                    "orderId": order_id,
-                    "orderLinkId": order_link_id
-                }
-            
-            logger.error(f"[{symbol}] API Bybit nie zwróciło orderId. Pełna odpowiedź 'result': {result}")
+                logger.info(f"[{symbol}] Zlecenie pomyślnie złożone. Order ID: {order_id}")
+                return {"orderId": order_id, "orderLinkId": result.get("orderLinkId")}
             return None
-        except (RequestException, BybitAPIError) as e:
-            logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD podczas składania zlecenia. Błąd: {e}", exc_info=True)
+        except BybitAPIError as e:
+            if e.ret_code in [110004, 10001]: # Obsługa błędów Post-Only i ryzyka likwidacji
+                logger.error(f"[{symbol}] Zlecenie odrzucone przez giełdę: {e.ret_msg} (Kod: {e.ret_code})")
+                return None
+            logger.critical(f"[{symbol}] Błąd API podczas składania zlecenia: {e}", exc_info=True)
+            return None
+        except RequestException as e:
+            logger.critical(f"[{symbol}] Błąd sieciowy podczas składania zlecenia: {e}", exc_info=True)
             return None
 
     def cancel_all_open_orders_for_symbol(self, symbol: str) -> bool:
