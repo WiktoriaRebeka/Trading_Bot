@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 async def _fetch_kline_for_symbol(session: aiohttp.ClientSession, symbol: str, cycle_id: str) -> Optional[Dict[str, Any]]:
     """Pobiera najnowszą świecę dla danego symbolu, logując z cycle_id."""
     api_symbol = symbol.replace('.P', '')
-    params = {"category": "linear", "symbol": api_symbol, "interval": "1", "limit": 2}
+    params = {"category": "linear", "symbol": api_symbol, "interval": "5", "limit": 2}
     max_retries = 3
     
     log_extra = {"json_fields": {"cycle_id": cycle_id, "symbol": symbol}}
@@ -26,16 +26,12 @@ async def _fetch_kline_for_symbol(session: aiohttp.ClientSession, symbol: str, c
                 if data.get("retCode") == 0 and data.get("result") and data["result"].get("list"):
                     kline_list = data["result"]["list"]
                     target_kline = kline_list[1] if len(kline_list) > 1 else kline_list[0]
-                    
-                    # === KLUCZOWA POPRAWKA: Zapewnienie spójności nazwy symbolu ===
-                    symbol_with_p = symbol if symbol.endswith('.P') else f"{symbol}.P"
-                    
                     return {
-                        "symbol": symbol_with_p, # <--- Zawsze zwracamy symbol z .P
+                        "symbol": symbol, 
                         "high": float(target_kline[2]), 
                         "low": float(target_kline[3]), 
                         "close": float(target_kline[4]), 
-                        "timestamp": int(target_kline[0])
+                        "timestamp": int(target_kline[0]) # <-- POPRAWIONA NAZWA POLA
                     }
                 else:
                     logger.warning(f"API Bybit zwróciło błąd: {data.get('retMsg', 'Brak wiadomości')}", extra=log_extra)

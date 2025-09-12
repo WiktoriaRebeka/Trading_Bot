@@ -1,4 +1,3 @@
-# Lokalizacja: bot_service/bybit_executor.py
 import logging
 import time
 import hmac
@@ -12,7 +11,6 @@ from requests.exceptions import RequestException
 logger = logging.getLogger(__name__)
 
 class BybitAPIError(Exception):
-    """Niestandardowy wyjątek dla błędów zwracanych przez API Bybit."""
     def __init__(self, ret_code: int, ret_msg: str):
         self.ret_code = ret_code
         self.ret_msg = ret_msg
@@ -20,6 +18,7 @@ class BybitAPIError(Exception):
 
 class BybitExecutor:
     def __init__(self, api_key: str, api_secret: str, testnet: bool = True):
+        # ... (bez zmian)
         if not api_key or not api_secret:
             raise ValueError("Klucze API Bybit nie mogą być puste.")
         
@@ -30,6 +29,7 @@ class BybitExecutor:
         logger.info(f"BybitExecutor zainicjalizowany. Tryb Testnet: {testnet}. URL: {self.base_url}")
 
     def _send_request(self, method: str, endpoint: str, params: Optional[Dict] = None) -> Dict[str, Any]:
+        # ... (bez zmian)
         timestamp = str(int(time.time() * 1000))
         recv_window = "10000"
         
@@ -42,23 +42,31 @@ class BybitExecutor:
                 query_string = urlencode(params, doseq=True) if params else ""
                 to_sign = timestamp + self.api_key + recv_window + query_string
             else: # POST
+                query_string = ""
                 payload_string = json.dumps(params) if params else ""
                 to_sign = timestamp + self.api_key + recv_window + payload_string
 
             signature = hmac.new(bytes(self.api_secret, "utf-8"), to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
             
-            headers = {'X-BAPI-API-KEY': self.api_key, 'X-BAPI-TIMESTAMP': timestamp, 'X-BAPI-SIGN': signature, 'X-BAPI-RECV-WINDOW': recv_window, 'Content-Type': 'application/json'}
+            headers = {
+                'X-BAPI-API-KEY': self.api_key,
+                'X-BAPI-TIMESTAMP': timestamp,
+                'X-BAPI-SIGN': signature,
+                'X-BAPI-RECV-WINDOW': recv_window,
+                'Content-Type': 'application/json'
+            }
             
             full_url = self.base_url + endpoint
-            if query_string and method.upper() == 'GET':
+            if query_string:
                 full_url += "?" + query_string
 
-            response = self.session.request(method, full_url, headers=headers, data=(payload_string if method.upper() == 'POST' else None), params=(params if method.upper() == 'GET' else None), timeout=15)
+            if method.upper() == 'GET':
+                response = self.session.get(full_url, headers=headers, timeout=15)
+            else: # POST
+                response = self.session.post(full_url, headers=headers, data=payload_string, timeout=15)
+
             response.raise_for_status()
             data = response.json()
-
-            # Logowanie pełnej odpowiedzi dla celów debugowania
-            logger.debug(f"Odpowiedź API z {endpoint}: {data}")
 
             if data.get("retCode") != 0:
                 raise BybitAPIError(ret_code=data.get("retCode"), ret_msg=data.get("retMsg"))
@@ -76,115 +84,166 @@ class BybitExecutor:
             raise
 
     def get_instrument_info(self, symbol: str) -> Optional[Dict[str, Any]]:
+        # ... (bez zmian)
         api_symbol = symbol.replace('.P', '')
         params = {"category": "linear", "symbol": api_symbol}
         try:
             result = self._send_request("GET", "/v5/market/instruments-info", params=params)
             if result and result.get('list'):
                 instrument_data = result['list'][0]
-                return {"qtyStep": instrument_data.get('lotSizeFilter', {}).get('qtyStep'), "tickSize": instrument_data.get('priceFilter', {}).get('tickSize')}
+                lot_size_filter = instrument_data.get('lotSizeFilter', {})
+                price_filter = instrument_data.get('priceFilter', {})
+                return {
+                    "qtyStep": lot_size_filter.get('qtyStep', '0.001'),
+                    "tickSize": price_filter.get('tickSize', '0.01')
+                }
+            logger.warning(f"[{symbol}] Nie znaleziono danych instrumentu w odpowiedzi API.")
             return None
         except (RequestException, BybitAPIError):
             return None
 
     def place_limit_order(self, order_params: Dict[str, Any]) -> Optional[Dict[str, str]]:
+        """Składa zlecenie wejścia LIMIT z zaawansowanymi opcjami TP/SL."""
         symbol = order_params.get('symbol')
         api_symbol = symbol.replace('.P', '')
         side_map = {"LONG": "Buy", "SHORT": "Sell"}
-        payload = {"category": "linear", "symbol": api_symbol, "side": side_map[order_params['side']], "orderType": "Limit", "qty": str(order_params['qty']), "price": str(order_params['price']), "orderLinkId": order_params.get('orderLinkId'), "timeInForce": "GTC"}
-        logger.info(f"[{symbol}] Wysyłanie zlecenia WEJŚCIOWEGO: {payload}")
-        try:
-            result = self._send_request("POST", "/v5/order/create", params=payload)
-            logger.info(f"[{symbol}] Odpowiedź Bybit na zlecenie wejściowe: {result}")
-            return result
-        except (RequestException, BybitAPIError) as e:
-            logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD podczas składania zlecenia wejściowego: {e}", exc_info=True)
-            return None
-
-    def get_order_status(self, symbol: str, order_id: Optional[str] = None, order_link_id: Optional[str] = None) -> Dict[str, Any]:
-        api_symbol = symbol.replace('.P', '')
-        params = {"category": "linear", "symbol": api_symbol}
-        if order_id:
-            params['orderId'] = order_id
-        elif order_link_id:
-            params['orderLinkId'] = order_link_id
-        else:
-            raise ValueError("Należy podać orderId lub orderLinkId")
         
-        result = self._send_request("GET", "/v5/order/history", params=params)
-        if result and result.get('list'):
-            return result['list'][0]
-        return {}
-
-    def set_trading_stop(self, symbol: str, stop_loss: float, take_profit: float, trigger_by: str = "LastPrice") -> Optional[Dict[str, Any]]:
-        api_symbol = symbol.replace('.P', '')
         payload = {
             "category": "linear",
             "symbol": api_symbol,
-            "stopLoss": str(stop_loss),
-            "takeProfit": str(take_profit),
-            "tpslMode": "Full",
-            "triggerBy": trigger_by
+            "side": side_map[order_params['side']],
+            "orderType": "Limit",
+            "qty": str(order_params['qty']),
+            "price": str(order_params['price']),
+            "orderLinkId": order_params.get('orderLinkId'),
+            "timeInForce": "PostOnly",
+            "tpslMode": "Partial",
+            "takeProfit": str(order_params['takeProfit']),
+            "tpOrderType": "Limit",
+            "tpLimitPrice": str(order_params['takeProfit']),
+            "stopLoss": str(order_params['stopLoss']),
+            "slOrderType": "Market"
         }
-        logger.info(f"[{symbol}] Ustawiam trading-stop (TP/SL) dla otwartej pozycji: {payload}")
+        
+        logger.info(f"[{symbol}] Wysyłanie zlecenia Post-Only LIMIT z zaawansowanym TP/SL: {payload}")
         try:
-            result = self._send_request("POST", "/v5/position/trading-stop", params=payload)
-            logger.info(f"[{symbol}] Odpowiedź Bybit na set_trading_stop: {result}")
-            return result
-        except (RequestException, BybitAPIError) as e:
-            logger.error(f"[{symbol}] Błąd przy ustawianiu trading-stop: {e}")
+            result = self._send_request("POST", "/v5/order/create", params=payload)
+            order_id = result.get("orderId")
+            if order_id:
+                logger.info(f"[{symbol}] Zlecenie pomyślnie złożone. Order ID: {order_id}")
+                return {"orderId": order_id, "orderLinkId": result.get("orderLinkId")}
+            return None
+        except BybitAPIError as e:
+            if e.ret_code in [110004, 10001]:
+                logger.error(f"[{symbol}] Zlecenie odrzucone przez giełdę: {e.ret_msg} (Kod: {e.ret_code})")
+                return None
+            logger.critical(f"[{symbol}] Błąd API podczas składania zlecenia: {e}", exc_info=True)
+            return None
+        except RequestException as e:
+            logger.critical(f"[{symbol}] Błąd sieciowy podczas składania zlecenia: {e}", exc_info=True)
             return None
 
+    def place_conditional_order(self, params: Dict[str, Any]) -> Optional[Dict[str, str]]:
+        """Składa zaawansowane zlecenie warunkowe (dla TP lub SL)."""
+        symbol = params.get('symbol')
+        logger.info(f"[{symbol}] Składanie zlecenia warunkowego: {params}")
+        try:
+            result = self._send_request("POST", "/v5/order/create", params=params)
+            order_id = result.get("orderId")
+            if order_id:
+                logger.info(f"[{symbol}] Zlecenie warunkowe pomyślnie złożone. Order ID: {order_id}")
+                return {"orderId": order_id}
+            logger.error(f"[{symbol}] API Bybit nie zwróciło orderId dla zlecenia warunkowego. Odpowiedź: {result}")
+            return None
+        except (RequestException, BybitAPIError) as e:
+            logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD podczas składania zlecenia warunkowego. Błąd: {e}", exc_info=True)
+            return None
+
+    def get_order_status(self, order_id: str) -> Optional[Dict[str, Any]]:
+        """Pobiera status konkretnego zlecenia."""
+        params = {"category": "linear", "orderId": order_id}
+        try:
+            result = self._send_request("GET", "/v5/order/realtime", params=params)
+            if result and result.get('list'):
+                return result['list'][0]
+            return None
+        except (RequestException, BybitAPIError):
+            return None
+
+    def close_position_market(self, symbol: str, qty: str, side: str):
+        """Awaryjnie zamyka pozycję zleceniem MARKET."""
+        api_symbol = symbol.replace('.P', '')
+        payload = {
+            "category": "linear", "symbol": api_symbol,
+            "side": side, "orderType": "Market", "qty": qty,
+            "reduceOnly": True
+        }
+        logger.warning(f"[{symbol}] AWARYJNE ZAMYKANIE POZYCJI zleceniem MARKET: {payload}")
+        try:
+            self._send_request("POST", "/v5/order/create", params=payload)
+        except Exception as e:
+            logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD podczas awaryjnego zamykania pozycji: {e}", exc_info=True)
+
     def cancel_all_open_orders_for_symbol(self, symbol: str) -> bool:
+        # ... (bez zmian)
         api_symbol = symbol.replace('.P', '')
         logger.info(f"[{symbol}] Anulowanie wszystkich oczekujących zleceń...")
         try:
-            self._send_request("POST", "/v5/order/cancel-all", params={"category": "linear", "symbol": api_symbol})
-            return True
+            payload = {"category": "linear", "symbol": api_symbol}
+            result = self._send_request("POST", "/v5/order/cancel-all", params=payload)
+            
+            if 'list' in result:
+                cancelled_orders = result.get('list', [])
+                if cancelled_orders:
+                    logger.info(f"[{symbol}] Pomyślnie wysłano polecenie anulowania dla {len(cancelled_orders)} zleceń.")
+                else:
+                    logger.info(f"[{symbol}] Brak otwartych zleceń do anulowania.")
+                return True
+            else:
+                logger.error(f"[{symbol}] API Bybit nie zwróciło oczekiwanej listy po próbie anulowania zleceń. Odpowiedź: {result}")
+                return False
         except BybitAPIError as e:
-            if e.ret_code == 110021: return True
-            logger.critical(f"[{symbol}] Błąd API podczas czyszczenia zleceń: {e}")
+            if e.ret_code == 110021:
+                 logger.info(f"[{symbol}] Brak otwartych zleceń do anulowania (API zwróciło 'Order does not exist').")
+                 return True
+            logger.critical(f"[{symbol}] Błąd API podczas czyszczenia otwartych zleceń: {e}", exc_info=True)
             return False
         except Exception as e:
-            logger.critical(f"[{symbol}] Nieoczekiwany błąd podczas czyszczenia zleceń: {e}")
+            logger.critical(f"[{symbol}] Nieoczekiwany błąd podczas czyszczenia otwartych zleceń: {e}", exc_info=True)
             return False
 
     def has_open_position(self, symbol: str) -> bool:
+        # ... (bez zmian)
         api_symbol = symbol.replace('.P', '')
+        params = {"category": "linear", "symbol": api_symbol}
         try:
-            result = self._send_request("GET", "/v5/position/list", params={"category": "linear", "symbol": api_symbol})
-            if result and result.get('list') and float(result['list'][0].get("size", "0")) > 0:
-                return True
+            result = self._send_request("GET", "/v5/position/list", params=params)
+            if result and result.get('list'):
+                position_data = result['list'][0]
+                position_size = float(position_data.get("size", "0"))
+                if position_size > 0:
+                    logger.warning(f"[{symbol}] ZABEZPIECZENIE: Wykryto istniejącą pozycję o wielkości {position_size}. Blokuję nowe zlecenie.")
+                    return True
             return False
-        except (RequestException, BybitAPIError):
-            return True # Fail-safe
+        except (RequestException, BybitAPIError) as e:
+            logger.error(f"[{symbol}] Błąd podczas sprawdzania otwartych pozycji: {e}")
+            return True
 
     def get_closed_pnl_history(self, start_time_ms: int, limit: int = 50) -> List[Dict[str, Any]]:
+        # ... (bez zmian)
+        endpoint = "/v5/position/closed-pnl"
+        params = {
+            "category": "linear",
+            "startTime": start_time_ms,
+            "limit": limit
+        }
+        logger.info(f"Pobieranie historii P&L od timestampu {start_time_ms}...")
         try:
-            result = self._send_request("GET", "/v5/position/closed-pnl", params={"category": "linear", "startTime": start_time_ms, "limit": limit})
-            return list(reversed(result.get('list', [])))
-        except (RequestException, BybitAPIError):
+            result = self._send_request("GET", endpoint, params=params)
+            pnl_list = result.get('list', [])
+            if pnl_list:
+                logger.info(f"Pomyślnie pobrano {len(pnl_list)} rekordów P&L.")
+            return list(reversed(pnl_list))
+        except (RequestException, BybitAPIError) as e:
+            logger.error(f"Błąd podczas pobierania historii P&L: {e}")
             return []
-
-    def close_position_market(self, symbol: str, side: str) -> bool:
-        api_symbol = symbol.replace('.P', '')
-        try:
-            # Pobierz aktualny rozmiar pozycji, aby zamknąć właściwą ilość
-            pos_result = self._send_request("GET", "/v5/position/list", params={"category": "linear", "symbol": api_symbol})
-            if not (pos_result and pos_result.get('list')):
-                logger.warning(f"[{symbol}] Próba awaryjnego zamknięcia, ale nie znaleziono otwartej pozycji.")
-                return True
-            
-            size = pos_result['list'][0].get("size", "0")
-            if float(size) == 0:
-                logger.warning(f"[{symbol}] Próba awaryjnego zamknięcia, ale rozmiar pozycji wynosi 0.")
-                return True
-
-            close_side = "Sell" if side == "LONG" else "Buy"
-            payload = {"category": "linear", "symbol": api_symbol, "side": close_side, "orderType": "Market", "qty": size, "reduceOnly": True}
-            logger.warning(f"[{symbol}] AWARIA: Zamykanie pozycji zleceniem MARKET: {payload}")
-            self._send_request("POST", "/v5/order/create", params=payload)
-            return True
-        except Exception as e:
-            logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD podczas awaryjnego zamykania pozycji: {e}", exc_info=True)
-            return False

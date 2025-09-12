@@ -1,3 +1,4 @@
+
 # Lokalizacja: bot_service/main.py
 import os
 import logging

@@ -1,11 +1,10 @@
-
 # Lokalizacja: bot_service/bot_logic.py
 
 import logging
 import os
 import math
 import uuid
-import time 
+
 from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone, timedelta
@@ -23,27 +22,20 @@ from bot_service.fetch_from_firestore import fetch_new_alerts_since, save_last_p
 logger = logging.getLogger(__name__)
 
 
-
-
-
 def run_combined_cycle(executor: BybitExecutor):
-    """
-    Główna, połączona pętla logiki. Wykonuje zarówno analizę, jak i logikę transakcyjną.
-    """
+    """Główna, połączona pętla logiki."""
     logger.info("Uruchamiam połączony cykl analityczno-transakcyjny.")
+    
     last_ts = load_last_processed_timestamp("main_cycle_last_fetch_state")
     new_alerts, new_ts = fetch_new_alerts_since(last_ts)
 
     if new_alerts:
-        logger.info("Rozpoczynam przetwarzanie transakcyjne nowych alertów.")
         process_alerts_transactional(new_alerts, executor)
-        logger.info("Rozpoczynam przetwarzanie analityczne nowych alertów.")
         process_new_alerts_analytical(new_alerts)
-        
         if new_ts and (not last_ts or new_ts > last_ts):
             save_last_processed_timestamp(new_ts, "main_cycle_last_fetch_state")
+    
     _run_analysis_of_existing_cases()
-
     logger.info("Zakończono połączony cykl analityczno-transakcyjny.")
 
 def round_price_by_tick(price: float, tick_size: str, direction: str) -> float:
@@ -106,121 +98,66 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
     return True
 
 def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitExecutor):
-    """
-    Przetwarza alerty w ostatecznej, przemysłowej wersji.
-    Czeka na wypełnienie zlecenia wejściowego, a następnie ustawia TP/SL.
-    """
+    """Przetwarza alerty, składając zlecenia z wbudowanym TP/SL."""
     if not alerts:
         return
 
     for alert_dict in alerts:
         alert_id = alert_dict.get('id', 'unknown')
-        alert = None
-        
         try:
             alert = AlertData.model_validate(alert_dict)
-            
-            if not alert.symbol.endswith('.P'):
-                alert.symbol += '.P'
             symbol = alert.symbol
             
-            if not _correct_and_validate_alert(alert) or alert.sl <= 0:
-                if alert.sl <= 0: logger.error(f"[{symbol}] Odrzucono alert: Nieprawidłowa wartość SL: {alert.sl}")
-                continue
-
             if executor.has_open_position(symbol):
-                logger.warning(f"[{symbol}] Wykryto istniejącą pozycję. Pomijam nowy alert.")
+                logger.info(f"[{symbol}] ZABEZPIECZENIE: Wykryto otwartą pozycję. Nowy alert ({alert_id}) zostaje zignorowany.")
                 continue
             
+            if not _correct_and_validate_alert(alert):
+                continue
+
             executor.cancel_all_open_orders_for_symbol(symbol)
             
             rule = executor.get_instrument_info(symbol)
-            if not rule or not rule.get("tickSize") or not rule.get("qtyStep"):
-                raise Exception("Nie udało się pobrać zasad instrumentu.")
+            if not rule: continue
             
             tick_size, qty_step = rule["tickSize"], rule["qtyStep"]
 
-            # Zaokrąglanie
             if alert.direction == 'LONG':
                 alert.entry = round_price_by_tick(alert.entry, tick_size, 'up')
                 alert.sl = round_price_by_tick(alert.sl, tick_size, 'down')
-            else: # SHORT
+                alert.tp_3_0 = round_price_by_tick(alert.tp_3_0, tick_size, 'up')
+            elif alert.direction == 'SHORT':
                 alert.entry = round_price_by_tick(alert.entry, tick_size, 'down')
                 alert.sl = round_price_by_tick(alert.sl, tick_size, 'up')
+                alert.tp_3_0 = round_price_by_tick(alert.tp_3_0, tick_size, 'down')
 
             risk_usdt = float(os.getenv("RISK_PER_TRADE_USDT", "2.5"))
-            final_qty = calculate_position_size(risk_per_trade_usdt=risk_usdt, entry_price=alert.entry, sl_price=alert.sl, qty_step=qty_step)
+            final_qty = calculate_position_size(
+                risk_per_trade_usdt=risk_usdt, entry_price=alert.entry,
+                sl_price=alert.sl, qty_step=qty_step
+            )
 
-            if not final_qty or final_qty <= 0:
-                logger.warning(f"[{symbol}] Obliczona wielkość pozycji <= 0. Pomijam.")
-                continue
+            if not final_qty or final_qty <= 0: continue
 
-            # Obliczanie TP w bocie
-            risk_distance = abs(alert.entry - alert.sl)
-            fee_adjustment = alert.entry * (0.075 / 100)
-            if alert.direction == 'LONG':
-                alert.tp_2_0 = alert.entry + (risk_distance * 2.0) + fee_adjustment
-                alert.tp_2_0 = round_price_by_tick(alert.tp_2_0, tick_size, 'up')
-            else: # SHORT
-                alert.tp_2_0 = alert.entry - (risk_distance * 2.0) - fee_adjustment
-                alert.tp_2_0 = round_price_by_tick(alert.tp_2_0, tick_size, 'down')
+            client_order_id = f"tradebot_{alert_id.replace('-', '')[:16]}_{int(datetime.now().timestamp())}"
             
-            logger.info(f"[{symbol}] Obliczono TP dla RR 1:2 na poziomie: {alert.tp_2_0}")
-
-            # === NOWA, DWUETAPOWA LOGIKA ===
-
-            # ETAP 1: Złóż zlecenie wejściowe
-            entry_order_link_id = f"entry_{alert_id.replace('-', '')[:12]}_{int(datetime.now().timestamp())}"
-            entry_params = {"symbol": symbol, "side": alert.direction, "qty": final_qty, "price": alert.entry, "orderLinkId": entry_order_link_id}
-            entry_response = executor.place_limit_order(entry_params)
-
-            if not entry_response or not entry_response.get("orderId"):
-                raise Exception("Nie udało się złożyć zlecenia wejściowego.")
+            order_params = {
+                "symbol": symbol, "side": alert.direction, "qty": final_qty,
+                "price": alert.entry, "stopLoss": alert.sl, 
+                "takeProfit": alert.tp_3_0,
+                "orderLinkId": client_order_id
+            }
             
-            logger.info(f"[{symbol}] Zlecenie wejściowe złożone. Oczekuję na wypełnienie...")
+            order_response = executor.place_limit_order(order_params)
 
-            # ETAP 2: Czekaj na wypełnienie zlecenia
-            start_time = time.time()
-            timeout_seconds = 120 # Czekaj maksymalnie 2 minuty
-            is_filled = False
-            
-            while time.time() - start_time < timeout_seconds:
-                status_res = executor.get_order_status(symbol, order_link_id=entry_order_link_id)
-                order_status = status_res.get("orderStatus", "").lower()
-                
-                if order_status == "filled":
-                    logger.info(f"[{symbol}] Zlecenie wejściowe WYPEŁNIONE. Ustawiam TP/SL.")
-                    is_filled = True
-                    break
-                
-                if order_status in ["cancelled", "rejected", "newcancelled"]:
-                    logger.warning(f"[{symbol}] Zlecenie wejściowe zostało anulowane lub odrzucone. Przerywam.")
-                    break
-                
-                time.sleep(3) # Odpytuj co 3 sekundy
-
-            if not is_filled:
-                logger.warning(f"[{symbol}] Zlecenie wejściowe nie zostało wypełnione w ciągu {timeout_seconds}s. Anuluję zlecenie.")
-                executor.cancel_all_open_orders_for_symbol(symbol)
-                continue
-
-            # ETAP 3: Ustaw TP/SL dla otwartej pozycji
-            set_stop_response = executor.set_trading_stop(symbol, stop_loss=alert.sl, take_profit=alert.tp_2_0)
-            if not set_stop_response:
-                raise Exception("KRYTYCZNY BŁĄD: Nie udało się ustawić TP/SL dla otwartej pozycji.")
-
-            logger.info(f"[{symbol}] TP/SL pomyślnie ustawione. Transakcja jest w pełni zabezpieczona.")
-            
-            state_manager.save_active_order(entry_response.get("orderId"), {"symbol": symbol, "orderId": entry_response.get("orderId"), "orderLinkId": entry_order_link_id, "status": "FILLED_AND_PROTECTED", "alert_id": alert_id})
-
+            if order_response and order_response.get("orderId"):
+                order_id = order_response.get("orderId")
+                state_manager.save_active_order(
+                    order_id,
+                    {"symbol": symbol, "orderId": order_id, "status": "FILLED", "alert_id": alert_id}
+                )
         except Exception as e:
-            logger.error(f"[{(alert.symbol if alert else 'N/A')}] Błąd w procesie transakcyjnym dla alertu {alert_id}: {e}", exc_info=False)
-            if alert:
-                logger.warning(f"[{alert.symbol}] ANULOWANIE AWARYJNE: Anulowanie zleceń i sprawdzanie pozycji.")
-                executor.cancel_all_open_orders_for_symbol(alert.symbol)
-                if executor.has_open_position(alert.symbol):
-                    logger.critical(f"[{alert.symbol}] KRYTYCZNA SYTUACJA! Wykryto otwartą pozycję po błędzie. Zamykanie awaryjne...")
-                    executor.close_position_market(alert.symbol, alert.direction)
+            logger.error(f"Nieoczekiwany błąd podczas transakcyjnego przetwarzania alertu {alert_id}: {e}", exc_info=True)
 
 
 def log_closed_positions_pnl(executor: BybitExecutor) -> int:
@@ -309,10 +246,6 @@ def process_new_alerts_analytical(newly_fetched_alerts: List[Dict[str, Any]]):
         try:
             alert_data_model = AlertData.model_validate(alert_dict)
             
-            # === KLUCZOWA POPRAWKA: Ujednolicenie symbolu na początku ===
-            if not alert_data_model.symbol.endswith('.P'):
-                alert_data_model.symbol += '.P'
-
             symbol = alert_data_model.symbol
             rule = instrument_rules.get(symbol)
 
