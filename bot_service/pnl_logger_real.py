@@ -36,6 +36,8 @@ REAL_TRADES_HISTORY_SCHEMA = [
     bigquery.SchemaField("realized_rrr", "NUMERIC", mode="NULLABLE"),
 ]
 
+# Lokalizacja: bot_service/pnl_logger_real.py
+
 def log_real_trade_result(enriched_pnl_data: Dict[str, Any]):
     """Transformuje wzbogacone dane PnL z Bybit, wzbogaca je o dane z alertu, oblicza R:R i zapisuje do BigQuery."""
     
@@ -47,12 +49,11 @@ def log_real_trade_result(enriched_pnl_data: Dict[str, Any]):
     
     original_alert_data = state_manager.get_alert_data_by_id(alert_id)
     if not original_alert_data:
-        logger.error(f"Nie można obliczyć R:R, ponieważ nie znaleziono oryginalnego alertu o ID: {alert_id}")
-        sl_price_from_alert = Decimal("0.0")
-    else:
-        sl_price_from_alert = Decimal(str(original_alert_data.get("sl", "0.0")))
+        logger.error(f"Nie można w pełni wzbogacić danych, ponieważ nie znaleziono oryginalnego alertu o ID: {alert_id}")
+        original_alert_data = {}
 
     try:
+        # --- Konwersja i walidacja danych z Bybit ---
         side = enriched_pnl_data.get("side")
         direction = "LONG" if side == "Buy" else "SHORT" if side == "Sell" else "UNKNOWN"
 
@@ -61,17 +62,25 @@ def log_real_trade_result(enriched_pnl_data: Dict[str, Any]):
         avg_exit_price = Decimal(enriched_pnl_data.get("avgExitPrice", "0.0"))
         commission = Decimal(enriched_pnl_data.get("cumCommission") or "0.0")
         net_pnl = Decimal(enriched_pnl_data.get("closedPnl") or "0.0")
+        
+        # --- Pobieranie planowanych cen z oryginalnego alertu ---
+        entry_price_alert = Decimal(str(original_alert_data.get("entry", "0.0")))
+        sl_price_alert = Decimal(str(original_alert_data.get("sl", "0.0")))
+        # Zakładamy, że bot handluje na tp_3_0, zgodnie z logiką w bot_logic.py
+        tp_price_alert = Decimal(str(original_alert_data.get("tp_3_0", "0.0")))
 
+        # --- Obliczenia R:R ---
         planned_risk_usdt = Decimal("0.0")
         realized_rrr = Decimal("0.0")
 
-        if sl_price_from_alert > 0 and avg_entry_price > 0:
-            risk_per_unit = abs(avg_entry_price - sl_price_from_alert)
+        if sl_price_alert > 0 and avg_entry_price > 0:
+            risk_per_unit = abs(avg_entry_price - sl_price_alert)
             planned_risk_usdt = risk_per_unit * qty
             
             if planned_risk_usdt > 0:
                 realized_rrr = (net_pnl / planned_risk_usdt).quantize(Decimal('0.0001'), rounding=ROUND_DOWN)
         
+        # --- Budowanie ostatecznego obiektu do zapisu, zgodnego ze schematem ---
         transformed_data = {
             "alert_id": alert_id,
             "order_id": enriched_pnl_data.get("orderId", "unknown"),
@@ -89,21 +98,31 @@ def log_real_trade_result(enriched_pnl_data: Dict[str, Any]):
             "exit_type": enriched_pnl_data.get("exitType"),
             "timestamp_entry": datetime.fromtimestamp(int(enriched_pnl_data.get("createdTime")) / 1000, tz=timezone.utc).isoformat(),
             "timestamp_close": datetime.fromtimestamp(int(enriched_pnl_data.get("updatedTime")) / 1000, tz=timezone.utc).isoformat(),
-            "sl_price": float(sl_price_from_alert),
-            "planned_risk_usdt": float(planned_risk_usdt),
-            "realized_rrr": float(realized_rrr)
+            
+            # --- UZUPEŁNIONE POLA ZGODNIE ZE SCHEMATEM ---
+            "planned_risk_usdt": float(planned_risk_usdt) if planned_risk_usdt > 0 else None,
+            "realized_rrr": float(realized_rrr) if planned_risk_usdt > 0 else None,
+            "entry_price_alert": float(entry_price_alert) if entry_price_alert > 0 else None,
+            "sl_price_alert": float(sl_price_alert) if sl_price_alert > 0 else None,
+            "tp_price_alert": float(tp_price_alert) if tp_price_alert > 0 else None,
+            "exit_price_result": float(avg_exit_price) if avg_exit_price > 0 else None,
         }
-    except Exception as e:
+    except (TypeError, ValueError, KeyError) as e:
         logger.error(f"Błąd podczas transformacji danych PnL dla alertu {alert_id}: {e}", exc_info=True, extra={"json_fields": {"pnl_data": enriched_pnl_data}})
         return
 
-    logger.info(f"Logowanie realnego wyniku dla {transformed_data['symbol']} (Alert ID: {alert_id}, R:R: {transformed_data['realized_rrr']:.2f}) do BigQuery.")
+    logger.info(f"Przygotowano dane do zapisu w BigQuery: {transformed_data}")
+    
     try:
         client = get_bigquery_client()
+        if not client:
+            logger.error("Nie udało się uzyskać klienta BigQuery. Pomijam zapis.")
+            return
+            
         errors = client.insert_rows_json(REAL_TABLE_REF, [transformed_data])
-        if errors:
-            logger.error(f"Błąd podczas wstawiania realnych wyników do BigQuery: {errors}")
+        if not errors:
+            logger.info(f"Pomyślnie zapisano realny wynik transakcji dla alertu {alert_id} do BigQuery.")
         else:
-            logger.info("Pomyślnie zapisano realny wynik transakcji.")
+            logger.error(f"Błąd podczas wstawiania wierszy do BigQuery dla alertu {alert_id}: {errors}")
     except Exception as e:
-        logger.error(f"Krytyczny błąd podczas zapisu realnych wyników: {e}", exc_info=True)
+        logger.critical(f"Krytyczny błąd podczas zapisu do BigQuery dla alertu {alert_id}: {e}", exc_info=True)
