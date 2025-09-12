@@ -5,7 +5,7 @@ import logging
 import os
 import math
 import uuid
-
+import time 
 from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone, timedelta
@@ -23,7 +23,7 @@ from bot_service.fetch_from_firestore import fetch_new_alerts_since, save_last_p
 logger = logging.getLogger(__name__)
 
 
-BLOKADA!!!!!!!!!11
+
 
 
 def run_combined_cycle(executor: BybitExecutor):
@@ -105,31 +105,29 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
     )
     return True
 
-# Lokalizacja: bot_service/bot_logic.py
-
 def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitExecutor):
     """
-    Przetwarza alerty, składając zlecenia w nowym, BARDZO ODPORNYM, trzystopniowym procesie.
-    Jeśli którykolwiek krok zawiedzie, wszystkie poprzednie zlecenia są natychmiast anulowane.
+    Przetwarza alerty w ostatecznej, przemysłowej wersji.
+    Czeka na wypełnienie zlecenia wejściowego, a następnie ustawia TP/SL.
     """
     if not alerts:
         return
 
     for alert_dict in alerts:
         alert_id = alert_dict.get('id', 'unknown')
-        alert_symbol_for_cleanup = "N/A" # Zmienna do bezpiecznego czyszczenia w razie błędu
+        alert = None
         
         try:
             alert = AlertData.model_validate(alert_dict)
             
             if not alert.symbol.endswith('.P'):
                 alert.symbol += '.P'
-            
             symbol = alert.symbol
-            alert_symbol_for_cleanup = symbol # Przypisujemy symbol do zmiennej cleanup
             
-            if not _correct_and_validate_alert(alert):
+            if not _correct_and_validate_alert(alert) or alert.sl <= 0:
+                if alert.sl <= 0: logger.error(f"[{symbol}] Odrzucono alert: Nieprawidłowa wartość SL: {alert.sl}")
                 continue
+
             if executor.has_open_position(symbol):
                 logger.warning(f"[{symbol}] Wykryto istniejącą pozycję. Pomijam nowy alert.")
                 continue
@@ -137,69 +135,92 @@ def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitEx
             executor.cancel_all_open_orders_for_symbol(symbol)
             
             rule = executor.get_instrument_info(symbol)
-            if not rule or "tickSize" not in rule or "qtyStep" not in rule:
-                raise Exception(f"Nie udało się pobrać zasad instrumentu.")
+            if not rule or not rule.get("tickSize") or not rule.get("qtyStep"):
+                raise Exception("Nie udało się pobrać zasad instrumentu.")
             
             tick_size, qty_step = rule["tickSize"], rule["qtyStep"]
 
+            # Zaokrąglanie
             if alert.direction == 'LONG':
                 alert.entry = round_price_by_tick(alert.entry, tick_size, 'up')
                 alert.sl = round_price_by_tick(alert.sl, tick_size, 'down')
-                alert.tp_2_0 = round_price_by_tick(alert.tp_2_0, tick_size, 'up')
-            elif alert.direction == 'SHORT':
+            else: # SHORT
                 alert.entry = round_price_by_tick(alert.entry, tick_size, 'down')
                 alert.sl = round_price_by_tick(alert.sl, tick_size, 'up')
-                alert.tp_2_0 = round_price_by_tick(alert.tp_2_0, tick_size, 'down')
 
             risk_usdt = float(os.getenv("RISK_PER_TRADE_USDT", "2.5"))
-            final_qty = calculate_position_size(
-                risk_per_trade_usdt=risk_usdt, entry_price=alert.entry,
-                sl_price=alert.sl, qty_step=qty_step
-            )
+            final_qty = calculate_position_size(risk_per_trade_usdt=risk_usdt, entry_price=alert.entry, sl_price=alert.sl, qty_step=qty_step)
 
             if not final_qty or final_qty <= 0:
-                logger.warning(f"[{symbol}] Obliczona wielkość pozycji wynosi zero lub mniej. Pomijam alert.")
+                logger.warning(f"[{symbol}] Obliczona wielkość pozycji <= 0. Pomijam.")
                 continue
 
-            # === NOWA, ATOMOWA LOGIKA SKŁADANIA ZLECEŃ ===
+            # Obliczanie TP w bocie
+            risk_distance = abs(alert.entry - alert.sl)
+            fee_adjustment = alert.entry * (0.075 / 100)
+            if alert.direction == 'LONG':
+                alert.tp_2_0 = alert.entry + (risk_distance * 2.0) + fee_adjustment
+                alert.tp_2_0 = round_price_by_tick(alert.tp_2_0, tick_size, 'up')
+            else: # SHORT
+                alert.tp_2_0 = alert.entry - (risk_distance * 2.0) - fee_adjustment
+                alert.tp_2_0 = round_price_by_tick(alert.tp_2_0, tick_size, 'down')
+            
+            logger.info(f"[{symbol}] Obliczono TP dla RR 1:2 na poziomie: {alert.tp_2_0}")
 
-            # KROK 1: Złóż zlecenie wejściowe
-            entry_order_id_link = f"entry_{alert_id.replace('-', '')[:12]}_{int(datetime.now().timestamp())}"
-            entry_params = {"symbol": symbol, "side": alert.direction, "qty": final_qty, "price": alert.entry, "orderLinkId": entry_order_id_link}
+            # === NOWA, DWUETAPOWA LOGIKA ===
+
+            # ETAP 1: Złóż zlecenie wejściowe
+            entry_order_link_id = f"entry_{alert_id.replace('-', '')[:12]}_{int(datetime.now().timestamp())}"
+            entry_params = {"symbol": symbol, "side": alert.direction, "qty": final_qty, "price": alert.entry, "orderLinkId": entry_order_link_id}
             entry_response = executor.place_limit_order(entry_params)
 
             if not entry_response or not entry_response.get("orderId"):
-                raise Exception("Krok 1/3: Nie udało się złożyć zlecenia wejściowego.")
-        
-            entry_order_id = entry_response.get("orderId")
-            logger.info(f"[{symbol}] Krok 1/3: Zlecenie wejściowe pomyślnie złożone. ID: {entry_order_id}")
-
-            # KROK 2: Złóż warunkowe zlecenie Take Profit (LIMIT)
-            tp_params = {"symbol": symbol, "orderType": "Limit", "position_side": alert.direction, "qty": final_qty, "price": alert.tp_2_0, "triggerPrice": alert.tp_2_0, "triggerDirection": "Rising" if alert.direction == "LONG" else "Falling"}
-            tp_response = executor.place_conditional_order(tp_params)
-            if not tp_response:
-                raise Exception("Krok 2/3: Nie udało się złożyć zlecenia warunkowego TP.")
+                raise Exception("Nie udało się złożyć zlecenia wejściowego.")
             
-            logger.info(f"[{symbol}] Krok 2/3: Zlecenie warunkowe TP (LIMIT) pomyślnie złożone.")
+            logger.info(f"[{symbol}] Zlecenie wejściowe złożone. Oczekuję na wypełnienie...")
 
-            # KROK 3: Złóż warunkowe zlecenie Stop Loss (MARKET)
-            sl_params = {"symbol": symbol, "orderType": "Market", "position_side": alert.direction, "qty": final_qty, "triggerPrice": alert.sl, "triggerDirection": "Falling" if alert.direction == "LONG" else "Rising"}
-            sl_response = executor.place_conditional_order(sl_params)
-            if not sl_response:
-                raise Exception("Krok 3/3: Nie udało się złożyć zlecenia warunkowego SL.")
+            # ETAP 2: Czekaj na wypełnienie zlecenia
+            start_time = time.time()
+            timeout_seconds = 120 # Czekaj maksymalnie 2 minuty
+            is_filled = False
+            
+            while time.time() - start_time < timeout_seconds:
+                status_res = executor.get_order_status(symbol, order_link_id=entry_order_link_id)
+                order_status = status_res.get("orderStatus", "").lower()
+                
+                if order_status == "filled":
+                    logger.info(f"[{symbol}] Zlecenie wejściowe WYPEŁNIONE. Ustawiam TP/SL.")
+                    is_filled = True
+                    break
+                
+                if order_status in ["cancelled", "rejected", "newcancelled"]:
+                    logger.warning(f"[{symbol}] Zlecenie wejściowe zostało anulowane lub odrzucone. Przerywam.")
+                    break
+                
+                time.sleep(3) # Odpytuj co 3 sekundy
 
-            logger.info(f"[{symbol}] Krok 3/3: Zlecenie warunkowe SL (MARKET) pomyślnie złożone. Wszystkie zlecenia aktywne.")
+            if not is_filled:
+                logger.warning(f"[{symbol}] Zlecenie wejściowe nie zostało wypełnione w ciągu {timeout_seconds}s. Anuluję zlecenie.")
+                executor.cancel_all_open_orders_for_symbol(symbol)
+                continue
 
-            state_manager.save_active_order(entry_order_id, {"symbol": symbol, "orderId": entry_order_id, "orderLinkId": entry_order_id_link, "status": "NEW", "alert_id": alert_id})
+            # ETAP 3: Ustaw TP/SL dla otwartej pozycji
+            set_stop_response = executor.set_trading_stop(symbol, stop_loss=alert.sl, take_profit=alert.tp_2_0)
+            if not set_stop_response:
+                raise Exception("KRYTYCZNY BŁĄD: Nie udało się ustawić TP/SL dla otwartej pozycji.")
+
+            logger.info(f"[{symbol}] TP/SL pomyślnie ustawione. Transakcja jest w pełni zabezpieczona.")
+            
+            state_manager.save_active_order(entry_response.get("orderId"), {"symbol": symbol, "orderId": entry_response.get("orderId"), "orderLinkId": entry_order_link_id, "status": "FILLED_AND_PROTECTED", "alert_id": alert_id})
 
         except Exception as e:
-            logger.error(f"[{alert_symbol_for_cleanup}] Błąd w procesie składania zleceń dla alertu {alert_id}: {e}", exc_info=False) # exc_info=False dla zwięzłości logu
-            logger.warning(f"[{alert_symbol_for_cleanup}] ANULOWANIE AWARYJNE: Próba anulowania wszystkich zleceň z powodu błędu.")
-            
-            # Jeśli jakikolwiek krok się nie powiedzie, ten blok `except` złapie błąd
-            # i wykona procedurę czyszczącą, usuwając wszystkie potencjalnie osierocone zlecenia.
-            if alert_symbol_for_cleanup != "N/A":
-                executor.cancel_all_open_orders_for_symbol(alert_symbol_for_cleanup)
+            logger.error(f"[{(alert.symbol if alert else 'N/A')}] Błąd w procesie transakcyjnym dla alertu {alert_id}: {e}", exc_info=False)
+            if alert:
+                logger.warning(f"[{alert.symbol}] ANULOWANIE AWARYJNE: Anulowanie zleceń i sprawdzanie pozycji.")
+                executor.cancel_all_open_orders_for_symbol(alert.symbol)
+                if executor.has_open_position(alert.symbol):
+                    logger.critical(f"[{alert.symbol}] KRYTYCZNA SYTUACJA! Wykryto otwartą pozycję po błędzie. Zamykanie awaryjne...")
+                    executor.close_position_market(alert.symbol, alert.direction)
 
 
 def log_closed_positions_pnl(executor: BybitExecutor) -> int:
