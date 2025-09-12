@@ -102,18 +102,20 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
     )
     return True
 
+# Lokalizacja: bot_service/bot_logic.py
+
 def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitExecutor):
     """
-    Przetwarza alerty, składając zlecenia w nowym, trzystopniowym procesie:
-    1. Zlecenie wejściowe LIMIT.
-    2. Warunkowe zlecenie TP typu LIMIT (precyzyjne wyjście).
-    3. Warunkowe zlecenie SL typu MARKET (bezpieczne wyjście).
+    Przetwarza alerty, składając zlecenia w nowym, BARDZO ODPORNYM, trzystopniowym procesie.
+    Jeśli którykolwiek krok zawiedzie, wszystkie poprzednie zlecenia są natychmiast anulowane.
     """
     if not alerts:
         return
 
     for alert_dict in alerts:
         alert_id = alert_dict.get('id', 'unknown')
+        alert_symbol_for_cleanup = "N/A" # Zmienna do bezpiecznego czyszczenia w razie błędu
+        
         try:
             alert = AlertData.model_validate(alert_dict)
             
@@ -121,20 +123,19 @@ def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitEx
                 alert.symbol += '.P'
             
             symbol = alert.symbol
+            alert_symbol_for_cleanup = symbol # Przypisujemy symbol do zmiennej cleanup
             
             if not _correct_and_validate_alert(alert):
                 continue
             if executor.has_open_position(symbol):
-                logger.warning(f"[{symbol}] Wykryto istniejącą pozycję. Pomijam nowy alert, aby uniknąć konfliktu.")
+                logger.warning(f"[{symbol}] Wykryto istniejącą pozycję. Pomijam nowy alert.")
                 continue
             
-            # Anulowanie starych zleceń jest teraz jeszcze ważniejsze
             executor.cancel_all_open_orders_for_symbol(symbol)
             
             rule = executor.get_instrument_info(symbol)
             if not rule or "tickSize" not in rule or "qtyStep" not in rule:
-                logger.error(f"[{symbol}] Nie udało się pobrać zasad instrumentu. Pomijam alert.")
-                continue
+                raise Exception(f"Nie udało się pobrać zasad instrumentu.")
             
             tick_size, qty_step = rule["tickSize"], rule["qtyStep"]
 
@@ -157,74 +158,45 @@ def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitEx
                 logger.warning(f"[{symbol}] Obliczona wielkość pozycji wynosi zero lub mniej. Pomijam alert.")
                 continue
 
-            # === NOWA, TRZYSTOPNIOWA LOGIKA SKŁADANIA ZLECEŃ ===
+            # === NOWA, ATOMOWA LOGIKA SKŁADANIA ZLECEŃ ===
 
-            # KROK 1: Złóż zlecenie wejściowe (bez TP/SL)
-            entry_order_id = f"entry_{alert_id.replace('-', '')[:12]}_{int(datetime.now().timestamp())}"
-            entry_params = {
-                "symbol": symbol, 
-                "side": alert.direction, 
-                "qty": final_qty,
-                "price": alert.entry, 
-                "orderLinkId": entry_order_id
-            }
+            # KROK 1: Złóż zlecenie wejściowe
+            entry_order_id_link = f"entry_{alert_id.replace('-', '')[:12]}_{int(datetime.now().timestamp())}"
+            entry_params = {"symbol": symbol, "side": alert.direction, "qty": final_qty, "price": alert.entry, "orderLinkId": entry_order_id_link}
             entry_response = executor.place_limit_order(entry_params)
 
             if not entry_response or not entry_response.get("orderId"):
-                logger.error(f"[{symbol}] Nie udało się złożyć zlecenia wejściowego. Przerywam proces dla tego alertu.")
-                continue
+                raise Exception("Krok 1/3: Nie udało się złożyć zlecenia wejściowego.")
+            
+            entry_order_id = entry_response.get("orderId")
+            logger.info(f"[{symbol}] Krok 1/3: Zlecenie wejściowe pomyślnie złożone. ID: {entry_order_id}")
 
-            logger.info(f"[{symbol}] Zlecenie wejściowe pomyślnie złożone. ID: {entry_response.get('orderId')}. Składam zlecenia wyjściowe.")
-
-            # KROK 2: Złóż warunkowe zlecenie Take Profit (jako LIMIT)
-            tp_params = {
-                "symbol": symbol,
-                "orderType": "Limit",
-                "position_side": alert.direction,
-                "qty": final_qty,
-                "price": alert.tp_2_0,
-                "triggerPrice": alert.tp_2_0,
-                "triggerDirection": "Rising" if alert.direction == "LONG" else "Falling"
-            }
+            # KROK 2: Złóż warunkowe zlecenie Take Profit (LIMIT)
+            tp_params = {"symbol": symbol, "orderType": "Limit", "position_side": alert.direction, "qty": final_qty, "price": alert.tp_2_0, "triggerPrice": alert.tp_2_0, "triggerDirection": "Rising" if alert.direction == "LONG" else "Falling"}
             tp_response = executor.place_conditional_order(tp_params)
-            if tp_response:
-                logger.info(f"[{symbol}] Zlecenie warunkowe TP (LIMIT) pomyślnie złożone.")
-            else:
-                logger.error(f"[{symbol}] Nie udało się złożyć zlecenia warunkowego TP. Anuluję zlecenie wejściowe dla bezpieczeństwa.")
-                # Można dodać logikę anulowania zlecenia wejściowego w razie błędu
-                continue
+            if not tp_response:
+                raise Exception("Krok 2/3: Nie udało się złożyć zlecenia warunkowego TP.")
+            
+            logger.info(f"[{symbol}] Krok 2/3: Zlecenie warunkowe TP (LIMIT) pomyślnie złożone.")
 
-            # KROK 3: Złóż warunkowe zlecenie Stop Loss (jako MARKET)
-            sl_params = {
-                "symbol": symbol,
-                "orderType": "Market",
-                "position_side": alert.direction,
-                "qty": final_qty,
-                "triggerPrice": alert.sl,
-                "triggerDirection": "Falling" if alert.direction == "LONG" else "Rising"
-            }
+            # KROK 3: Złóż warunkowe zlecenie Stop Loss (MARKET)
+            sl_params = {"symbol": symbol, "orderType": "Market", "position_side": alert.direction, "qty": final_qty, "triggerPrice": alert.sl, "triggerDirection": "Falling" if alert.direction == "LONG" else "Rising"}
             sl_response = executor.place_conditional_order(sl_params)
-            if sl_response:
-                logger.info(f"[{symbol}] Zlecenie warunkowe SL (MARKET) pomyślnie złożone.")
-            else:
-                logger.error(f"[{symbol}] Nie udało się złożyć zlecenia warunkowego SL. Anuluję zlecenie wejściowe dla bezpieczeństwa.")
-                # Można dodać logikę anulowania zlecenia wejściowego w razie błędu
-                continue
+            if not sl_response:
+                raise Exception("Krok 3/3: Nie udało się złożyć zlecenia warunkowego SL.")
 
-            # Zapisujemy do Firestore tylko informacje o zleceniu wejściowym.
-            # Logika PnL i tak dopasowuje pozycje po symbolu, więc to wystarczy.
-            state_manager.save_active_order(
-                entry_response.get("orderId"),
-                {
-                    "symbol": symbol, 
-                    "orderId": entry_response.get("orderId"),
-                    "orderLinkId": entry_order_id,
-                    "status": "NEW", 
-                    "alert_id": alert_id
-                }
-            )
+            logger.info(f"[{symbol}] Krok 3/3: Zlecenie warunkowe SL (MARKET) pomyślnie złożone. Wszystkie zlecenia aktywne.")
+
+            state_manager.save_active_order(entry_order_id, {"symbol": symbol, "orderId": entry_order_id, "orderLinkId": entry_order_id_link, "status": "NEW", "alert_id": alert_id})
+
         except Exception as e:
-            logger.error(f"Nieoczekiwany błąd podczas transakcyjnego przetwarzania alertu {alert_id}: {e}", exc_info=True)
+            logger.error(f"[{alert_symbol_for_cleanup}] Błąd w procesie składania zleceń dla alertu {alert_id}: {e}", exc_info=False) # exc_info=False dla zwięzłości logu
+            logger.warning(f"[{alert_symbol_for_cleanup}] ANULOWANIE AWARYJNE: Próba anulowania wszystkich zleceň z powodu błędu.")
+            
+            # Jeśli jakikolwiek krok się nie powiedzie, ten blok `except` złapie błąd
+            # i wykona procedurę czyszczącą, usuwając wszystkie potencjalnie osierocone zlecenia.
+            if alert_symbol_for_cleanup != "N/A":
+                executor.cancel_all_open_orders_for_symbol(alert_symbol_for_cleanup)
 
 
 def log_closed_positions_pnl(executor: BybitExecutor) -> int:
