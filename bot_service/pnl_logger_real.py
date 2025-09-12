@@ -7,7 +7,11 @@ from decimal import Decimal
 from bot_service import state_manager 
 from bot_service.bigquery_logger import get_bigquery_client
 from shared_lib import constants
+from bot_service import bigquery_logger
 
+if not bigquery_logger.initialize_bigquery():
+    logger.error("BigQuery nie zostało zainicjalizowane – pomijam zapis real_trades_history.")
+    return
 logger = logging.getLogger(__name__)
 
 # Definicja referencji do tabeli jest pobierana z centralnego miejsca
