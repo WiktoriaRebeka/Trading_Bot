@@ -97,13 +97,22 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
     )
     return True
 
+# Lokalizacja: bot_service/bot_logic.py
+
 def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitExecutor):
-    """Przetwarza alerty, składając zlecenia z wbudowanym TP/SL."""
+    """
+    Przetwarza alerty, składając trzy oddzielne zlecenia:
+    1. Wejście: LIMIT
+    2. Stop Loss: Warunkowy MARKET
+    3. Take Profit: Warunkowy LIMIT
+    """
     if not alerts:
         return
 
     for alert_dict in alerts:
         alert_id = alert_dict.get('id', 'unknown')
+        alert = None # Inicjalizacja na wypadek błędu
+        
         try:
             alert = AlertData.model_validate(alert_dict)
             symbol = alert.symbol
@@ -118,7 +127,8 @@ def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitEx
             executor.cancel_all_open_orders_for_symbol(symbol)
             
             rule = executor.get_instrument_info(symbol)
-            if not rule: continue
+            if not rule or not rule.get("tickSize") or not rule.get("qtyStep"):
+                raise Exception("Nie udało się pobrać zasad instrumentu.")
             
             tick_size, qty_step = rule["tickSize"], rule["qtyStep"]
 
@@ -137,27 +147,72 @@ def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitEx
                 sl_price=alert.sl, qty_step=qty_step
             )
 
-            if not final_qty or final_qty <= 0: continue
+            if not final_qty or final_qty <= 0:
+                continue
 
-            client_order_id = f"tradebot_{alert_id.replace('-', '')[:16]}_{int(datetime.now().timestamp())}"
+            # === NOWA, TRZYETAPOWA LOGIKA SKŁADANIA ZLECEŃ ===
             
-            order_params = {
-                "symbol": symbol, "side": alert.direction, "qty": final_qty,
-                "price": alert.entry, "stopLoss": alert.sl, 
-                "takeProfit": alert.tp_3_0,
-                "orderLinkId": client_order_id
+            # KROK 1: Złóż zlecenie wejściowe (LIMIT)
+            entry_order_id = f"entry_{alert_id.replace('-', '')[:12]}_{int(datetime.now().timestamp())}"
+            entry_params = {
+                "symbol": symbol,
+                "side": "Buy" if alert.direction == "LONG" else "Sell",
+                "orderType": "Limit",
+                "qty": final_qty,
+                "price": alert.entry,
+                "orderLinkId": entry_order_id,
+                "reduceOnly": False
             }
+            entry_response = executor.place_order(entry_params)
+            if not entry_response:
+                raise Exception("Krok 1/3: Nie udało się złożyć zlecenia wejściowego.")
             
-            order_response = executor.place_limit_order(order_params)
+            logger.info(f"[{symbol}] Krok 1/3: Zlecenie wejściowe (LIMIT) pomyślnie złożone.")
 
-            if order_response and order_response.get("orderId"):
-                order_id = order_response.get("orderId")
-                state_manager.save_active_order(
-                    order_id,
-                    {"symbol": symbol, "orderId": order_id, "status": "FILLED", "alert_id": alert_id}
-                )
+            # KROK 2: Złóż zlecenie Stop Loss (Warunkowy MARKET)
+            sl_params = {
+                "symbol": symbol,
+                "side": "Sell" if alert.direction == "LONG" else "Buy", # Odwrotny kierunek
+                "orderType": "Market",
+                "qty": final_qty,
+                "triggerPrice": alert.sl,
+                "triggerDirection": "Falling" if alert.direction == "LONG" else "Rising",
+                "reduceOnly": True
+            }
+            sl_response = executor.place_order(sl_params)
+            if not sl_response:
+                raise Exception("Krok 2/3: Nie udało się złożyć zlecenia Stop Loss.")
+
+            logger.info(f"[{symbol}] Krok 2/3: Zlecenie Stop Loss (MARKET) pomyślnie złożone.")
+
+            # KROK 3: Złóż zlecenie Take Profit (Warunkowy LIMIT)
+            tp_params = {
+                "symbol": symbol,
+                "side": "Sell" if alert.direction == "LONG" else "Buy", # Odwrotny kierunek
+                "orderType": "Limit",
+                "qty": final_qty,
+                "price": alert.tp_3_0, # Cena realizacji
+                "triggerPrice": alert.tp_3_0, # Cena aktywacji
+                "triggerDirection": "Rising" if alert.direction == "LONG" else "Falling",
+                "reduceOnly": True
+            }
+            tp_response = executor.place_order(tp_params)
+            if not tp_response:
+                raise Exception("Krok 3/3: Nie udało się złożyć zlecenia Take Profit.")
+
+            logger.info(f"[{symbol}] Krok 3/3: Zlecenie Take Profit (LIMIT) pomyślnie złożone. Pełen zestaw zleceń jest aktywny.")
+
+            # Zapisujemy stan do Firestore
+            state_manager.save_active_order(
+                entry_response.get("orderId"),
+                {"symbol": symbol, "orderId": entry_response.get("orderId"), "status": "NEW_BRACKET", "alert_id": alert_id}
+            )
+
         except Exception as e:
-            logger.error(f"Nieoczekiwany błąd podczas transakcyjnego przetwarzania alertu {alert_id}: {e}", exc_info=True)
+            logger.error(f"Błąd w procesie składania zleceń dla alertu {alert_id}: {e}", exc_info=False)
+            logger.warning(f"[{alert.symbol if alert else 'N/A'}] ANULOWANIE AWARYJNE: Próba anulowania wszystkich zleceń z powodu błędu.")
+            if alert and alert.symbol:
+                executor.cancel_all_open_orders_for_symbol(alert.symbol)
 
 
 def log_closed_positions_pnl(executor: BybitExecutor) -> int:

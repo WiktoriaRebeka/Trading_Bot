@@ -102,45 +102,57 @@ class BybitExecutor:
         except (RequestException, BybitAPIError):
             return None
 
-    def place_limit_order(self, order_params: Dict[str, Any]) -> Optional[Dict[str, str]]:
-        """Składa zlecenie wejścia LIMIT z zaawansowanymi opcjami TP/SL."""
-        symbol = order_params.get('symbol')
+    def place_order(self, params: Dict[str, Any]) -> Optional[Dict[str, str]]:
+        """
+        Uniwersalna funkcja do składania zleceň (Entry, TP, SL).
+        Buduje payload na podstawie przekazanych parametrów.
+        """
+        symbol = params.get('symbol')
+        if not symbol:
+            logger.error("Brak 'symbol' w parametrach zlecenia.")
+            return None
+
         api_symbol = symbol.replace('.P', '')
-        side_map = {"LONG": "Buy", "SHORT": "Sell"}
         
+        # Budujemy payload dynamicznie
         payload = {
             "category": "linear",
             "symbol": api_symbol,
-            "side": side_map[order_params['side']],
-            "orderType": "Limit",
-            "qty": str(order_params['qty']),
-            "price": str(order_params['price']),
-            "orderLinkId": order_params.get('orderLinkId'),
-            "timeInForce": "PostOnly",
-            "tpslMode": "Partial",
-            "takeProfit": str(order_params['takeProfit']),
-            "tpOrderType": "Limit",
-            "tpLimitPrice": str(order_params['takeProfit']),
-            "stopLoss": str(order_params['stopLoss']),
-            "slOrderType": "Market"
+            "side": params['side'],
+            "orderType": params['orderType'],
+            "qty": str(params['qty']),
+            "reduceOnly": params.get('reduceOnly', False) # Domyślnie False
         }
-        
-        logger.info(f"[{symbol}] Wysyłanie zlecenia Post-Only LIMIT z zaawansowanym TP/SL: {payload}")
+
+        # Parametry specyficzne dla zleceń LIMIT
+        if params['orderType'] == 'Limit':
+            payload['price'] = str(params['price'])
+            payload['timeInForce'] = params.get('timeInForce', 'GTC')
+
+        # Parametry specyficzne dla zleceń warunkowych (TP/SL)
+        if 'triggerPrice' in params:
+            payload['triggerPrice'] = str(params['triggerPrice'])
+            # 1: Rising (cena rośnie do triggera), 2: Falling (cena spada do triggera)
+            payload['triggerDirection'] = 1 if params.get('triggerDirection') == 'Rising' else 2
+            payload['triggerBy'] = params.get('triggerBy', 'LastPrice') # Jawne ustawienie triggera
+            payload['tpslMode'] = 'Full'
+
+        if 'orderLinkId' in params:
+            payload['orderLinkId'] = params['orderLinkId']
+
+        logger.info(f"[{symbol}] Wysyłanie zlecenia do Bybit: {payload}")
         try:
             result = self._send_request("POST", "/v5/order/create", params=payload)
+            logger.info(f"[{symbol}] Odpowiedź Bybit na place_order: {result}")
+            
             order_id = result.get("orderId")
             if order_id:
-                logger.info(f"[{symbol}] Zlecenie pomyślnie złożone. Order ID: {order_id}")
-                return {"orderId": order_id, "orderLinkId": result.get("orderLinkId")}
+                return result
+            
+            logger.error(f"[{symbol}] API Bybit nie zwróciło orderId. Pełna odpowiedź 'result': {result}")
             return None
-        except BybitAPIError as e:
-            if e.ret_code in [110004, 10001]:
-                logger.error(f"[{symbol}] Zlecenie odrzucone przez giełdę: {e.ret_msg} (Kod: {e.ret_code})")
-                return None
-            logger.critical(f"[{symbol}] Błąd API podczas składania zlecenia: {e}", exc_info=True)
-            return None
-        except RequestException as e:
-            logger.critical(f"[{symbol}] Błąd sieciowy podczas składania zlecenia: {e}", exc_info=True)
+        except (RequestException, BybitAPIError) as e:
+            logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD podczas składania zlecenia. Błąd: {e}", exc_info=True)
             return None
 
     def place_conditional_order(self, params: Dict[str, Any]) -> Optional[Dict[str, str]]:
