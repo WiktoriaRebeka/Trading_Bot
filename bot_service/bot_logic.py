@@ -23,6 +23,9 @@ from bot_service.fetch_from_firestore import fetch_new_alerts_since, save_last_p
 logger = logging.getLogger(__name__)
 
 
+BLOKADA!!!!!!!!!11
+
+
 def run_combined_cycle(executor: BybitExecutor):
     """
     Główna, połączona pętla logiki. Wykonuje zarówno analizę, jak i logikę transakcyjną.
@@ -167,7 +170,7 @@ def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitEx
 
             if not entry_response or not entry_response.get("orderId"):
                 raise Exception("Krok 1/3: Nie udało się złożyć zlecenia wejściowego.")
-            
+        
             entry_order_id = entry_response.get("orderId")
             logger.info(f"[{symbol}] Krok 1/3: Zlecenie wejściowe pomyślnie złożone. ID: {entry_order_id}")
 
