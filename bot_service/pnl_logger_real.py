@@ -1,9 +1,10 @@
 # Lokalizacja: bot_service/pnl_logger_real.py
+
 import logging
 from typing import Dict, Any
 from datetime import datetime, timezone
 from google.cloud import bigquery
-from decimal import Decimal, ROUND_DOWN, ROUND_UP
+from decimal import Decimal, ROUND_DOWN
 
 from bot_service import state_manager 
 from bot_service.bigquery_logger import get_bigquery_client, initialize_bigquery
@@ -11,12 +12,8 @@ from shared_lib import constants
 
 logger = logging.getLogger(__name__)
 
-# Definicja referencji do tabeli jest pobierana z centralnego miejsca
 REAL_TABLE_REF = f"{constants.BIGQUERY_PROJECT_ID}.{constants.BIGQUERY_DATASET_ID}.{constants.BIGQUERY_REAL_TRADES_TABLE_ID}"
 
-# ======================================================================================
-# === OSTATECZNA, ROZBUDOWANA SCHEMA DLA PEŁNEJ ANALIZY TRANSAKCJI ===
-# ======================================================================================
 REAL_TRADES_HISTORY_SCHEMA = [
     bigquery.SchemaField("alert_id", "STRING", mode="REQUIRED"),
     bigquery.SchemaField("order_id", "STRING", mode="REQUIRED"),
@@ -42,11 +39,9 @@ REAL_TRADES_HISTORY_SCHEMA = [
 def log_real_trade_result(enriched_pnl_data: Dict[str, Any]):
     """Transformuje wzbogacone dane PnL z Bybit, wzbogaca je o dane z alertu, oblicza R:R i zapisuje do BigQuery."""
     
-    # === POPRAWIONA LOGIKA INICJALIZACJI ===
-    # Sprawdzamy inicjalizację BigQuery na początku funkcji, a nie na poziomie modułu.
     if not initialize_bigquery():
         logger.error("BigQuery nie zostało zainicjalizowane – pomijam zapis real_trades_history.")
-        return # <-- Teraz ten 'return' jest wewnątrz funkcji i jest poprawny.
+        return
 
     alert_id = enriched_pnl_data.get("alert_id", "unknown")
     
@@ -75,7 +70,6 @@ def log_real_trade_result(enriched_pnl_data: Dict[str, Any]):
             planned_risk_usdt = risk_per_unit * qty
             
             if planned_risk_usdt > 0:
-                # Używamy zaokrąglenia, aby uniknąć błędów dzielenia przez bardzo małe liczby
                 realized_rrr = (net_pnl / planned_risk_usdt).quantize(Decimal('0.0001'), rounding=ROUND_DOWN)
         
         transformed_data = {
