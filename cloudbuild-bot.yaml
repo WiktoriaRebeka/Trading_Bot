@@ -34,6 +34,7 @@ steps:
     - 'app-connector-warsaw'
     - '--vpc-egress'
     - 'all-traffic'
+    - '--min-instances=1'
     - '--set-env-vars=GCP_PROJECT=$PROJECT_ID'
     - '--update-secrets'
     - 'BYBIT_API_KEY=bybit-api-key:latest,BYBIT_API_SECRET=bybit-api-secret:latest'
