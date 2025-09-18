@@ -55,6 +55,33 @@ def round_price_by_tick(price: float, tick_size: str, direction: str) -> float:
         
     return float(quantized)
 
+def _is_alert_still_valid(alert: AlertData, current_price: float) -> bool:
+    """
+    Sprawdza, czy alert nie jest przestarzały w kontekście aktualnej ceny rynkowej.
+    Zwraca False, jeśli poziom SL został już naruszony.
+    """
+    if alert.direction == 'LONG':
+        # Dla pozycji LONG, SL jest poniżej ceny wejścia.
+        # Jeśli aktualna cena jest już niższa niż SL, alert jest nieważny.
+        if current_price <= alert.sl:
+            logger.warning(
+                f"[{alert.symbol}] ODRZUCONO PRZESTARZAŁY ALERT (LONG). "
+                f"Aktualna cena ({current_price}) jest już poniżej lub równa SL ({alert.sl})."
+            )
+            return False
+    elif alert.direction == 'SHORT':
+        # Dla pozycji SHORT, SL jest powyżej ceny wejścia.
+        # Jeśli aktualna cena jest już wyższa niż SL, alert jest nieważny.
+        if current_price >= alert.sl:
+            logger.warning(
+                f"[{alert.symbol}] ODRZUCONO PRZESTARZAŁY ALERT (SHORT). "
+                f"Aktualna cena ({current_price}) jest już powyżej lub równa SL ({alert.sl})."
+            )
+            return False
+            
+    logger.info(f"[{alert.symbol}] Alert jest aktualny. Aktualna cena: {current_price}, SL: {alert.sl}, Kierunek: {alert.direction}.")
+    return True
+
 def _calculate_risk_percentage(entry_price: float, sl_price: float) -> Optional[float]:
     """Oblicza procentową odległość SL od ceny wejścia."""
     if entry_price == 0:
