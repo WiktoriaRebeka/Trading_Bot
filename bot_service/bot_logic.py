@@ -97,14 +97,11 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
     )
     return True
 
-# Lokalizacja: bot_service/bot_logic.py
-
 def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitExecutor):
     """
-    Przetwarza alerty, składając trzy oddzielne zlecenia:
-    1. Wejście: LIMIT
-    2. Stop Loss: Warunkowy MARKET
-    3. Take Profit: Warunkowy LIMIT
+    Przetwarza alerty, składając trzy oddzielne zlecenia.
+    Nowa logika: pozwala na otwarcie nowej pozycji, nawet jeśli inna jest już aktywna.
+    Nowy alert anuluje tylko poprzednie zlecenia OCZEKUJĄCE.
     """
     if not alerts:
         return
@@ -112,19 +109,33 @@ def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitEx
     for alert_dict in alerts:
         alert_id = alert_dict.get('id', 'unknown')
         alert = None # Inicjalizacja na wypadek błędu
-        
+
         try:
             alert = AlertData.model_validate(alert_dict)
             symbol = alert.symbol
             
-            if executor.has_open_position(symbol):
-                logger.info(f"[{symbol}] ZABEZPIECZENIE: Wykryto otwartą pozycję. Nowy alert ({alert_id}) zostaje zignorowany.")
-                continue
+            # === ZMIANA LOGIKI: USUNIĘCIE BLOKADY NA OTWARTEJ POZYCJI ===
+            # Usunęliśmy `if executor.has_open_position(symbol): continue`
+            # Zamiast tego, po prostu anulujemy wszystkie zlecenia, które jeszcze nie weszły do gry.
+            # To jest bezpieczne, ponieważ zlecenia TP/SL są warunkowe i nie zostaną anulowane,
+            # jeśli są już powiązane z otwartą pozycją (są to zlecenia typu "trigger").
+            # Natomiast zlecenia LIMIT, które nie weszły, zostaną usunięte, co jest pożądane.
+            logger.info(f"[{symbol}] Otrzymano nowy alert. Anuluję wszystkie oczekujące zlecenia LIMIT, aby przygotować miejsce.")
+            executor.cancel_all_open_orders_for_symbol(symbol)
             
             if not _correct_and_validate_alert(alert):
                 continue
 
-            executor.cancel_all_open_orders_for_symbol(symbol)
+            # === KROK 1: WERYFIKACJA AKTUALNOŚCI ALERTU (z poprzedniej poprawki) ===
+            current_price = executor.get_latest_ticker_price(symbol)
+            if current_price is None:
+                logger.error(f"[{symbol}] Nie udało się pobrać aktualnej ceny rynkowej. Pomijam alert {alert_id}.")
+                continue
+            
+            if not _is_alert_still_valid(alert, current_price):
+                continue
+
+            # === KONIEC WERYFIKACJI ===
             
             rule = executor.get_instrument_info(symbol)
             if not rule or not rule.get("tickSize") or not rule.get("qtyStep"):
@@ -150,7 +161,7 @@ def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitEx
             if not final_qty or final_qty <= 0:
                 continue
 
-            # === NOWA, TRZYETAPOWA LOGIKA SKŁADANIA ZLECEŃ ===
+            # === TRZYETAPOWA LOGIKA SKŁADANIA ZLECEŃ ===
             
             # KROK 1: Złóż zlecenie wejściowe (LIMIT)
             entry_order_id = f"entry_{alert_id.replace('-', '')[:12]}_{int(datetime.now().timestamp())}"
@@ -172,7 +183,7 @@ def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitEx
             # KROK 2: Złóż zlecenie Stop Loss (Warunkowy MARKET)
             sl_params = {
                 "symbol": symbol,
-                "side": "Sell" if alert.direction == "LONG" else "Buy", # Odwrotny kierunek
+                "side": "Sell" if alert.direction == "LONG" else "Buy",
                 "orderType": "Market",
                 "qty": final_qty,
                 "triggerPrice": alert.sl,
@@ -188,11 +199,11 @@ def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitEx
             # KROK 3: Złóż zlecenie Take Profit (Warunkowy LIMIT)
             tp_params = {
                 "symbol": symbol,
-                "side": "Sell" if alert.direction == "LONG" else "Buy", # Odwrotny kierunek
+                "side": "Sell" if alert.direction == "LONG" else "Buy",
                 "orderType": "Limit",
                 "qty": final_qty,
-                "price": alert.tp_3_0, # Cena realizacji
-                "triggerPrice": alert.tp_3_0, # Cena aktywacji
+                "price": alert.tp_3_0,
+                "triggerPrice": alert.tp_3_0,
                 "triggerDirection": "Rising" if alert.direction == "LONG" else "Falling",
                 "reduceOnly": True
             }
@@ -202,7 +213,6 @@ def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitEx
 
             logger.info(f"[{symbol}] Krok 3/3: Zlecenie Take Profit (LIMIT) pomyślnie złożone. Pełen zestaw zleceń jest aktywny.")
 
-            # Zapisujemy stan do Firestore
             state_manager.save_active_order(
                 entry_response.get("orderId"),
                 {"symbol": symbol, "orderId": entry_response.get("orderId"), "status": "NEW_BRACKET", "alert_id": alert_id}
