@@ -85,6 +85,25 @@ class BybitExecutor:
             logger.error(f"Nieoczekiwany błąd w _send_request: {e}", exc_info=True)
             raise
 
+
+    def get_latest_ticker_price(self, symbol: str) -> Optional[float]:
+        """
+        Pobiera ostatnią cenę (last price) dla danego symbolu.
+        """
+        api_symbol = symbol.replace('.P', '')
+        params = {"category": "linear", "symbol": api_symbol}
+        try:
+            result = self._send_request("GET", "/v5/market/tickers", params=params)
+            if result and result.get('list'):
+                ticker_data = result['list'][0]
+                last_price = ticker_data.get('lastPrice')
+                if last_price:
+                    return float(last_price)
+            logger.warning(f"[{symbol}] Nie znaleziono 'lastPrice' w odpowiedzi z endpointu /tickers.")
+            return None
+        except (RequestException, BybitAPIError) as e:
+            logger.error(f"[{symbol}] Błąd podczas pobierania aktualnej ceny rynkowej: {e}")
+            return None
     def get_instrument_info(self, symbol: str) -> Optional[Dict[str, Any]]:
         # ... (bez zmian)
         api_symbol = symbol.replace('.P', '')
