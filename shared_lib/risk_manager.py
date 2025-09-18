@@ -37,37 +37,32 @@ def calculate_position_size(
 ) -> Optional[float]:
     """
     Oblicza finalną, zaokrągloną ilość (Qty) kryptowaluty na podstawie
-    zdefiniowanego ryzyka w USDT i procentowej odległości do SL, uwzględniając opłaty.
+    zdefiniowanego ryzyka w USDT i nominalnej odległości do SL.
+    Zakładamy, że opłaty są już uwzględnione w poziomach TP przesyłanych w alercie.
     """
     if entry_price <= 0 or sl_price <= 0:
         logger.warning("Cena wejścia i SL muszą być dodatnie.")
         return None
 
-    # 1. Oblicz nominalną odległość do SL w procentach
-    nominal_risk_perc = abs(entry_price - sl_price) / entry_price
-    
-    # 2. Dodaj opłaty, aby uzyskać całkowite ryzyko procentowe
-    total_risk_perc = nominal_risk_perc + TOTAL_FEE_PERCENT
-    
-    if total_risk_perc == 0:
-        logger.warning("Całkowite ryzyko procentowe wynosi zero, nie można obliczyć wielkości pozycji.")
+    # 1. Oblicz nominalną odległość do SL w punktach (dolarach na jednostkę)
+    risk_per_unit = abs(entry_price - sl_price)
+
+    if risk_per_unit == 0:
+        logger.warning("Odległość do SL wynosi zero, nie można obliczyć wielkości pozycji.")
         return None
 
-    # 3. Oblicz docelową wartość pozycji w USDT
-    position_value_usdt = risk_per_trade_usdt / total_risk_perc
-    
-    # 4. Przelicz wartość w USDT na idealną ilość kryptowaluty
-    ideal_qty = position_value_usdt / entry_price
-    
-    # 5. Zaokrąglij ilość w dół do najbliższego dozwolonego kroku
+    # 2. Oblicz idealną ilość (Qty) na podstawie zdefiniowanego ryzyka w USDT
+    # Wzór: Ryzyko [USDT] / Ryzyko na jednostkę [USDT/jednostkę] = Ilość [jednostek]
+    ideal_qty = risk_per_trade_usdt / risk_per_unit
+
+    # 3. Zaokrąglij ilość w dół do najbliższego dozwolonego kroku
     final_qty = round_quantity_by_step(ideal_qty, qty_step)
-    
+
     logger.info(
-        f"Obliczanie wielkości pozycji: Ryzyko={risk_per_trade_usdt} USDT, "
+        f"Obliczanie wielkości pozycji (uproszczone): Ryzyko={risk_per_trade_usdt} USDT, "
         f"Entry={entry_price}, SL={sl_price}, "
-        f"Całkowite ryzyko %={total_risk_perc:.4f}, "
-        f"Wartość pozycji={position_value_usdt:.2f} USDT, "
+        f"Ryzyko na jednostkę={risk_per_unit:.4f} USDT, "
         f"Finalna ilość (Qty)={final_qty}"
     )
-    
+
     return final_qty
