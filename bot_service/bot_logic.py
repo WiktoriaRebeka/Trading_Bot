@@ -122,7 +122,7 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
 def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitExecutor):
     """
     Przetwarza alerty, składając zlecenia.
-    FINALNA WERSJA: Jawne użycie 'orderFilter' dla maksymalnej precyzji.
+    FINALNA WERSJA: Jawne użycie 'orderFilter', 'timeInForce' i 'closeOnTrigger' dla maksymalnej precyzji i bezpieczeństwa.
     """
     if not alerts:
         return
@@ -145,7 +145,7 @@ def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitEx
                     )
                     continue
             
-            logger.info(f"[{symbol}] Otrzymano nowy alert. Anuluję wszystkie oczekujące zlecenia LIMIT, aby przygotować miejsce.")
+            logger.info(f"[{symbol}] Otrzymano nowy alert. Anuluję wszystkie oczekujące zlecenia, aby przygotować miejsce.")
             executor.cancel_all_open_orders_for_symbol(symbol)
             
             if not _correct_and_validate_alert(alert):
@@ -193,7 +193,8 @@ def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitEx
                 "price": alert.entry,
                 "orderLinkId": entry_order_id,
                 "reduceOnly": False,
-                "orderFilter": "Order"  # Jawne określenie typu
+                "timeInForce": "GTC", # Jawne ustawienie
+                "orderFilter": "Order"
             }
             entry_response = executor.place_order(entry_params)
             if not entry_response:
@@ -211,8 +212,9 @@ def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitEx
                 "triggerDirection": "Falling" if alert.direction == "LONG" else "Rising",
                 "triggerBy": "LastPrice",
                 "reduceOnly": True,
+                "closeOnTrigger": True, # Dodatkowe zabezpieczenie
                 "orderLinkId": f"sl_{alert_id.replace('-', '')[:12]}_{int(datetime.now().timestamp())}",
-                "orderFilter": "StopOrder" # Jawne określenie typu
+                "orderFilter": "StopOrder"
             }
             sl_response = executor.place_order(sl_params)
             if not sl_response:
@@ -228,8 +230,9 @@ def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitEx
                 "qty": final_qty,
                 "price": alert.tp_3_0,
                 "reduceOnly": True,
+                "timeInForce": "GTC", # Jawne ustawienie
                 "orderLinkId": f"tp_{alert_id.replace('-', '')[:12]}_{int(datetime.now().timestamp())}",
-                "orderFilter": "Order" # Jawne określenie typu
+                "orderFilter": "Order"
             }
             tp_response = executor.place_order(tp_params)
             if not tp_response:
@@ -249,7 +252,7 @@ def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitEx
                     f"Alert stał się przestarzały między weryfikacją a złożeniem zlecenia. Pomijam."
                 )
             else:
-                logger.error(f"Błąd API Bybit w procesie składania zleceň dla alertu {alert_id}: {e}", exc_info=False)
+                logger.error(f"Błąd API Bybit w procesie składania zleceń dla alertu {alert_id}: {e}", exc_info=False)
                 logger.warning(f"[{alert.symbol if alert else 'N/A'}] ANULOWANIE AWARYJNE: Próba anulowania wszystkich zleceň z powodu błędu.")
                 if alert and alert.symbol:
                     executor.cancel_all_open_orders_for_symbol(alert.symbol)
