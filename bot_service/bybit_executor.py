@@ -125,8 +125,8 @@ class BybitExecutor:
 
     def place_order(self, params: Dict[str, Any]) -> Optional[Dict[str, str]]:
         """
-        Uniwersalna funkcja do składania zleceň (Entry, TP, SL).
-        Buduje payload na podstawie przekazanych parametrów.
+        Uniwersalna funkcja do składania zleceń.
+        Obsługuje zlecenia proste, warunkowe oraz zintegrowane SL/TP.
         """
         symbol = params.get('symbol')
         if not symbol:
@@ -142,24 +142,22 @@ class BybitExecutor:
             "side": params['side'],
             "orderType": params['orderType'],
             "qty": str(params['qty']),
-            "reduceOnly": params.get('reduceOnly', False) # Domyślnie False
         }
 
-        # Parametry specyficzne dla zleceń LIMIT
-        if params['orderType'] == 'Limit':
-            payload['price'] = str(params['price'])
-            payload['timeInForce'] = params.get('timeInForce', 'GTC')
-
-        # Parametry specyficzne dla zleceń warunkowych (TP/SL)
-        if 'triggerPrice' in params:
-            payload['triggerPrice'] = str(params['triggerPrice'])
-            # 1: Rising (cena rośnie do triggera), 2: Falling (cena spada do triggera)
-            payload['triggerDirection'] = 1 if params.get('triggerDirection') == 'Rising' else 2
-            payload['triggerBy'] = params.get('triggerBy', 'LastPrice') # Jawne ustawienie triggera
-            payload['tpslMode'] = 'Full'
-
-        if 'orderLinkId' in params:
-            payload['orderLinkId'] = params['orderLinkId']
+        # Dodajemy parametry, jeśli istnieją w słowniku wejściowym
+        # To sprawia, że funkcja jest uniwersalna
+        optional_params = [
+            "price", "triggerPrice", "triggerDirection", "triggerBy", "orderFilter",
+            "reduceOnly", "closeOnTrigger", "timeInForce", "orderLinkId",
+            "takeProfit", "stopLoss" # <-- Kluczowe dodane parametry
+        ]
+        for param in optional_params:
+            if param in params:
+                # triggerDirection musi być liczbą
+                if param == "triggerDirection":
+                    payload[param] = 1 if params[param] == 'Rising' else 2
+                else:
+                    payload[param] = str(params[param])
 
         logger.info(f"[{symbol}] Wysyłanie zlecenia do Bybit: {payload}")
         try:
@@ -173,8 +171,10 @@ class BybitExecutor:
             logger.error(f"[{symbol}] API Bybit nie zwróciło orderId. Pełna odpowiedź 'result': {result}")
             return None
         except (RequestException, BybitAPIError) as e:
+            raise  # Przekazujemy wyjątek wyżej, do bot_logic
+        except Exception as e:
             logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD podczas składania zlecenia. Błąd: {e}", exc_info=True)
-            return None
+            raise
 
     def place_conditional_order(self, params: Dict[str, Any]) -> Optional[Dict[str, str]]:
         """Składa zaawansowane zlecenie warunkowe (dla TP lub SL)."""

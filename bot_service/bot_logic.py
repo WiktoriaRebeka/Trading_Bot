@@ -121,8 +121,7 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
 
 def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitExecutor):
     """
-    Przetwarza alerty, składając zlecenia.
-    FINALNA WERSJA: Jawne użycie 'orderFilter', 'timeInForce' i 'closeOnTrigger' dla maksymalnej precyzji i bezpieczeństwa.
+    Przetwarza alerty, składając jedno, zintegrowane zlecenie (Bracket Order).
     """
     if not alerts:
         return
@@ -141,11 +140,11 @@ def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitEx
                 if alert.direction != open_position_side:
                     logger.warning(
                         f"[{symbol}] ZABEZPIECZENIE: Wykryto otwartą pozycję {open_position_side}. "
-                        f"Nowy, przeciwny alert ({alert.direction}) zostaje zignorowany, aby chronić istniejącą transakcję."
+                        f"Nowy, przeciwny alert ({alert.direction}) zostaje zignorowany."
                     )
                     continue
             
-            logger.info(f"[{symbol}] Otrzymano nowy alert. Anuluję wszystkie oczekujące zlecenia, aby przygotować miejsce.")
+            logger.info(f"[{symbol}] Otrzymano nowy alert. Anuluję wszystkie oczekujące zlecenia.")
             executor.cancel_all_open_orders_for_symbol(symbol)
             
             if not _correct_and_validate_alert(alert):
@@ -183,82 +182,45 @@ def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitEx
             if not final_qty or final_qty <= 0:
                 continue
             
-            # === KROK 1: Złóż zlecenie wejściowe (LIMIT) ===
-            entry_order_id = f"entry_{alert_id.replace('-', '')[:12]}_{int(datetime.now().timestamp())}"
-            entry_params = {
+            # === NOWA, JEDNOETAPOWA LOGIKA SKŁADANIA ZLECEŃ ===
+            order_link_id = f"bracket_{alert_id.replace('-', '')[:12]}_{int(datetime.now().timestamp())}"
+            
+            order_params = {
                 "symbol": symbol,
                 "side": "Buy" if alert.direction == "LONG" else "Sell",
                 "orderType": "Limit",
                 "qty": final_qty,
                 "price": alert.entry,
-                "orderLinkId": entry_order_id,
-                "reduceOnly": False,
-                "timeInForce": "GTC", # Jawne ustawienie
-                "orderFilter": "Order"
+                "takeProfit": alert.tp_3_0,
+                "stopLoss": alert.sl,
+                "orderLinkId": order_link_id,
+                "timeInForce": "GTC"
             }
-            entry_response = executor.place_order(entry_params)
-            if not entry_response:
-                raise Exception("Krok 1/3: Nie udało się złożyć zlecenia wejściowego.")
-            
-            logger.info(f"[{symbol}] Krok 1/3: Zlecenie wejściowe (LIMIT) pomyślnie złożone.")
 
-            # === KROK 2: Złóż zlecenie Stop Loss (WARUNKOWY MARKET) ===
-            sl_params = {
-                "symbol": symbol,
-                "side": "Sell" if alert.direction == "LONG" else "Buy",
-                "orderType": "Market",
-                "qty": final_qty,
-                "triggerPrice": alert.sl,
-                "triggerDirection": "Falling" if alert.direction == "LONG" else "Rising",
-                "triggerBy": "LastPrice",
-                "reduceOnly": True,
-                "closeOnTrigger": True, # Dodatkowe zabezpieczenie
-                "orderLinkId": f"sl_{alert_id.replace('-', '')[:12]}_{int(datetime.now().timestamp())}",
-                "orderFilter": "StopOrder"
-            }
-            sl_response = executor.place_order(sl_params)
-            if not sl_response:
-                raise Exception("Krok 2/3: Nie udało się złożyć zlecenia Stop Loss.")
+            response = executor.place_order(order_params)
+            if not response:
+                raise Exception("Nie udało się złożyć zlecenia zintegrowanego (Bracket Order).")
 
-            logger.info(f"[{symbol}] Krok 2/3: Zlecenie Stop Loss (WARUNKOWY MARKET) pomyślnie złożone.")
-
-            # === KROK 3: Złóż zlecenie Take Profit (ZWYKŁY LIMIT) ===
-            tp_params = {
-                "symbol": symbol,
-                "side": "Sell" if alert.direction == "LONG" else "Buy",
-                "orderType": "Limit",
-                "qty": final_qty,
-                "price": alert.tp_3_0,
-                "reduceOnly": True,
-                "timeInForce": "GTC", # Jawne ustawienie
-                "orderLinkId": f"tp_{alert_id.replace('-', '')[:12]}_{int(datetime.now().timestamp())}",
-                "orderFilter": "Order"
-            }
-            tp_response = executor.place_order(tp_params)
-            if not tp_response:
-                raise Exception("Krok 3/3: Nie udało się złożyć zlecenia Take Profit.")
-
-            logger.info(f"[{symbol}] Krok 3/3: Zlecenie Take Profit (LIMIT) pomyślnie złożone. Pełen zestaw zleceń jest aktywny.")
+            logger.info(f"[{symbol}] Zlecenie zintegrowane (Entry+SL+TP) pomyślnie złożone.")
 
             state_manager.save_active_order(
-                entry_response.get("orderId"),
-                {"symbol": symbol, "orderId": entry_response.get("orderId"), "status": "NEW_BRACKET", "alert_id": alert_id}
+                response.get("orderId"),
+                {"symbol": symbol, "orderId": response.get("orderId"), "status": "NEW_BRACKET", "alert_id": alert_id}
             )
 
         except BybitAPIError as e:
             if e.ret_code == 110093:
                 logger.warning(
-                    f"[{alert.symbol if alert else 'N/A'}] Zlecenie odrzucone przez Bybit (110093) z powodu opóźnienia/race condition. "
-                    f"Alert stał się przestarzały między weryfikacją a złożeniem zlecenia. Pomijam."
+                    f"[{alert.symbol if alert else 'N/A'}] Zlecenie odrzucone (110093) z powodu race condition. Pomijam."
                 )
             else:
-                logger.error(f"Błąd API Bybit w procesie składania zleceń dla alertu {alert_id}: {e}", exc_info=False)
-                logger.warning(f"[{alert.symbol if alert else 'N/A'}] ANULOWANIE AWARYJNE: Próba anulowania wszystkich zleceň z powodu błędu.")
+                logger.error(f"Błąd API Bybit dla alertu {alert_id}: {e}", exc_info=False)
+                logger.warning(f"[{alert.symbol if alert else 'N/A'}] ANULOWANIE AWARYJNE.")
                 if alert and alert.symbol:
                     executor.cancel_all_open_orders_for_symbol(alert.symbol)
         except Exception as e:
-            logger.error(f"Błąd w procesie składania zleceň dla alertu {alert_id}: {e}", exc_info=False)
-            logger.warning(f"[{alert.symbol if alert else 'N/A'}] ANULOWANIE AWARYJNE: Próba anulowania wszystkich zleceň z powodu błędu.")
+            logger.error(f"Błąd w procesie składania zleceń dla alertu {alert_id}: {e}", exc_info=False)
+            logger.warning(f"[{alert.symbol if alert else 'N/A'}] ANULOWANIE AWARYJNE.")
             if alert and alert.symbol:
                 executor.cancel_all_open_orders_for_symbol(alert.symbol)
 
