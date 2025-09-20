@@ -16,7 +16,7 @@ from shared_lib.risk_manager import calculate_position_size
 from bot_service import state_manager
 from bot_service.bigquery_logger import log_analysis_result
 from bot_service.pnl_logger_real import log_real_trade_result
-from bot_service.bybit_executor import BybitExecutor
+from bot_service.bybit_executor import BybitExecutor, BybitAPIError # <-- WAŻNE: Dodaj import BybitAPIError
 from bot_service.fetch_from_firestore import fetch_new_alerts_since, save_last_processed_timestamp, load_last_processed_timestamp
 
 logger = logging.getLogger(__name__)
@@ -61,8 +61,6 @@ def _is_alert_still_valid(alert: AlertData, current_price: float) -> bool:
     Zwraca False, jeśli poziom SL został już naruszony.
     """
     if alert.direction == 'LONG':
-        # Dla pozycji LONG, SL jest poniżej ceny wejścia.
-        # Jeśli aktualna cena jest już niższa niż SL, alert jest nieważny.
         if current_price <= alert.sl:
             logger.warning(
                 f"[{alert.symbol}] ODRZUCONO PRZESTARZAŁY ALERT (LONG). "
@@ -70,8 +68,6 @@ def _is_alert_still_valid(alert: AlertData, current_price: float) -> bool:
             )
             return False
     elif alert.direction == 'SHORT':
-        # Dla pozycji SHORT, SL jest powyżej ceny wejścia.
-        # Jeśli aktualna cena jest już wyższa niż SL, alert jest nieważny.
         if current_price >= alert.sl:
             logger.warning(
                 f"[{alert.symbol}] ODRZUCONO PRZESTARZAŁY ALERT (SHORT). "
@@ -94,7 +90,6 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
     """
     Waliduje logikę biznesową alertu. Zwraca True, jeśli jest poprawny, False w przeciwnym razie.
     """
-
     if not alert.direction or alert.direction not in ["LONG", "SHORT"]:
         logger.warning(
             f"Odrzucono alert [{alert.symbol}]: Brak lub nieprawidłowy kierunek ('{alert.direction}'). "
@@ -127,33 +122,24 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
 def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitExecutor):
     """
     Przetwarza alerty, składając trzy oddzielne zlecenia.
-    Nowa logika: pozwala na otwarcie nowej pozycji, nawet jeśli inna jest już aktywna.
-    Nowy alert anuluje tylko poprzednie zlecenia OCZEKUJĄCE.
     """
     if not alerts:
         return
 
     for alert_dict in alerts:
         alert_id = alert_dict.get('id', 'unknown')
-        alert = None # Inicjalizacja na wypadek błędu
+        alert = None
 
         try:
             alert = AlertData.model_validate(alert_dict)
             symbol = alert.symbol
             
-            # === ZMIANA LOGIKI: USUNIĘCIE BLOKADY NA OTWARTEJ POZYCJI ===
-            # Usunęliśmy `if executor.has_open_position(symbol): continue`
-            # Zamiast tego, po prostu anulujemy wszystkie zlecenia, które jeszcze nie weszły do gry.
-            # To jest bezpieczne, ponieważ zlecenia TP/SL są warunkowe i nie zostaną anulowane,
-            # jeśli są już powiązane z otwartą pozycją (są to zlecenia typu "trigger").
-            # Natomiast zlecenia LIMIT, które nie weszły, zostaną usunięte, co jest pożądane.
             logger.info(f"[{symbol}] Otrzymano nowy alert. Anuluję wszystkie oczekujące zlecenia LIMIT, aby przygotować miejsce.")
             executor.cancel_all_open_orders_for_symbol(symbol)
             
             if not _correct_and_validate_alert(alert):
                 continue
 
-            # === KROK 1: WERYFIKACJA AKTUALNOŚCI ALERTU (z poprzedniej poprawki) ===
             current_price = executor.get_latest_ticker_price(symbol)
             if current_price is None:
                 logger.error(f"[{symbol}] Nie udało się pobrać aktualnej ceny rynkowej. Pomijam alert {alert_id}.")
@@ -161,8 +147,6 @@ def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitEx
             
             if not _is_alert_still_valid(alert, current_price):
                 continue
-
-            # === KONIEC WERYFIKACJI ===
             
             rule = executor.get_instrument_info(symbol)
             if not rule or not rule.get("tickSize") or not rule.get("qtyStep"):
@@ -187,10 +171,7 @@ def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitEx
 
             if not final_qty or final_qty <= 0:
                 continue
-
-            # === TRZYETAPOWA LOGIKA SKŁADANIA ZLECEŃ ===
             
-            # KROK 1: Złóż zlecenie wejściowe (LIMIT)
             entry_order_id = f"entry_{alert_id.replace('-', '')[:12]}_{int(datetime.now().timestamp())}"
             entry_params = {
                 "symbol": symbol,
@@ -207,7 +188,6 @@ def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitEx
             
             logger.info(f"[{symbol}] Krok 1/3: Zlecenie wejściowe (LIMIT) pomyślnie złożone.")
 
-            # KROK 2: Złóż zlecenie Stop Loss (Warunkowy MARKET)
             sl_params = {
                 "symbol": symbol,
                 "side": "Sell" if alert.direction == "LONG" else "Buy",
@@ -223,7 +203,6 @@ def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitEx
 
             logger.info(f"[{symbol}] Krok 2/3: Zlecenie Stop Loss (MARKET) pomyślnie złożone.")
 
-            # KROK 3: Złóż zlecenie Take Profit (Warunkowy LIMIT)
             tp_params = {
                 "symbol": symbol,
                 "side": "Sell" if alert.direction == "LONG" else "Buy",
@@ -245,12 +224,30 @@ def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitEx
                 {"symbol": symbol, "orderId": entry_response.get("orderId"), "status": "NEW_BRACKET", "alert_id": alert_id}
             )
 
+        # === NOWY, POPRAWIONY BLOK OBSŁUGI BŁĘDÓW ===
+        except BybitAPIError as e:
+            if e.ret_code == 110093:
+                logger.warning(
+                    f"[{alert.symbol if alert else 'N/A'}] Zlecenie odrzucone przez Bybit (110093) z powodu opóźnienia/race condition. "
+                    f"Alert stał się przestarzały między weryfikacją a złożeniem zlecenia. Pomijam."
+                )
+                # Celowo nie robimy tu awaryjnego anulowania, ponieważ błąd wystąpił
+                # podczas składania zlecenia SL/TP, a zlecenie wejściowe mogło już zostać złożone.
+                # Pozostawienie go do anulowania w następnym cyklu jest bezpieczniejsze.
+            else:
+                # Inne błędy API traktujemy jak dotychczas
+                logger.error(f"Błąd API Bybit w procesie składania zleceń dla alertu {alert_id}: {e}", exc_info=False)
+                logger.warning(f"[{alert.symbol if alert else 'N/A'}] ANULOWANIE AWARYJNE: Próba anulowania wszystkich zleceń z powodu błędu.")
+                if alert and alert.symbol:
+                    executor.cancel_all_open_orders_for_symbol(alert.symbol)
         except Exception as e:
             logger.error(f"Błąd w procesie składania zleceń dla alertu {alert_id}: {e}", exc_info=False)
             logger.warning(f"[{alert.symbol if alert else 'N/A'}] ANULOWANIE AWARYJNE: Próba anulowania wszystkich zleceń z powodu błędu.")
             if alert and alert.symbol:
                 executor.cancel_all_open_orders_for_symbol(alert.symbol)
 
+# ... reszta pliku (log_closed_positions_pnl, process_new_alerts_analytical, etc.) pozostaje bez zmian ...
+# Poniżej wklejam resztę pliku dla kompletności.
 
 def log_closed_positions_pnl(executor: BybitExecutor) -> int:
     """
@@ -272,23 +269,19 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
     processed_count = 0
     
     for pnl_record in pnl_records:
-        # === KLUCZOWA ZMIANA: Dopasowujemy po symbolu, a nie po orderId ===
         symbol = pnl_record.get("symbol")
         if not symbol:
             logger.warning("[PNL_LOGGER] Pominięto rekord PnL bez symbolu.", extra={"json_fields": {"pnl_record": pnl_record}})
             continue
 
-        # Używamy nowej, bardziej niezawodnej metody wyszukiwania
         active_order_data = state_manager.get_active_order_by_symbol(symbol)
         
         if not active_order_data:
-            # Ten log jest teraz bardziej precyzyjny - może oznaczać, że transakcja nie była nasza.
             logger.warning(f"[PNL_LOGGER] Nie znaleziono aktywnego zlecenia dla symbolu {symbol} w Firestore. Prawdopodobnie transakcja manualna. Pomijam.")
             continue
 
-        # Pobieramy kluczowe identyfikatory z naszego dokumentu w Firestore
         alert_id = active_order_data.get('alert_id', 'unknown')
-        original_order_id = active_order_data.get('orderId') # To jest ID dokumentu, którego potrzebujemy do usunięcia
+        original_order_id = active_order_data.get('orderId')
 
         if not original_order_id:
             logger.error(f"[PNL_LOGGER] Krytyczny błąd: znaleziono dopasowanie dla {symbol}, ale brak orderId w dokumencie Firestore. Pomijam.", extra={"json_fields": active_order_data})
@@ -302,7 +295,6 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
         log_real_trade_result(enriched_pnl_data)
         processed_count += 1
         
-        # Usuwamy dokument używając jego poprawnego, oryginalnego ID
         state_manager.delete_active_order_by_id(original_order_id)
 
         updated_time_ms = int(pnl_record.get("updatedTime", 0))
@@ -346,7 +338,6 @@ def process_new_alerts_analytical(newly_fetched_alerts: List[Dict[str, Any]]):
             else:
                 tick_size = rule["tickSize"]
                 
-                # === ZMIENIONA LOGIKA ZAOKRĄGLANIA ===
                 if alert_data_model.direction == 'LONG':
                     alert_data_model.entry = round_price_by_tick(alert_data_model.entry, tick_size, 'up')
                     alert_data_model.sl = round_price_by_tick(alert_data_model.sl, tick_size, 'down')
