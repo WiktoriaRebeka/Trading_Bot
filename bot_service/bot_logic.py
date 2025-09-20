@@ -121,7 +121,8 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
 
 def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitExecutor):
     """
-    Przetwarza alerty, składając trzy oddzielne zlecenia.
+    Przetwarza alerty, składając zlecenia.
+    NOWA POPRAWKA: Ignoruje przeciwne sygnały, jeśli pozycja jest już otwarta.
     """
     if not alerts:
         return
@@ -133,6 +134,19 @@ def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitEx
         try:
             alert = AlertData.model_validate(alert_dict)
             symbol = alert.symbol
+
+            # === NOWY STRAŻNIK CHRONIĄCY OTWARTE POZYCJE ===
+            open_position_side = executor.get_open_position_side(symbol)
+            
+            if open_position_side and open_position_side != "ERROR":
+                if alert.direction != open_position_side:
+                    logger.warning(
+                        f"[{symbol}] ZABEZPIECZENIE: Wykryto otwartą pozycję {open_position_side}. "
+                        f"Nowy, przeciwny alert ({alert.direction}) zostaje zignorowany, aby chronić istniejącą transakcję."
+                    )
+                    continue # Przejdź do następnego alertu, nic nie rób z tym
+
+            # Jeśli nie ma otwartej pozycji, lub nowy alert jest zgodny z kierunkiem, kontynuuj...
             
             logger.info(f"[{symbol}] Otrzymano nowy alert. Anuluję wszystkie oczekujące zlecenia LIMIT, aby przygotować miejsce.")
             executor.cancel_all_open_orders_for_symbol(symbol)
@@ -224,30 +238,22 @@ def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitEx
                 {"symbol": symbol, "orderId": entry_response.get("orderId"), "status": "NEW_BRACKET", "alert_id": alert_id}
             )
 
-        # === NOWY, POPRAWIONY BLOK OBSŁUGI BŁĘDÓW ===
         except BybitAPIError as e:
             if e.ret_code == 110093:
                 logger.warning(
                     f"[{alert.symbol if alert else 'N/A'}] Zlecenie odrzucone przez Bybit (110093) z powodu opóźnienia/race condition. "
                     f"Alert stał się przestarzały między weryfikacją a złożeniem zlecenia. Pomijam."
                 )
-                # Celowo nie robimy tu awaryjnego anulowania, ponieważ błąd wystąpił
-                # podczas składania zlecenia SL/TP, a zlecenie wejściowe mogło już zostać złożone.
-                # Pozostawienie go do anulowania w następnym cyklu jest bezpieczniejsze.
             else:
-                # Inne błędy API traktujemy jak dotychczas
                 logger.error(f"Błąd API Bybit w procesie składania zleceń dla alertu {alert_id}: {e}", exc_info=False)
-                logger.warning(f"[{alert.symbol if alert else 'N/A'}] ANULOWANIE AWARYJNE: Próba anulowania wszystkich zleceń z powodu błędu.")
+                logger.warning(f"[{alert.symbol if alert else 'N/A'}] ANULOWANIE AWARYJNE: Próba anulowania wszystkich zleceň z powodu błędu.")
                 if alert and alert.symbol:
                     executor.cancel_all_open_orders_for_symbol(alert.symbol)
         except Exception as e:
-            logger.error(f"Błąd w procesie składania zleceń dla alertu {alert_id}: {e}", exc_info=False)
-            logger.warning(f"[{alert.symbol if alert else 'N/A'}] ANULOWANIE AWARYJNE: Próba anulowania wszystkich zleceń z powodu błędu.")
+            logger.error(f"Błąd w procesie składania zleceň dla alertu {alert_id}: {e}", exc_info=False)
+            logger.warning(f"[{alert.symbol if alert else 'N/A'}] ANULOWANIE AWARYJNE: Próba anulowania wszystkich zleceň z powodu błędu.")
             if alert and alert.symbol:
                 executor.cancel_all_open_orders_for_symbol(alert.symbol)
-
-# ... reszta pliku (log_closed_positions_pnl, process_new_alerts_analytical, etc.) pozostaje bez zmian ...
-# Poniżej wklejam resztę pliku dla kompletności.
 
 def log_closed_positions_pnl(executor: BybitExecutor) -> int:
     """

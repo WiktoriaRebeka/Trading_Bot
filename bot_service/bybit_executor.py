@@ -105,7 +105,7 @@ class BybitExecutor:
             logger.error(f"[{symbol}] Błąd podczas pobierania aktualnej ceny rynkowej: {e}")
             return None
     def get_instrument_info(self, symbol: str) -> Optional[Dict[str, Any]]:
-        # ... (bez zmian)
+     
         api_symbol = symbol.replace('.P', '')
         params = {"category": "linear", "symbol": api_symbol}
         try:
@@ -245,8 +245,12 @@ class BybitExecutor:
             logger.critical(f"[{symbol}] Nieoczekiwany błąd podczas czyszczenia otwartych zleceń: {e}", exc_info=True)
             return False
 
-    def has_open_position(self, symbol: str) -> bool:
-        # ... (bez zmian)
+    def get_open_position_side(self, symbol: str) -> Optional[str]:
+        """
+        Sprawdza, czy istnieje otwarta pozycja dla symbolu.
+        Zwraca 'LONG' lub 'SHORT' jeśli pozycja istnieje, w przeciwnym razie None.
+        W przypadku błędu API zwraca 'ERROR', aby zablokować potencjalnie ryzykowne akcje.
+        """
         api_symbol = symbol.replace('.P', '')
         params = {"category": "linear", "symbol": api_symbol}
         try:
@@ -255,12 +259,16 @@ class BybitExecutor:
                 position_data = result['list'][0]
                 position_size = float(position_data.get("size", "0"))
                 if position_size > 0:
-                    logger.warning(f"[{symbol}] ZABEZPIECZENIE: Wykryto istniejącą pozycję o wielkości {position_size}. Blokuję nowe zlecenie.")
-                    return True
-            return False
+                    side = position_data.get("side")
+                    if side == "Buy":
+                        return "LONG"
+                    elif side == "Sell":
+                        return "SHORT"
+            return None
         except (RequestException, BybitAPIError) as e:
             logger.error(f"[{symbol}] Błąd podczas sprawdzania otwartych pozycji: {e}")
-            return True
+            # W przypadku błędu, bezpieczniej jest założyć, że pozycja istnieje, aby uniknąć konfliktu
+            return "ERROR"
 
     def get_closed_pnl_history(self, start_time_ms: int, limit: int = 50) -> List[Dict[str, Any]]:
         # ... (bez zmian)
