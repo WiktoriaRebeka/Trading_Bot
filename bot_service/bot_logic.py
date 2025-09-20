@@ -122,7 +122,7 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
 def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitExecutor):
     """
     Przetwarza alerty, składając zlecenia.
-    NOWA POPRAWKA: Ignoruje przeciwne sygnały, jeśli pozycja jest już otwarta.
+    FINALNA WERSJA: Jawne użycie 'orderFilter' dla maksymalnej precyzji.
     """
     if not alerts:
         return
@@ -135,7 +135,6 @@ def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitEx
             alert = AlertData.model_validate(alert_dict)
             symbol = alert.symbol
 
-            # === NOWY STRAŻNIK CHRONIĄCY OTWARTE POZYCJE ===
             open_position_side = executor.get_open_position_side(symbol)
             
             if open_position_side and open_position_side != "ERROR":
@@ -144,9 +143,7 @@ def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitEx
                         f"[{symbol}] ZABEZPIECZENIE: Wykryto otwartą pozycję {open_position_side}. "
                         f"Nowy, przeciwny alert ({alert.direction}) zostaje zignorowany, aby chronić istniejącą transakcję."
                     )
-                    continue # Przejdź do następnego alertu, nic nie rób z tym
-
-            # Jeśli nie ma otwartej pozycji, lub nowy alert jest zgodny z kierunkiem, kontynuuj...
+                    continue
             
             logger.info(f"[{symbol}] Otrzymano nowy alert. Anuluję wszystkie oczekujące zlecenia LIMIT, aby przygotować miejsce.")
             executor.cancel_all_open_orders_for_symbol(symbol)
@@ -186,6 +183,7 @@ def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitEx
             if not final_qty or final_qty <= 0:
                 continue
             
+            # === KROK 1: Złóż zlecenie wejściowe (LIMIT) ===
             entry_order_id = f"entry_{alert_id.replace('-', '')[:12]}_{int(datetime.now().timestamp())}"
             entry_params = {
                 "symbol": symbol,
@@ -194,7 +192,8 @@ def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitEx
                 "qty": final_qty,
                 "price": alert.entry,
                 "orderLinkId": entry_order_id,
-                "reduceOnly": False
+                "reduceOnly": False,
+                "orderFilter": "Order"  # Jawne określenie typu
             }
             entry_response = executor.place_order(entry_params)
             if not entry_response:
@@ -202,6 +201,7 @@ def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitEx
             
             logger.info(f"[{symbol}] Krok 1/3: Zlecenie wejściowe (LIMIT) pomyślnie złożone.")
 
+            # === KROK 2: Złóż zlecenie Stop Loss (WARUNKOWY MARKET) ===
             sl_params = {
                 "symbol": symbol,
                 "side": "Sell" if alert.direction == "LONG" else "Buy",
@@ -209,23 +209,27 @@ def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitEx
                 "qty": final_qty,
                 "triggerPrice": alert.sl,
                 "triggerDirection": "Falling" if alert.direction == "LONG" else "Rising",
-                "reduceOnly": True
+                "triggerBy": "LastPrice",
+                "reduceOnly": True,
+                "orderLinkId": f"sl_{alert_id.replace('-', '')[:12]}_{int(datetime.now().timestamp())}",
+                "orderFilter": "StopOrder" # Jawne określenie typu
             }
             sl_response = executor.place_order(sl_params)
             if not sl_response:
                 raise Exception("Krok 2/3: Nie udało się złożyć zlecenia Stop Loss.")
 
-            logger.info(f"[{symbol}] Krok 2/3: Zlecenie Stop Loss (MARKET) pomyślnie złożone.")
+            logger.info(f"[{symbol}] Krok 2/3: Zlecenie Stop Loss (WARUNKOWY MARKET) pomyślnie złożone.")
 
+            # === KROK 3: Złóż zlecenie Take Profit (ZWYKŁY LIMIT) ===
             tp_params = {
                 "symbol": symbol,
                 "side": "Sell" if alert.direction == "LONG" else "Buy",
                 "orderType": "Limit",
                 "qty": final_qty,
                 "price": alert.tp_3_0,
-                "triggerPrice": alert.tp_3_0,
-                "triggerDirection": "Rising" if alert.direction == "LONG" else "Falling",
-                "reduceOnly": True
+                "reduceOnly": True,
+                "orderLinkId": f"tp_{alert_id.replace('-', '')[:12]}_{int(datetime.now().timestamp())}",
+                "orderFilter": "Order" # Jawne określenie typu
             }
             tp_response = executor.place_order(tp_params)
             if not tp_response:
@@ -245,7 +249,7 @@ def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitEx
                     f"Alert stał się przestarzały między weryfikacją a złożeniem zlecenia. Pomijam."
                 )
             else:
-                logger.error(f"Błąd API Bybit w procesie składania zleceń dla alertu {alert_id}: {e}", exc_info=False)
+                logger.error(f"Błąd API Bybit w procesie składania zleceň dla alertu {alert_id}: {e}", exc_info=False)
                 logger.warning(f"[{alert.symbol if alert else 'N/A'}] ANULOWANIE AWARYJNE: Próba anulowania wszystkich zleceň z powodu błędu.")
                 if alert and alert.symbol:
                     executor.cancel_all_open_orders_for_symbol(alert.symbol)
