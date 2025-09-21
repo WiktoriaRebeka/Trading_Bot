@@ -23,15 +23,16 @@ logger = logging.getLogger(__name__)
 
 
 def run_combined_cycle(executor: BybitExecutor):
-    """Główna, połączona pętla logiki."""
+    """Główna, połączona pętla logiki z zapewnioną atomowością."""
     logger.info("Uruchamiam połączony cykl analityczno-transakcyjny.")
     
     last_ts = load_last_processed_timestamp("main_cycle_last_fetch_state")
     new_alerts, new_ts = fetch_new_alerts_since(last_ts)
 
     if new_alerts:
-        process_alerts_transactional(new_alerts, executor)
-        process_new_alerts_analytical(new_alerts)
+        # Zamiast dwóch oddzielnych funkcji, mamy jedną, która przetwarza alerty atomowo
+        process_alerts_atomically(new_alerts, executor)
+        
         if new_ts and (not last_ts or new_ts > last_ts):
             save_last_processed_timestamp(new_ts, "main_cycle_last_fetch_state")
     
@@ -119,110 +120,125 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
     )
     return True
 
-def process_alerts_transactional(alerts: List[Dict[str, Any]], executor: BybitExecutor):
+def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecutor):
     """
-    Przetwarza alerty, składając jedno, zintegrowane zlecenie (Bracket Order).
+    Przetwarza alerty w sposób atomowy: waliduje, a następnie próbuje wykonać
+    zarówno akcję transakcyjną, jak i analityczną w jednej operacji.
     """
-    if not alerts:
+    instrument_rules = get_instrument_rules()
+    if not instrument_rules:
+        logger.error("Nie udało się wczytać zasad instrumentów z Firestore. Przerywam przetwarzanie alertów.")
         return
 
     for alert_dict in alerts:
         alert_id = alert_dict.get('id', 'unknown')
-        alert = None
+        alert_model = None
+        symbol = alert_dict.get("symbol", "UNKNOWN") # Domyślna wartość na wypadek błędu walidacji
 
         try:
-            alert = AlertData.model_validate(alert_dict)
-            symbol = alert.symbol
+            # --- KROK 1: WSPÓLNA WALIDACJA ---
+            alert_model = AlertData.model_validate(alert_dict)
+            symbol = alert_model.symbol
 
-            open_position_side = executor.get_open_position_side(symbol)
-            
-            if open_position_side and open_position_side != "ERROR":
-                if alert.direction != open_position_side:
-                    logger.warning(
-                        f"[{symbol}] ZABEZPIECZENIE: Wykryto otwartą pozycję {open_position_side}. "
-                        f"Nowy, przeciwny alert ({alert.direction}) zostaje zignorowany."
-                    )
-                    continue
-            
-            logger.info(f"[{symbol}] Otrzymano nowy alert. Anuluję wszystkie oczekujące zlecenia.")
-            executor.cancel_all_open_orders_for_symbol(symbol)
-            
-            if not _correct_and_validate_alert(alert):
+            # Walidacja logiki biznesowej
+            if not _correct_and_validate_alert(alert_model):
                 continue
 
+            # Walidacja rynkowa
             current_price = executor.get_latest_ticker_price(symbol)
             if current_price is None:
-                logger.error(f"[{symbol}] Nie udało się pobrać aktualnej ceny rynkowej. Pomijam alert {alert_id}.")
+                logger.error(f"[{symbol}] Nie udało się pobrać ceny rynkowej. Pomijam alert {alert_id}.")
                 continue
-            
-            if not _is_alert_still_valid(alert, current_price):
+            if not _is_alert_still_valid(alert_model, current_price):
                 continue
+
+            # --- KROK 2: AKCJA ATOMOWA (TRANSAKCJA + ANALIZA) ---
             
-            rule = executor.get_instrument_info(symbol)
-            if not rule or not rule.get("tickSize") or not rule.get("qtyStep"):
-                raise Exception("Nie udało się pobrać zasad instrumentu.")
+            # Przygotowanie danych analitycznych
+            existing_pending_case = state_manager.get_pending_case_for_symbol(symbol)
+            if existing_pending_case:
+                logger.info(f"[{symbol}] Nowy alert ({alert_id}) unieważnia istniejącą teczkę PENDING. Usuwam.")
+                state_manager.delete_case_by_id(existing_pending_case.id)
+            
+            new_case = AnalyticalCase(
+                alert_id=alert_model.id,
+                symbol=symbol,
+                alert_data=alert_model.model_dump(by_alias=True)
+            )
+
+            # Przygotowanie danych transakcyjnych
+            open_position_side = executor.get_open_position_side(symbol)
+            if open_position_side and open_position_side != "ERROR" and alert_model.direction != open_position_side:
+                logger.warning(f"[{symbol}] ZABEZPIECZENIE: Wykryto otwartą pozycję {open_position_side}. Przeciwny alert ({alert_model.direction}) zignorowany.")
+                # Tworzymy teczkę analityczną, ale nie składamy zlecenia, aby zachować spójność
+                state_manager.create_analytical_case(new_case)
+                continue
+
+            # Jeśli doszliśmy tutaj, alert jest w pełni ważny i gotowy do egzekucji
+            
+            executor.cancel_all_open_orders_for_symbol(symbol)
+
+            rule = instrument_rules.get(symbol)
+            if not rule or "tickSize" not in rule or "qtyStep" not in rule:
+                logger.error(f"[{symbol}] Brak pełnych zasad instrumentu w Firestore. Pomijam alert.")
+                continue
             
             tick_size, qty_step = rule["tickSize"], rule["qtyStep"]
 
-            if alert.direction == 'LONG':
-                alert.entry = round_price_by_tick(alert.entry, tick_size, 'up')
-                alert.sl = round_price_by_tick(alert.sl, tick_size, 'down')
-                alert.tp_3_0 = round_price_by_tick(alert.tp_3_0, tick_size, 'up')
-            elif alert.direction == 'SHORT':
-                alert.entry = round_price_by_tick(alert.entry, tick_size, 'down')
-                alert.sl = round_price_by_tick(alert.sl, tick_size, 'up')
-                alert.tp_3_0 = round_price_by_tick(alert.tp_3_0, tick_size, 'down')
+            # Zaokrąglanie cen
+            if alert_model.direction == 'LONG':
+                alert_model.entry = round_price_by_tick(alert_model.entry, tick_size, 'up')
+                alert_model.sl = round_price_by_tick(alert_model.sl, tick_size, 'down')
+                alert_model.tp_3_0 = round_price_by_tick(alert_model.tp_3_0, tick_size, 'up')
+            elif alert_model.direction == 'SHORT':
+                alert_model.entry = round_price_by_tick(alert_model.entry, tick_size, 'down')
+                alert_model.sl = round_price_by_tick(alert_model.sl, tick_size, 'up')
+                alert_model.tp_3_0 = round_price_by_tick(alert_model.tp_3_0, tick_size, 'down')
 
             risk_usdt = float(os.getenv("RISK_PER_TRADE_USDT", "2.5"))
             final_qty = calculate_position_size(
-                risk_per_trade_usdt=risk_usdt, entry_price=alert.entry,
-                sl_price=alert.sl, qty_step=qty_step
+                risk_per_trade_usdt=risk_usdt, entry_price=alert_model.entry,
+                sl_price=alert_model.sl, qty_step=qty_step
             )
 
             if not final_qty or final_qty <= 0:
+                logger.warning(f"[{symbol}] Obliczona wielkość pozycji wynosi zero. Pomijam alert.")
                 continue
-            
-            # === NOWA, JEDNOETAPOWA LOGIKA SKŁADANIA ZLECEŃ ===
-            order_link_id = f"bracket_{alert_id.replace('-', '')[:12]}_{int(datetime.now().timestamp())}"
-            
+
+            # Budujemy zintegrowane zlecenie
             order_params = {
                 "symbol": symbol,
-                "side": "Buy" if alert.direction == "LONG" else "Sell",
+                "side": "Buy" if alert_model.direction == "LONG" else "Sell",
                 "orderType": "Limit",
                 "qty": final_qty,
-                "price": alert.entry,
-                "takeProfit": alert.tp_3_0,
-                "stopLoss": alert.sl,
-                "orderLinkId": order_link_id,
+                "price": alert_model.entry,
+                "takeProfit": alert_model.tp_3_0,
+                "stopLoss": alert_model.sl,
+                "orderLinkId": f"bracket_{alert_id.replace('-', '')[:12]}_{int(datetime.now().timestamp())}",
                 "timeInForce": "GTC"
             }
 
+            # Wykonujemy obie akcje w jednym bloku try...except
             response = executor.place_order(order_params)
-            if not response:
-                raise Exception("Nie udało się złożyć zlecenia zintegrowanego (Bracket Order).")
-
-            logger.info(f"[{symbol}] Zlecenie zintegrowane (Entry+SL+TP) pomyślnie złożone.")
-
-            state_manager.save_active_order(
-                response.get("orderId"),
-                {"symbol": symbol, "orderId": response.get("orderId"), "status": "NEW_BRACKET", "alert_id": alert_id}
-            )
+            if response:
+                logger.info(f"[{symbol}] Zlecenie zintegrowane pomyślnie złożone.")
+                # Tworzymy rekordy dopiero po pomyślnym złożeniu zlecenia
+                state_manager.create_analytical_case(new_case)
+                state_manager.save_active_order(
+                    response.get("orderId"),
+                    {"symbol": symbol, "orderId": response.get("orderId"), "status": "NEW_BRACKET", "alert_id": alert_id}
+                )
+            else:
+                # Jeśli place_order zwróci None bez rzucania wyjątku
+                raise Exception("Nie udało się złożyć zlecenia zintegrowanego (brak odpowiedzi).")
 
         except BybitAPIError as e:
             if e.ret_code == 110093:
-                logger.warning(
-                    f"[{alert.symbol if alert else 'N/A'}] Zlecenie odrzucone (110093) z powodu race condition. Pomijam."
-                )
+                logger.warning(f"[{symbol}] Zlecenie odrzucone (110093) z powodu race condition. Pomijam.")
             else:
                 logger.error(f"Błąd API Bybit dla alertu {alert_id}: {e}", exc_info=False)
-                logger.warning(f"[{alert.symbol if alert else 'N/A'}] ANULOWANIE AWARYJNE.")
-                if alert and alert.symbol:
-                    executor.cancel_all_open_orders_for_symbol(alert.symbol)
         except Exception as e:
-            logger.error(f"Błąd w procesie składania zleceń dla alertu {alert_id}: {e}", exc_info=False)
-            logger.warning(f"[{alert.symbol if alert else 'N/A'}] ANULOWANIE AWARYJNE.")
-            if alert and alert.symbol:
-                executor.cancel_all_open_orders_for_symbol(alert.symbol)
+            logger.error(f"Krytyczny błąd podczas atomowego przetwarzania alertu {alert_id}: {e}", exc_info=True)
 
 def log_closed_positions_pnl(executor: BybitExecutor) -> int:
     """
@@ -285,75 +301,6 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
     logger.info(f"[PNL_LOGGER] Zakończono cykl. Przetworzono i zalogowano {processed_count} rekordów.")
     return processed_count
 
-
-def process_new_alerts_analytical(newly_fetched_alerts: List[Dict[str, Any]]):
-    """Przetwarza nowe alerty, tworząc teczki analityczne (tryb analityczny)."""
-    if not newly_fetched_alerts:
-        return
-    logger.info(f"Przetwarzam {len(newly_fetched_alerts)} nowych alertów (tryb analityczny).")
-
-    instrument_rules = get_instrument_rules()
-    if not instrument_rules:
-        logger.error("Nie udało się wczytać zasad instrumentów z Firestore. Przerywam przetwarzanie alertów.")
-        return
-    for alert_dict in newly_fetched_alerts:
-        alert_id = alert_dict.get('id', 'unknown')
-        if alert_id == 'unknown':
-            logger.error("Otrzymano alert bez ID. Pomijam.", extra={"json_fields": {"alert_data": alert_dict}})
-            continue
-
-        try:
-            alert_data_model = AlertData.model_validate(alert_dict)
-            
-            symbol = alert_data_model.symbol
-            rule = instrument_rules.get(symbol)
-
-            if not rule or "tickSize" not in rule:
-                logger.warning(f"Brak reguły 'tickSize' dla symbolu {symbol}. Pomijam zaokrąglanie.")
-            else:
-                tick_size = rule["tickSize"]
-                
-                if alert_data_model.direction == 'LONG':
-                    alert_data_model.entry = round_price_by_tick(alert_data_model.entry, tick_size, 'up')
-                    alert_data_model.sl = round_price_by_tick(alert_data_model.sl, tick_size, 'down')
-                    alert_data_model.tp_1_0 = round_price_by_tick(alert_data_model.tp_1_0, tick_size, 'up')
-                    alert_data_model.tp_1_5 = round_price_by_tick(alert_data_model.tp_1_5, tick_size, 'up')
-                    alert_data_model.tp_2_0 = round_price_by_tick(alert_data_model.tp_2_0, tick_size, 'up')
-                    alert_data_model.tp_3_0 = round_price_by_tick(alert_data_model.tp_3_0, tick_size, 'up')
-                    alert_data_model.tp_4_0 = round_price_by_tick(alert_data_model.tp_4_0, tick_size, 'up')
-                    alert_data_model.tp_5_0 = round_price_by_tick(alert_data_model.tp_5_0, tick_size, 'up')
-                elif alert_data_model.direction == 'SHORT':
-                    alert_data_model.entry = round_price_by_tick(alert_data_model.entry, tick_size, 'down')
-                    alert_data_model.sl = round_price_by_tick(alert_data_model.sl, tick_size, 'up')
-                    alert_data_model.tp_1_0 = round_price_by_tick(alert_data_model.tp_1_0, tick_size, 'down')
-                    alert_data_model.tp_1_5 = round_price_by_tick(alert_data_model.tp_1_5, tick_size, 'down')
-                    alert_data_model.tp_2_0 = round_price_by_tick(alert_data_model.tp_2_0, tick_size, 'down')
-                    alert_data_model.tp_3_0 = round_price_by_tick(alert_data_model.tp_3_0, tick_size, 'down')
-                    alert_data_model.tp_4_0 = round_price_by_tick(alert_data_model.tp_4_0, tick_size, 'down')
-                    alert_data_model.tp_5_0 = round_price_by_tick(alert_data_model.tp_5_0, tick_size, 'down')
-
-            existing_pending_case = state_manager.get_pending_case_for_symbol(alert_data_model.symbol)
-            if existing_pending_case:
-                logger.info(f"[{alert_data_model.symbol}] Nowy alert ({alert_id}) unieważnia istniejącą teczkę PENDING ({existing_pending_case.id}). Usuwam.")
-                state_manager.delete_case_by_id(existing_pending_case.id)
-
-            is_valid = _correct_and_validate_alert(alert_data_model)
-            
-            if is_valid:
-                logger.info(f"[{alert_data_model.symbol}] Alert ({alert_id}) przeszedł walidację. Tworzę teczkę PENDING.")
-                new_case = AnalyticalCase(
-                    alert_id=alert_data_model.id,
-                    symbol=alert_data_model.symbol,
-                    alert_data=alert_data_model.model_dump(by_alias=True)
-                )
-                state_manager.create_analytical_case(new_case)
-            else:
-                logger.warning(f"[{alert_data_model.symbol}] Nowy alert ({alert_id}) został odrzucony po walidacji. Nie tworzę nowej teczki PENDING.")
-
-        except ValidationError as e:
-            logger.error(f"Błąd walidacji Pydantic dla alertu ({alert_id}): {e}", extra={"json_fields": {"alert_id": alert_id, "alert_data": alert_dict}})
-        except Exception as e:
-            logger.error(f"Nieoczekiwany błąd podczas przetwarzania alertu ({alert_id}): {e}", exc_info=True, extra={"json_fields": {"alert_id": alert_id}})
 
 
 def _run_analysis_of_existing_cases():
