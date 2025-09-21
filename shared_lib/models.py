@@ -1,13 +1,9 @@
 # Lokalizacja: shared_lib/models.py
 
 
-# Lokalizacja: shared_lib/models.py
-
 from pydantic import BaseModel, Field, field_validator, ConfigDict, ValidationInfo
 from typing import Optional, Dict, Any
 from datetime import datetime, timezone
-
-# Lokalizacja: shared_lib/models.py
 
 from pydantic import BaseModel, Field, computed_field, ConfigDict
 from typing import Optional, Dict, Any
