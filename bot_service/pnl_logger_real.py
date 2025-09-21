@@ -46,12 +46,17 @@ def log_real_trade_result(enriched_pnl_data: Dict[str, Any], active_order_data: 
     alert_id = enriched_pnl_data.get("alert_id", "unknown")
 
     try:
+        # Używamy Decimal do wszystkich obliczeń, aby zachować precyzję
         qty = Decimal(enriched_pnl_data.get("qty", "0.0"))
         avg_entry_price = Decimal(enriched_pnl_data.get("avgEntryPrice", "0.0"))
+        avg_exit_price = Decimal(enriched_pnl_data.get("avgExitPrice", "0.0"))
         net_pnl = Decimal(enriched_pnl_data.get("closedPnl") or "0.0")
+        commission = Decimal(enriched_pnl_data.get("cumCommission") or "0.0")
         
-        # Używamy FINALNYCH, ZAOKRĄGLONYCH cen z `active_order_data`
         sl_price_final = Decimal(str(active_order_data.get("final_sl_price", "0.0")))
+        tp_price_final = Decimal(str(active_order_data.get("final_tp_price", "0.0")))
+        tp_price_chart_raw = active_order_data.get("tp_price_chart")
+        tp_price_chart = Decimal(str(tp_price_chart_raw)) if tp_price_chart_raw is not None else Decimal("0.0")
 
         planned_risk_usdt = Decimal("0.0")
         realized_rrr = Decimal("0.0")
@@ -61,26 +66,29 @@ def log_real_trade_result(enriched_pnl_data: Dict[str, Any], active_order_data: 
             planned_risk_usdt = risk_per_unit * qty
             
             if planned_risk_usdt > 0:
-                realized_rrr = (net_pnl / planned_risk_usdt).quantize(Decimal('0.0001'))
+                realized_rrr = (net_pnl / planned_risk_usdt)
         
+        # Definiujemy precyzję dla zaokrąglenia
+        PRECISION = Decimal('0.00000001')
+
         transformed_data = {
             "alert_id": alert_id,
             "order_id": enriched_pnl_data.get("orderId", "unknown"),
             "symbol": enriched_pnl_data.get("symbol"),
             "direction": "LONG" if enriched_pnl_data.get("side") == "Buy" else "SHORT",
-            "qty": float(qty),
-            "avg_entry_price": float(avg_entry_price),
-            "avg_exit_price": float(enriched_pnl_data.get("avgExitPrice", "0.0")),
-            "net_pnl_usdt": float(net_pnl),
-            "commission_usdt": float(enriched_pnl_data.get("cumCommission") or "0.0"),
+            "qty": float(qty.quantize(PRECISION)),
+            "avg_entry_price": float(avg_entry_price.quantize(PRECISION)),
+            "avg_exit_price": float(avg_exit_price.quantize(PRECISION)),
+            "net_pnl_usdt": float(net_pnl.quantize(PRECISION)),
+            "commission_usdt": float(commission.quantize(PRECISION)),
             "exit_type": enriched_pnl_data.get("exitType"),
             "timestamp_entry": datetime.fromtimestamp(int(enriched_pnl_data.get("createdTime")) / 1000, tz=timezone.utc).isoformat(),
             "timestamp_close": datetime.fromtimestamp(int(enriched_pnl_data.get("updatedTime")) / 1000, tz=timezone.utc).isoformat(),
-            "planned_risk_usdt": float(planned_risk_usdt) if planned_risk_usdt > 0 else None,
-            "realized_rrr": float(realized_rrr) if planned_risk_usdt > 0 else None,
-            "sl_price_alert": float(sl_price_final) if sl_price_final > 0 else None,
-            "tp_price_alert": float(active_order_data.get("final_tp_price")) if active_order_data.get("final_tp_price") else None,
-            "tp_price_chart": float(active_order_data.get("tp_price_chart")) if active_order_data.get("tp_price_chart") else None,
+            "planned_risk_usdt": float(planned_risk_usdt.quantize(PRECISION)) if planned_risk_usdt > 0 else None,
+            "realized_rrr": float(realized_rrr.quantize(PRECISION)) if planned_risk_usdt > 0 else None,
+            "sl_price_alert": float(sl_price_final.quantize(PRECISION)) if sl_price_final > 0 else None,
+            "tp_price_alert": float(tp_price_final.quantize(PRECISION)) if tp_price_final > 0 else None,
+            "tp_price_chart": float(tp_price_chart.quantize(PRECISION)) if tp_price_chart > 0 else None,
         }
     except (TypeError, ValueError, KeyError) as e:
         logger.error(f"Błąd podczas transformacji danych PnL dla alertu {alert_id}: {e}", exc_info=True)
