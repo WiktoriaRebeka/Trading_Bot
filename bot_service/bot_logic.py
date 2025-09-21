@@ -122,7 +122,7 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
 
 def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecutor):
     """
-    Przetwarza alerty w sposób atomowy, z blokadą cyklu, aby zapobiec stackowaniu pozycji.
+    Przetwarza alerty w sposób atomowy, z blokadą cyklu i dynamicznym obliczaniem TP dla celu 2R w USDT.
     """
     instrument_rules = get_instrument_rules()
     if not instrument_rules:
@@ -192,11 +192,9 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
             if alert_model.direction == 'LONG':
                 final_entry = round_price_by_tick(alert_model.entry, tick_size, 'up')
                 final_sl = round_price_by_tick(alert_model.sl, tick_size, 'down')
-                final_tp = round_price_by_tick(alert_model.tp_3_0, tick_size, 'up')
             elif alert_model.direction == 'SHORT':
                 final_entry = round_price_by_tick(alert_model.entry, tick_size, 'down')
                 final_sl = round_price_by_tick(alert_model.sl, tick_size, 'up')
-                final_tp = round_price_by_tick(alert_model.tp_3_0, tick_size, 'down')
 
             risk_usdt = float(os.getenv("RISK_PER_TRADE_USDT", "2.5"))
             final_qty = calculate_position_size(
@@ -209,6 +207,28 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
                 state_manager.create_analytical_case(new_case)
                 processed_symbols_in_cycle.add(symbol)
                 continue
+
+            # === NOWA LOGIKA: DYNAMICZNE OBLICZANIE CENY TAKE PROFIT v2 ===
+            risk_per_unit = abs(final_entry - final_sl)
+            total_risk_per_trade_usdt = (risk_per_unit * final_qty) + ((final_entry * final_qty) * (0.00020 + 0.00055))
+            
+            gross_profit_target_usdt = total_risk_per_trade_usdt * 2.0
+            
+            profit_per_unit = gross_profit_target_usdt / final_qty
+            
+            if alert_model.direction == 'LONG':
+                calculated_tp = final_entry + profit_per_unit
+                final_tp = round_price_by_tick(calculated_tp, tick_size, 'up')
+            else: # SHORT
+                calculated_tp = final_entry - profit_per_unit
+                final_tp = round_price_by_tick(calculated_tp, tick_size, 'down')
+            
+            logger.info(
+                f"[{symbol}] Precyzyjne ryzyko: {total_risk_per_trade_usdt:.4f} USDT. "
+                f"Cel zysku brutto (2R): {gross_profit_target_usdt:.4f} USDT. "
+                f"Obliczono finalny TP: {final_tp}"
+            )
+            # =================================================================
 
             order_params = {
                 "symbol": symbol,
@@ -234,7 +254,8 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
                     "alert_id": alert_id,
                     "final_entry_price": final_entry,
                     "final_sl_price": final_sl,
-                    "final_tp_price": final_tp
+                    "final_tp_price": final_tp,
+                    "tp_price_chart": alert_model.tp_3_0
                 }
                 state_manager.save_active_order(response.get("orderId"), order_data_to_save)
             else:
@@ -295,7 +316,8 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
         enriched_pnl_data = pnl_record.copy()
         enriched_pnl_data['alert_id'] = alert_id
         
-        log_real_trade_result(enriched_pnl_data)
+        # Przekazujemy `active_order_data` do funkcji logującej
+        log_real_trade_result(enriched_pnl_data, active_order_data)
         processed_count += 1
         
         state_manager.delete_active_order_by_id(original_order_id)
