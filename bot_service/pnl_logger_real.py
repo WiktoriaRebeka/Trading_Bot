@@ -91,7 +91,11 @@ def log_real_trade_result(enriched_pnl_data: Dict[str, Any], active_order_data: 
             "exit_type": enriched_pnl_data.get("exitType"),
             "timestamp_entry": datetime.fromtimestamp(int(enriched_pnl_data.get("createdTime")) / 1000, tz=timezone.utc).isoformat(),
             "timestamp_close": datetime.fromtimestamp(int(enriched_pnl_data.get("updatedTime")) / 1000, tz=timezone.utc).isoformat(),
-            "sl_price": float(sl_price_final.quantize(PRECISION)) if sl_price_final > 0 else None,
+            
+            # --- KLUCZOWA POPRAWKA ---
+            # Zmieniamy nazwę klucza, aby pasowała do istniejącej tabeli w BigQuery
+            "sl_price_alert": float(sl_price_final.quantize(PRECISION)) if sl_price_final > 0 else None,
+            
             "planned_risk_usdt": float(planned_risk_usdt.quantize(PRECISION)) if planned_risk_usdt > 0 else None,
             "realized_rrr": float(realized_rrr.quantize(PRECISION)) if planned_risk_usdt > 0 else None,
         }
