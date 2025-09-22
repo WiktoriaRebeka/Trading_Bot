@@ -37,69 +37,75 @@ REAL_TRADES_HISTORY_SCHEMA = [
 ]
 
 
-def log_closed_positions_pnl(executor: BybitExecutor) -> int:
-    """
-    Pobiera historię zamkniętych pozycji, dopasowuje je po symbolu z Firestore i loguje do BigQuery.
-    """
-    logger.info("[PNL_LOGGER] Rozpoczynam cykl logowania PnL.")
-    last_check_ts_dt = load_last_processed_timestamp("pnl_logger_last_fetch_state")
-    logger.info(f"[PNL_LOGGER] Sprawdzam zamknięte pozycje od: {last_check_ts_dt.isoformat()}")
-    
-    start_time_ms = int(last_check_ts_dt.timestamp() * 1000)
-    pnl_records = executor.get_closed_pnl_history(start_time_ms=start_time_ms)
-    
-    if not pnl_records:
-        logger.info("[PNL_LOGGER] Nie znaleziono nowych zamkniętych pozycji na Bybit od ostatniego sprawdzenia.")
-        return 0
+def log_real_trade_result(enriched_pnl_data: Dict[str, Any], active_order_data: Dict[str, Any]):
+    """Transformuje dane PnL, wzbogaca je o DOKŁADNE dane zlecenia i zapisuje do BigQuery."""
+    if not initialize_bigquery():
+        logger.error("[PNL_LOGGER] BigQuery nie zostało zainicjalizowane – pomijam zapis.")
+        return
 
-    logger.info(f"[PNL_LOGGER] Znaleziono {len(pnl_records)} zamkniętych pozycji na Bybit. Rozpoczynam przetwarzanie.")
-    new_max_ts = last_check_ts_dt
-    processed_count = 0
-    
-    for pnl_record in pnl_records:
-        symbol_from_bybit = pnl_record.get("symbol")
-        if not symbol_from_bybit:
-            logger.warning("[PNL_LOGGER] Pominięto rekord PnL bez symbolu.", extra={"json_fields": {"pnl_record": pnl_record}})
-            continue
+    alert_id = enriched_pnl_data.get("alert_id", "unknown")
+    order_id = enriched_pnl_data.get("orderId", "unknown")
+    log_prefix = f"[PNL_LOGGER][{alert_id}]"
 
-        # --- KLUCZOWA POPRAWKA ---
-        # Normalizujemy symbol z Bybit (np. 'BTCUSDT') do naszego formatu w bazie ('BTCUSDT.P')
-        # ZANIM przekażemy go do funkcji wyszukującej.
-        symbol_to_find = symbol_from_bybit if symbol_from_bybit.endswith('.P') else f"{symbol_from_bybit}.P"
-        logger.info(f"[PNL_LOGGER] Próba znalezienia dopasowania dla symbolu '{symbol_from_bybit}' używając klucza '{symbol_to_find}'")
+    try:
+        qty = Decimal(enriched_pnl_data.get("qty", "0.0"))
+        avg_entry_price = Decimal(enriched_pnl_data.get("avgEntryPrice", "0.0"))
+        avg_exit_price = Decimal(enriched_pnl_data.get("avgExitPrice", "0.0"))
+        net_pnl = Decimal(enriched_pnl_data.get("closedPnl") or "0.0")
+        commission = Decimal(enriched_pnl_data.get("cumCommission") or "0.0")
+        leverage = int(float(enriched_pnl_data.get("leverage", "1")))
+
+        entry_value = qty * avg_entry_price
+        exit_value = qty * avg_exit_price
+        gross_pnl = net_pnl + commission
+
+        sl_price_from_order = active_order_data.get("final_sl_price")
+        sl_price_final = Decimal(str(sl_price_from_order)) if sl_price_from_order is not None else Decimal("0.0")
+
+        planned_risk_usdt = Decimal("0.0")
+        realized_rrr = Decimal("0.0")
+
+        if sl_price_final > 0 and avg_entry_price > 0:
+            risk_per_unit = abs(avg_entry_price - sl_price_final)
+            planned_risk_usdt = risk_per_unit * qty
+            
+            if planned_risk_usdt > 0:
+                realized_rrr = (net_pnl / planned_risk_usdt)
         
-        active_order_data = state_manager.get_active_order_by_symbol(symbol_to_find)
-        
-        if not active_order_data:
-            logger.warning(f"[PNL_LOGGER] Nie znaleziono aktywnego zlecenia dla symbolu {symbol_to_find} w Firestore. Prawdopodobnie transakcja manualna. Pomijam.")
-            continue
+        PRECISION = Decimal('0.00000001')
 
-        alert_id = active_order_data.get('alert_id', 'unknown')
-        original_order_id = active_order_data.get('orderId')
+        transformed_data = {
+            "alert_id": alert_id,
+            "order_id": order_id,
+            "symbol": enriched_pnl_data.get("symbol"),
+            "direction": "LONG" if enriched_pnl_data.get("side") == "Buy" else "SHORT",
+            "qty": float(qty.quantize(PRECISION)),
+            "leverage": leverage,
+            "avg_entry_price": float(avg_entry_price.quantize(PRECISION)),
+            "avg_exit_price": float(avg_exit_price.quantize(PRECISION)),
+            "entry_value_usdt": float(entry_value.quantize(PRECISION)),
+            "exit_value_usdt": float(exit_value.quantize(PRECISION)),
+            "gross_pnl_usdt": float(gross_pnl.quantize(PRECISION)),
+            "commission_usdt": float(commission.quantize(PRECISION)),
+            "net_pnl_usdt": float(net_pnl.quantize(PRECISION)),
+            "exit_type": enriched_pnl_data.get("exitType"),
+            "timestamp_entry": datetime.fromtimestamp(int(enriched_pnl_data.get("createdTime")) / 1000, tz=timezone.utc).isoformat(),
+            "timestamp_close": datetime.fromtimestamp(int(enriched_pnl_data.get("updatedTime")) / 1000, tz=timezone.utc).isoformat(),
+            "sl_price": float(sl_price_final.quantize(PRECISION)) if sl_price_final > 0 else None,
+            "planned_risk_usdt": float(planned_risk_usdt.quantize(PRECISION)) if planned_risk_usdt > 0 else None,
+            "realized_rrr": float(realized_rrr.quantize(PRECISION)) if planned_risk_usdt > 0 else None,
+        }
+    except (TypeError, ValueError, KeyError) as e:
+        logger.error(f"{log_prefix} Błąd podczas transformacji danych PnL: {e}", exc_info=True)
+        return
 
-        if not original_order_id:
-            logger.error(f"[PNL_LOGGER] Krytyczny błąd: znaleziono dopasowanie dla {symbol_to_find}, ale brak orderId w dokumencie Firestore. Pomijam.", extra={"json_fields": active_order_data})
-            continue
+    try:
+        client = get_bigquery_client()
+        errors = client.insert_rows_json(REAL_TABLE_REF, [transformed_data])
+        if not errors:
+            logger.info(f"{log_prefix} SUKCES! Pomyślnie zapisano realny wynik transakcji do BigQuery.")
+        else:
+            logger.error(f"{log_prefix} Błąd podczas wstawiania wierszy do BigQuery: {errors}")
+    except Exception as e:
+        logger.critical(f"{log_prefix} Krytyczny błąd podczas zapisu do BigQuery: {e}", exc_info=True)
 
-        logger.info(f"[PNL_LOGGER] Pomyślnie dopasowano zamkniętą pozycję {symbol_to_find} do alertu {alert_id} (Order ID: {original_order_id}).")
-
-        enriched_pnl_data = pnl_record.copy()
-        enriched_pnl_data['alert_id'] = alert_id
-        
-        log_real_trade_result(enriched_pnl_data, active_order_data)
-        processed_count += 1
-        
-        state_manager.delete_active_order_by_id(original_order_id)
-
-        updated_time_ms = int(pnl_record.get("updatedTime", 0))
-        if updated_time_ms > 0:
-            record_ts = datetime.fromtimestamp(updated_time_ms / 1000, tz=timezone.utc)
-            if record_ts > new_max_ts:
-                new_max_ts = record_ts
-    
-    if new_max_ts > last_check_ts_dt:
-        logger.info(f"[PNL_LOGGER] Zapisuję nowy timestamp ostatniego sprawdzenia: {new_max_ts.isoformat()}")
-        save_last_processed_timestamp(new_max_ts + timedelta(seconds=1), "pnl_logger_last_fetch_state")
-        
-    logger.info(f"[PNL_LOGGER] Zakończono cykl. Przetworzono i zalogowano {processed_count} rekordów.")
-    return processed_count```
