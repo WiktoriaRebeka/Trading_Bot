@@ -36,14 +36,20 @@ def initialize_bigquery() -> bool:
         return True
     try:
         logger.info("[BQ_INIT] Próba inicjalizacji klienta BigQuery...")
-        client = bigquery.Client()
-        # === KLUCZOWA POPRAWKA ===
-        # Używamy nowej, poprawnej nazwy stałej z pliku constants.py
+        
+        # --- KLUCZOWA POPRAWKA: JAWNE OKREŚLENIE LOKALIZACJI ---
+        # Jeśli w konsoli BigQuery widzisz inną lokalizację, zmień ją tutaj.
+        DATASET_LOCATION = "EU" 
+        
+        client = bigquery.Client(location=DATASET_LOCATION)
+        # ---------------------------------------------------------
+        
         table_ref_str = f"{constants.BIGQUERY_PROJECT_ID}.{constants.BIGQUERY_DATASET_ID}.{constants.BIGQUERY_ANALYTICAL_TABLE_ID}"
         client.get_table(table_ref_str) # Sprawdzenie, czy tabela istnieje
+        
         bigquery_client = client
         TABLE_REF = table_ref_str
-        logger.info(f"[BQ_INIT] Klient BigQuery pomyślnie zainicjalizowany. Tabela: {TABLE_REF}")
+        logger.info(f"[BQ_INIT] Klient BigQuery pomyślnie zainicjalizowany. Tabela: {TABLE_REF}, Lokalizacja: {DATASET_LOCATION}")
         return True
     except Exception as e:
         logger.critical(f"[BQ_INIT] KRYTYCZNY BŁĄD: Inicjalizacja klienta BigQuery nie powiodła się: {e}", exc_info=True)
