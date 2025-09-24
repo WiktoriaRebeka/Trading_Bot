@@ -122,8 +122,7 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
 
 def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecutor):
     """
-    Przetwarza alerty, realizując strategię stałego ryzyka (np. $2.50) z celem
-    osiągnięcia zysku NETTO na poziomie 2R, poprzez dynamiczne obliczanie ceny Take Profit.
+    Przetwarza alerty w sposób atomowy, z blokadą cyklu i dynamicznym obliczaniem TP dla celu 2R w USDT.
     """
     instrument_rules = get_instrument_rules()
     if not instrument_rules:
@@ -190,16 +189,13 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
             
             tick_size, qty_step = rule["tickSize"], rule["qtyStep"]
 
-            # Krok 1: Precyzyjne zaokrąglenie cen Entry i SL z alertu.
             if alert_model.direction == 'LONG':
                 final_entry = round_price_by_tick(alert_model.entry, tick_size, 'up')
                 final_sl = round_price_by_tick(alert_model.sl, tick_size, 'down')
-            else: # SHORT
+            elif alert_model.direction == 'SHORT':
                 final_entry = round_price_by_tick(alert_model.entry, tick_size, 'down')
                 final_sl = round_price_by_tick(alert_model.sl, tick_size, 'up')
 
-            # Krok 2: Obliczenie wielkości pozycji (Qty) na podstawie stałego ryzyka w USDT.
-            # Ta funkcja uwzględnia już bufory na prowizje i poślizg.
             risk_usdt = float(os.getenv("RISK_PER_TRADE_USDT", "2.5"))
             final_qty = calculate_position_size(
                 risk_per_trade_usdt=risk_usdt, entry_price=final_entry,
@@ -212,23 +208,31 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
                 processed_symbols_in_cycle.add(symbol)
                 continue
 
-            # --- LOGIKA "JAK W BINANCE": OBLICZAMY TP, ABY ZAGWARANTOWAĆ ZYSK 2R NETTO ---
+            # --- NOWA, PRECYZYJNA LOGIKA OBLICZANIA TAKE PROFIT DLA CELU 2R NETTO ---
 
-            # Krok 3: Obliczamy, ile DOKŁADNIE stracimy, jeśli uderzy SL (nasze 1R Netto).
-            base_risk_from_price_usdt = abs(final_entry - final_sl) * final_qty
+            # Krok 1: Oblicz "bazową" stratę wynikającą wyłącznie z ruchu ceny.
+            risk_per_unit_price_only = abs(final_entry - final_sl)
+            base_risk_from_price_usdt = risk_per_unit_price_only * final_qty
+
+            # Krok 2: Oblicz szacowane prowizje za otwarcie i zamknięcie pozycji.
+            # Zakładamy opłaty Taker (0.055%) dla obu transakcji, co jest konserwatywnym podejściem.
             position_value_usdt = final_entry * final_qty
-            FEE_TAKER = 0.00055 # Konserwatywne założenie
+            FEE_TAKER = 0.00055
             total_estimated_fees = position_value_usdt * FEE_TAKER * 2
+
+            # Krok 3: Oblicz całkowite RYZYKO NETTO (1R). To jest nasza realna, całkowita strata.
             total_net_risk_usdt = base_risk_from_price_usdt + total_estimated_fees
 
-            # Krok 4: Ustalamy docelowy ZYSK NETTO na dwukrotność ryzyka (2R).
+            # Krok 4: Ustaw docelowy ZYSK NETTO na dwukrotność ryzyka netto (2R).
             target_net_profit_usdt = total_net_risk_usdt * 2.0
 
-            # Krok 5: Obliczamy wymagany ZYSK BRUTTO, aby pokryć cel netto oraz prowizje.
+            # Krok 5: Oblicz wymagany ZYSK BRUTTO. Aby osiągnąć zysk netto, ruch ceny
+            # musi pokonać nie tylko ten cel, ale również koszty prowizji.
             required_gross_profit_usdt = target_net_profit_usdt + total_estimated_fees
 
-            # Krok 6: Obliczamy nową, inteligentną cenę Take Profit.
+            # Krok 6: Przelicz wymagany zysk brutto na cenę Take Profit.
             profit_per_unit = required_gross_profit_usdt / final_qty
+
             if alert_model.direction == 'LONG':
                 calculated_tp = final_entry + profit_per_unit
                 final_tp = round_price_by_tick(calculated_tp, tick_size, 'up')
@@ -241,17 +245,17 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
                 f"Ryzyko Netto (1R) = {total_net_risk_usdt:.4f} USDT. "
                 f"Cel Zysku Netto (2R) = {target_net_profit_usdt:.4f} USDT. "
                 f"Wymagany Zysk Brutto = {required_gross_profit_usdt:.4f} USDT. "
-                f"Finalna, obliczona cena TP = {final_tp}"
+                f"Finalna cena TP = {final_tp}"
             )
-            
-            # Krok 7: Składamy zlecenie z naszymi precyzyjnymi, obliczonymi cenami.
+            # =================================================================
+
             order_params = {
                 "symbol": symbol,
                 "side": "Buy" if alert_model.direction == "LONG" else "Sell",
                 "orderType": "Limit",
                 "qty": final_qty,
                 "price": final_entry,
-                "takeProfit": final_tp, # Używamy naszej obliczonej ceny, a nie tej z alertu!
+                "takeProfit": final_tp,
                 "stopLoss": final_sl,
                 "orderLinkId": f"bracket_{alert_id.replace('-', '')[:12]}_{int(datetime.now().timestamp())}",
                 "timeInForce": "GTC"
@@ -270,7 +274,7 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
                     "final_entry_price": final_entry,
                     "final_sl_price": final_sl,
                     "final_tp_price": final_tp,
-                    "tp_price_chart": alert_model.tp_3_0 # Zapisujemy dla porównania
+                    "tp_price_chart": alert_model.tp_3_0
                 }
                 state_manager.save_active_order(response.get("orderId"), order_data_to_save)
             else:
