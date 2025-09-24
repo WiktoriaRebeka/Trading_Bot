@@ -208,25 +208,44 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
                 processed_symbols_in_cycle.add(symbol)
                 continue
 
-            # === NOWA LOGIKA: DYNAMICZNE OBLICZANIE CENY TAKE PROFIT v2 ===
-            risk_per_unit = abs(final_entry - final_sl)
-            total_risk_per_trade_usdt = (risk_per_unit * final_qty) + ((final_entry * final_qty) * (0.00020 + 0.00055))
-            
-            gross_profit_target_usdt = total_risk_per_trade_usdt * 2.0
-            
-            profit_per_unit = gross_profit_target_usdt / final_qty
-            
+            # --- NOWA, PRECYZYJNA LOGIKA OBLICZANIA TAKE PROFIT DLA CELU 2R NETTO ---
+
+            # Krok 1: Oblicz "bazową" stratę wynikającą wyłącznie z ruchu ceny.
+            risk_per_unit_price_only = abs(final_entry - final_sl)
+            base_risk_from_price_usdt = risk_per_unit_price_only * final_qty
+
+            # Krok 2: Oblicz szacowane prowizje za otwarcie i zamknięcie pozycji.
+            # Zakładamy opłaty Taker (0.055%) dla obu transakcji, co jest konserwatywnym podejściem.
+            position_value_usdt = final_entry * final_qty
+            FEE_TAKER = 0.00055
+            total_estimated_fees = position_value_usdt * FEE_TAKER * 2
+
+            # Krok 3: Oblicz całkowite RYZYKO NETTO (1R). To jest nasza realna, całkowita strata.
+            total_net_risk_usdt = base_risk_from_price_usdt + total_estimated_fees
+
+            # Krok 4: Ustaw docelowy ZYSK NETTO na dwukrotność ryzyka netto (2R).
+            target_net_profit_usdt = total_net_risk_usdt * 2.0
+
+            # Krok 5: Oblicz wymagany ZYSK BRUTTO. Aby osiągnąć zysk netto, ruch ceny
+            # musi pokonać nie tylko ten cel, ale również koszty prowizji.
+            required_gross_profit_usdt = target_net_profit_usdt + total_estimated_fees
+
+            # Krok 6: Przelicz wymagany zysk brutto na cenę Take Profit.
+            profit_per_unit = required_gross_profit_usdt / final_qty
+
             if alert_model.direction == 'LONG':
                 calculated_tp = final_entry + profit_per_unit
                 final_tp = round_price_by_tick(calculated_tp, tick_size, 'up')
             else: # SHORT
                 calculated_tp = final_entry - profit_per_unit
                 final_tp = round_price_by_tick(calculated_tp, tick_size, 'down')
-            
+
             logger.info(
-                f"[{symbol}] Precyzyjne ryzyko: {total_risk_per_trade_usdt:.4f} USDT. "
-                f"Cel zysku brutto (2R): {gross_profit_target_usdt:.4f} USDT. "
-                f"Obliczono finalny TP: {final_tp}"
+                f"[{symbol}] Obliczenia dla 2R Netto: "
+                f"Ryzyko Netto (1R) = {total_net_risk_usdt:.4f} USDT. "
+                f"Cel Zysku Netto (2R) = {target_net_profit_usdt:.4f} USDT. "
+                f"Wymagany Zysk Brutto = {required_gross_profit_usdt:.4f} USDT. "
+                f"Finalna cena TP = {final_tp}"
             )
             # =================================================================
 
