@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 async def _fetch_kline_for_symbol(session: aiohttp.ClientSession, symbol: str, cycle_id: str) -> Optional[Dict[str, Any]]:
     """Pobiera najnowszą świecę dla danego symbolu, logując z cycle_id."""
     api_symbol = symbol.replace('.P', '')
-    params = {"category": "linear", "symbol": api_symbol, "interval": "5", "limit": 2}
+    params = {"category": "linear", "symbol": api_symbol, "interval": "15", "limit": 2}
     max_retries = 3
     
     log_extra = {"json_fields": {"cycle_id": cycle_id, "symbol": symbol}}
