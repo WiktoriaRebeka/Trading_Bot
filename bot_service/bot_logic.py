@@ -122,8 +122,8 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
 
 def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecutor):
     """
-    Przetwarza alerty zgodnie z filozofią "Lustrzanego Odbicia".
-    Logika analityczna jest klonem logiki transakcyjnej.
+    Przetwarza alerty, które przeszły filtr ryzyka > 0.43%.
+    Używa Entry, SL i TP (z pola tp_2_0) bezpośrednio z alertu.
     """
     instrument_rules = get_instrument_rules()
     if not instrument_rules:
@@ -159,7 +159,7 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
                 logger.info(f"[{symbol}] Brak otwartej pozycji. Anuluję wszystkie oczekujące zlecenia.")
                 executor.cancel_all_open_orders_for_symbol(symbol)
 
-            if not _correct_and_validate_alert(alert_model): # Tutaj jest nasz filtr 0.2%
+            if not _correct_and_validate_alert(alert_model): # Tutaj działa nasz nowy filtr 0.43%
                 processed_symbols_in_cycle.add(symbol)
                 continue
 
@@ -172,7 +172,7 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
                 processed_symbols_in_cycle.add(symbol)
                 continue
             
-            # --- KONIEC FILTRÓW. JEŚLI KOD DOTARŁ TUTAJ, ALERT JEST WSTĘPNIE AKCEPTOWANY ---
+            # --- KONIEC FILTRÓW. ALERT JEST AKCEPTOWANY ---
 
             rule = instrument_rules.get(symbol)
             if not rule or "tickSize" not in rule or "qtyStep" not in rule:
@@ -182,13 +182,17 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
             
             tick_size, qty_step = rule["tickSize"], rule["qtyStep"]
 
+            # Krok 1: Zaokrąglij ceny z alertu.
             if alert_model.direction == 'LONG':
                 final_entry = round_price_by_tick(alert_model.entry, tick_size, 'up')
                 final_sl = round_price_by_tick(alert_model.sl, tick_size, 'down')
-            elif alert_model.direction == 'SHORT':
+                final_tp = round_price_by_tick(alert_model.tp_2_0, tick_size, 'up') # Używamy TP 2.0 z alertu
+            else: # SHORT
                 final_entry = round_price_by_tick(alert_model.entry, tick_size, 'down')
                 final_sl = round_price_by_tick(alert_model.sl, tick_size, 'up')
+                final_tp = round_price_by_tick(alert_model.tp_2_0, tick_size, 'down') # Używamy TP 2.0 z alertu
 
+            # Krok 2: Oblicz wielkość pozycji na podstawie stałego ryzyka.
             risk_usdt = float(os.getenv("RISK_PER_TRADE_USDT", "2.5"))
             final_qty = calculate_position_size(
                 risk_per_trade_usdt=risk_usdt, entry_price=final_entry,
@@ -200,34 +204,12 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
                 processed_symbols_in_cycle.add(symbol)
                 continue
 
-            # --- OSTATECZNE OBLICZENIA I PRZYGOTOWANIE DO ZLECENIA ---
-            
-            # Obliczamy TP dla celu 2R Netto
-            risk_per_unit_price_only = abs(final_entry - final_sl)
-            base_risk_from_price_usdt = risk_per_unit_price_only * final_qty
-            position_value_usdt = final_entry * final_qty
-            FEE_TAKER = 0.00055
-            total_estimated_fees = position_value_usdt * FEE_TAKER * 2
-            total_net_risk_usdt = base_risk_from_price_usdt + total_estimated_fees
-            target_net_profit_usdt = total_net_risk_usdt * 2.0
-            required_gross_profit_usdt = target_net_profit_usdt + total_estimated_fees
-            profit_per_unit = required_gross_profit_usdt / final_qty
-
-            if alert_model.direction == 'LONG':
-                calculated_tp = final_entry + profit_per_unit
-                final_tp = round_price_by_tick(calculated_tp, tick_size, 'up')
-            else: # SHORT
-                calculated_tp = final_entry - profit_per_unit
-                final_tp = round_price_by_tick(calculated_tp, tick_size, 'down')
-
             logger.info(
-                f"[{symbol}] Obliczenia dla 2R Netto: "
-                f"Ryzyko Netto (1R) = {total_net_risk_usdt:.4f} USDT. "
-                f"Cel Zysku Netto (2R) = {target_net_profit_usdt:.4f} USDT. "
-                f"Wymagany Zysk Brutto = {required_gross_profit_usdt:.4f} USDT. "
-                f"Finalna cena TP = {final_tp}"
+                f"[{symbol}] Zlecenie (TP z alertu): Entry={final_entry}, SL={final_sl}, "
+                f"TP={final_tp} (z alertu tp_2_0), Qty={final_qty}."
             )
             
+            # Krok 3: Złóż proste zlecenie.
             order_params = {
                 "symbol": symbol, "side": "Buy" if alert_model.direction == "LONG" else "Sell",
                 "orderType": "Limit", "qty": final_qty, "price": final_entry,
@@ -240,18 +222,15 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
             if response:
                 logger.info(f"[{symbol}] Zlecenie zintegrowane pomyślnie złożone. Uruchamiam proces analityczny.")
                 
-                # --- JEDYNE MIEJSCE, GDZIE TWORZYMY TECZKĘ ANALITYCZNĄ ---
                 existing_pending_case = state_manager.get_pending_case_for_symbol(symbol)
                 if existing_pending_case:
                     state_manager.delete_case_by_id(existing_pending_case.id)
                 
                 new_case = AnalyticalCase(
-                    alert_id=alert_model.id,
-                    symbol=symbol,
+                    alert_id=alert_model.id, symbol=symbol,
                     alert_data=alert_model.model_dump(by_alias=True)
                 )
                 state_manager.create_analytical_case(new_case)
-                # ---------------------------------------------------------
                 
                 order_data_to_save = {
                     "symbol": symbol, "orderId": response.get("orderId"), "status": "NEW_BRACKET",
