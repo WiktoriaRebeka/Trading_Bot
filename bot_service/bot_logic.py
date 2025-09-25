@@ -122,7 +122,8 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
 
 def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecutor):
     """
-    Przetwarza alerty w sposób atomowy, z blokadą cyklu i dynamicznym obliczaniem TP dla celu 2R w USDT.
+    Przetwarza alerty zgodnie z filozofią "Lustrzanego Odbicia".
+    Logika analityczna jest klonem logiki transakcyjnej.
     """
     instrument_rules = get_instrument_rules()
     if not instrument_rules:
@@ -140,15 +141,16 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
             alert_model = AlertData.model_validate(alert_dict)
             symbol = alert_model.symbol
 
+            # --- POCZĄTEK FILTRÓW TRANSAKCYJNYCH ---
             if symbol in processed_symbols_in_cycle:
-                logger.info(f"[{symbol}] Pomijam alert, ponieważ inny alert dla tego symbolu został już przetworzony w tym cyklu.")
+                logger.info(f"[{symbol}] Pomijam alert (symbol już przetworzony w tym cyklu).")
                 continue
 
             open_position_side = executor.get_open_position_side(symbol)
             
             if open_position_side and open_position_side != "ERROR":
                 if alert_model.direction != open_position_side:
-                    logger.warning(f"[{symbol}] ZABEZPIECZENIE: Wykryto otwartą pozycję {open_position_side}. Przeciwny alert ({alert_model.direction}) zignorowany.")
+                    logger.warning(f"[{symbol}] ODRZUCONO (Strażnik Pozycji): Wykryto otwartą pozycję {open_position_side}.")
                     processed_symbols_in_cycle.add(symbol)
                     continue
                 else:
@@ -157,7 +159,7 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
                 logger.info(f"[{symbol}] Brak otwartej pozycji. Anuluję wszystkie oczekujące zlecenia.")
                 executor.cancel_all_open_orders_for_symbol(symbol)
 
-            if not _correct_and_validate_alert(alert_model):
+            if not _correct_and_validate_alert(alert_model): # Tutaj jest nasz filtr 0.2%
                 processed_symbols_in_cycle.add(symbol)
                 continue
 
@@ -169,17 +171,8 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
             if not _is_alert_still_valid(alert_model, current_price):
                 processed_symbols_in_cycle.add(symbol)
                 continue
-
-            existing_pending_case = state_manager.get_pending_case_for_symbol(symbol)
-            if existing_pending_case:
-                logger.info(f"[{symbol}] Nowy alert ({alert_id}) unieważnia istniejącą teczkę PENDING. Usuwam.")
-                state_manager.delete_case_by_id(existing_pending_case.id)
             
-            new_case = AnalyticalCase(
-                alert_id=alert_model.id,
-                symbol=symbol,
-                alert_data=alert_model.model_dump(by_alias=True)
-            )
+            # --- KONIEC FILTRÓW. JEŚLI KOD DOTARŁ TUTAJ, ALERT JEST WSTĘPNIE AKCEPTOWANY ---
 
             rule = instrument_rules.get(symbol)
             if not rule or "tickSize" not in rule or "qtyStep" not in rule:
@@ -203,34 +196,21 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
             )
 
             if not final_qty or final_qty <= 0:
-                logger.warning(f"[{symbol}] Obliczona wielkość pozycji wynosi zero. Pomijam alert.")
-                state_manager.create_analytical_case(new_case)
+                logger.warning(f"[{symbol}] ODRZUCONO (Qty=0): Obliczona wielkość pozycji wynosi zero.")
                 processed_symbols_in_cycle.add(symbol)
                 continue
 
-            # --- NOWA, PRECYZYJNA LOGIKA OBLICZANIA TAKE PROFIT DLA CELU 2R NETTO ---
-
-            # Krok 1: Oblicz "bazową" stratę wynikającą wyłącznie z ruchu ceny.
+            # --- OSTATECZNE OBLICZENIA I PRZYGOTOWANIE DO ZLECENIA ---
+            
+            # Obliczamy TP dla celu 2R Netto
             risk_per_unit_price_only = abs(final_entry - final_sl)
             base_risk_from_price_usdt = risk_per_unit_price_only * final_qty
-
-            # Krok 2: Oblicz szacowane prowizje za otwarcie i zamknięcie pozycji.
-            # Zakładamy opłaty Taker (0.055%) dla obu transakcji, co jest konserwatywnym podejściem.
             position_value_usdt = final_entry * final_qty
             FEE_TAKER = 0.00055
             total_estimated_fees = position_value_usdt * FEE_TAKER * 2
-
-            # Krok 3: Oblicz całkowite RYZYKO NETTO (1R). To jest nasza realna, całkowita strata.
             total_net_risk_usdt = base_risk_from_price_usdt + total_estimated_fees
-
-            # Krok 4: Ustaw docelowy ZYSK NETTO na dwukrotność ryzyka netto (2R).
             target_net_profit_usdt = total_net_risk_usdt * 2.0
-
-            # Krok 5: Oblicz wymagany ZYSK BRUTTO. Aby osiągnąć zysk netto, ruch ceny
-            # musi pokonać nie tylko ten cel, ale również koszty prowizji.
             required_gross_profit_usdt = target_net_profit_usdt + total_estimated_fees
-
-            # Krok 6: Przelicz wymagany zysk brutto na cenę Take Profit.
             profit_per_unit = required_gross_profit_usdt / final_qty
 
             if alert_model.direction == 'LONG':
@@ -247,33 +227,36 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
                 f"Wymagany Zysk Brutto = {required_gross_profit_usdt:.4f} USDT. "
                 f"Finalna cena TP = {final_tp}"
             )
-            # =================================================================
-
+            
             order_params = {
-                "symbol": symbol,
-                "side": "Buy" if alert_model.direction == "LONG" else "Sell",
-                "orderType": "Limit",
-                "qty": final_qty,
-                "price": final_entry,
-                "takeProfit": final_tp,
-                "stopLoss": final_sl,
+                "symbol": symbol, "side": "Buy" if alert_model.direction == "LONG" else "Sell",
+                "orderType": "Limit", "qty": final_qty, "price": final_entry,
+                "takeProfit": final_tp, "stopLoss": final_sl,
                 "orderLinkId": f"bracket_{alert_id.replace('-', '')[:12]}_{int(datetime.now().timestamp())}",
                 "timeInForce": "GTC"
             }
 
             response = executor.place_order(order_params)
             if response:
-                logger.info(f"[{symbol}] Zlecenie zintegrowane pomyślnie złożone.")
+                logger.info(f"[{symbol}] Zlecenie zintegrowane pomyślnie złożone. Uruchamiam proces analityczny.")
+                
+                # --- JEDYNE MIEJSCE, GDZIE TWORZYMY TECZKĘ ANALITYCZNĄ ---
+                existing_pending_case = state_manager.get_pending_case_for_symbol(symbol)
+                if existing_pending_case:
+                    state_manager.delete_case_by_id(existing_pending_case.id)
+                
+                new_case = AnalyticalCase(
+                    alert_id=alert_model.id,
+                    symbol=symbol,
+                    alert_data=alert_model.model_dump(by_alias=True)
+                )
                 state_manager.create_analytical_case(new_case)
+                # ---------------------------------------------------------
                 
                 order_data_to_save = {
-                    "symbol": symbol,
-                    "orderId": response.get("orderId"),
-                    "status": "NEW_BRACKET",
-                    "alert_id": alert_id,
-                    "final_entry_price": final_entry,
-                    "final_sl_price": final_sl,
-                    "final_tp_price": final_tp,
+                    "symbol": symbol, "orderId": response.get("orderId"), "status": "NEW_BRACKET",
+                    "alert_id": alert_id, "final_entry_price": final_entry,
+                    "final_sl_price": final_sl, "final_tp_price": final_tp,
                     "tp_price_chart": alert_model.tp_3_0
                 }
                 state_manager.save_active_order(response.get("orderId"), order_data_to_save)
