@@ -445,46 +445,57 @@ def _handle_triggered_case(case_doc_snapshot: Any, kline: Kline):
 
     sl_price = alert.sl
     direction = alert.direction
-    sl_hit = (direction == 'LONG' and kline.low <= sl_price) or (direction == 'SHORT' and kline.high >= sl_price)
+    
+    # --- NOWA, BARDZIEJ PRECYZYJNA LOGIKA SYMULACJI ---
     
     resolved_scenarios = {}
     close_timestamp = datetime.fromtimestamp(kline.timestamp / 1000, tz=timezone.utc)
-    risk_perc = _calculate_risk_percentage(alert.entry, alert.sl)
-    triggered_at_dt = case_doc.get('triggered_at')
-    received_at_dt = alert.received_at
-
+    # ... (base_log_data bez zmian) ...
     base_log_data = {
-        "analysis_id": case_id,
-        "symbol": symbol,
-        "direction": direction,
-        "entry_price": alert.entry,
-        "sl_price": sl_price,
-        "timestamp_alert": received_at_dt.isoformat() if received_at_dt else None,
-        "timestamp_entry": triggered_at_dt.isoformat() if triggered_at_dt else None,
+        "analysis_id": case_id, "symbol": symbol, "direction": direction,
+        "entry_price": alert.entry, "sl_price": sl_price,
+        "timestamp_alert": alert.received_at.isoformat() if alert.received_at else None,
+        "timestamp_entry": case_doc.get('triggered_at').isoformat() if case_doc.get('triggered_at') else None,
         "timestamp_close": close_timestamp.isoformat(),
-        "risk_percentage": risk_perc
+        "risk_percentage": _calculate_risk_percentage(alert.entry, alert.sl)
     }
 
+    # Krok 1: Zawsze sprawdzaj najpierw warunek przegranej (SL).
+    sl_hit = False
+    if direction == 'LONG' and kline.low <= sl_price:
+        sl_hit = True
+    elif direction == 'SHORT' and kline.high >= sl_price:
+        sl_hit = True
+
     if sl_hit:
-        logger.info(f"--- [SL HIT] --- [{symbol}] | ID: {case_id} | Wszystkie nierozstrzygnięte scenariusze = LOSE.")
+        logger.info(f"--- [ANALYSIS SL HIT] --- [{symbol}] | ID: {case_id} | Wszystkie nierozstrzygnięte scenariusze = LOSE.")
         for target_level in unresolved_targets:
             log_data = base_log_data.copy()
             log_data.update({"target_level": target_level, "target_price": getattr(alert, target_level), "result": "LOSE"})
             log_analysis_result(log_data)
             resolved_scenarios[f'results.{target_level}'] = "LOSE"
     else:
+        # Krok 2: Jeśli SL NIE został trafiony, dopiero wtedy sprawdzaj warunki wygranej (TP).
         for target_level in unresolved_targets:
             target_price = getattr(alert, target_level)
-            tp_hit = (direction == 'LONG' and kline.high >= target_price) or (direction == 'SHORT' and kline.low <= target_price)
+            tp_hit = False
+            if direction == 'LONG' and kline.high >= target_price:
+                tp_hit = True
+            elif direction == 'SHORT' and kline.low <= target_price:
+                tp_hit = True
+            
             if tp_hit:
-                logger.info(f"--- [TP HIT] --- [{symbol}] | ID: {case_id} | Scenariusz {target_level} = WIN.")
+                logger.info(f"--- [ANALYSIS TP HIT] --- [{symbol}] | ID: {case_id} | Scenariusz {target_level} = WIN.")
                 log_data = base_log_data.copy()
                 log_data.update({"target_level": target_level, "target_price": target_price, "result": "WIN"})
                 log_analysis_result(log_data)
                 resolved_scenarios[f'results.{target_level}'] = "WIN"
 
+    # --- KONIEC NOWEJ LOGIKI ---
+
     if resolved_scenarios:
         state_manager.update_case_status_and_results(case_id, resolved_scenarios)
+        # Sprawdzamy, czy po aktualizacji wszystkie scenariusze są już rozstrzygnięte
         if len(results) - len(unresolved_targets) + len(resolved_scenarios) >= 6:
             logger.info(f"[{case_id}] Wszystkie 6 scenariuszy rozstrzygnięte. Finalne usunięcie teczki.")
             state_manager.delete_case_by_id(case_id)
