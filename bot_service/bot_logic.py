@@ -122,8 +122,7 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
 
 def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecutor):
     """
-    Przetwarza alerty, które przeszły filtr ryzyka > 0.43%.
-    Używa Entry, SL i TP (z pola tp_2_0) bezpośrednio z alertu.
+    Przetwarza alerty z ulepszonym logowaniem diagnostycznym.
     """
     instrument_rules = get_instrument_rules()
     if not instrument_rules:
@@ -140,10 +139,11 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
         try:
             alert_model = AlertData.model_validate(alert_dict)
             symbol = alert_model.symbol
+            logger.info(f"--- Rozpoczynam przetwarzanie alertu [{symbol}] ID: {alert_id} ---")
 
             # --- POCZĄTEK FILTRÓW TRANSAKCYJNYCH ---
             if symbol in processed_symbols_in_cycle:
-                logger.info(f"[{symbol}] Pomijam alert (symbol już przetworzony w tym cyklu).")
+                logger.info(f"[{symbol}] Pomijam (symbol już przetworzony w tym cyklu).")
                 continue
 
             open_position_side = executor.get_open_position_side(symbol)
@@ -159,40 +159,42 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
                 logger.info(f"[{symbol}] Brak otwartej pozycji. Anuluję wszystkie oczekujące zlecenia.")
                 executor.cancel_all_open_orders_for_symbol(symbol)
 
-            if not _correct_and_validate_alert(alert_model): # Tutaj działa nasz nowy filtr 0.43%
+            if not _correct_and_validate_alert(alert_model): # Tutaj jest nasz filtr 0.43%
+                # _correct_and_validate_alert już loguje powód, więc tylko dodajemy znacznik
+                logger.warning(f"[{symbol}] ODRZUCONO (Walidacja Logiczna).")
                 processed_symbols_in_cycle.add(symbol)
                 continue
 
             current_price = executor.get_latest_ticker_price(symbol)
             if current_price is None:
-                logger.error(f"[{symbol}] Nie udało się pobrać ceny rynkowej. Pomijam alert {alert_id}.")
+                logger.warning(f"[{symbol}] ODRZUCONO (Brak Ceny Rynkowej): Nie udało się pobrać ceny z giełdy.")
                 processed_symbols_in_cycle.add(symbol)
                 continue
             if not _is_alert_still_valid(alert_model, current_price):
+                logger.warning(f"[{symbol}] ODRZUCONO (Walidacja Rynkowa): Alert przestarzały.")
                 processed_symbols_in_cycle.add(symbol)
                 continue
             
+            logger.info(f"[{symbol}] Alert przeszedł wszystkie wstępne walidacje.")
             # --- KONIEC FILTRÓW. ALERT JEST AKCEPTOWANY ---
 
             rule = instrument_rules.get(symbol)
             if not rule or "tickSize" not in rule or "qtyStep" not in rule:
-                logger.error(f"[{symbol}] Brak pełnych zasad instrumentu w Firestore. Pomijam alert.")
+                logger.warning(f"[{symbol}] ODRZUCONO (Brak Zasad): Nie znaleziono reguł instrumentu w Firestore.")
                 processed_symbols_in_cycle.add(symbol)
                 continue
             
             tick_size, qty_step = rule["tickSize"], rule["qtyStep"]
 
-            # Krok 1: Zaokrąglij ceny z alertu.
             if alert_model.direction == 'LONG':
                 final_entry = round_price_by_tick(alert_model.entry, tick_size, 'up')
                 final_sl = round_price_by_tick(alert_model.sl, tick_size, 'down')
-                final_tp = round_price_by_tick(alert_model.tp_2_0, tick_size, 'up') # Używamy TP 2.0 z alertu
+                final_tp = round_price_by_tick(alert_model.tp_2_0, tick_size, 'up')
             else: # SHORT
                 final_entry = round_price_by_tick(alert_model.entry, tick_size, 'down')
                 final_sl = round_price_by_tick(alert_model.sl, tick_size, 'up')
-                final_tp = round_price_by_tick(alert_model.tp_2_0, tick_size, 'down') # Używamy TP 2.0 z alertu
+                final_tp = round_price_by_tick(alert_model.tp_2_0, tick_size, 'down')
 
-            # Krok 2: Oblicz wielkość pozycji na podstawie stałego ryzyka.
             risk_usdt = float(os.getenv("RISK_PER_TRADE_USDT", "2.5"))
             final_qty = calculate_position_size(
                 risk_per_trade_usdt=risk_usdt, entry_price=final_entry,
@@ -209,7 +211,6 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
                 f"TP={final_tp} (z alertu tp_2_0), Qty={final_qty}."
             )
             
-            # Krok 3: Złóż proste zlecenie.
             order_params = {
                 "symbol": symbol, "side": "Buy" if alert_model.direction == "LONG" else "Sell",
                 "orderType": "Limit", "qty": final_qty, "price": final_entry,
