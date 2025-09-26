@@ -327,6 +327,12 @@ def _run_analysis_of_existing_cases():
         logger.info("Brak aktywnych teczek analitycznych. Kończę cykl.")
         return
 
+    # Krok 1: Pobieramy zasady instrumentów, aby mieć dostęp do 'tickSize'
+    instrument_rules = get_instrument_rules()
+    if not instrument_rules:
+        logger.error("Nie udało się wczytać zasad instrumentów dla procesu analitycznego. Pomijam cykl.")
+        return
+
     logger.info(f"[DIAGNOSTYKA] Znaleziono {len(all_cases_docs)} teczek analitycznych do przetworzenia.")
     symbols_to_watch = {doc.to_dict().get('symbol') for doc in all_cases_docs if doc.to_dict()}
     valid_symbols = {s for s in symbols_to_watch if s}
@@ -352,39 +358,47 @@ def _run_analysis_of_existing_cases():
             symbol = case_doc.get('symbol')
             status = case_doc.get('status')
             
+            # Krok 2: Pobieramy zasady dla konkretnego symbolu
+            rule = instrument_rules.get(symbol)
+            if not rule or "tickSize" not in rule:
+                logger.warning(f"Brak zasad 'tickSize' dla symbolu {symbol} (teczka {case_id}). Pomijam.")
+                continue
+
             latest_kline = klines_models.get(symbol)
             if not latest_kline:
                 logger.warning(f"Brak danych kline dla symbolu {symbol} (teczka {case_id}). Pomijam tę teczkę w cyklu.")
                 continue
             
+            # Krok 3: Przekazujemy 'rule' do funkcji obsługujących
             if status == 'PENDING':
-                _handle_pending_case(case_doc_snapshot, latest_kline)
+                _handle_pending_case(case_doc_snapshot, latest_kline, rule)
             elif status == 'TRIGGERED':
-                _handle_triggered_case(case_doc_snapshot, latest_kline)
+                _handle_triggered_case(case_doc_snapshot, latest_kline, rule)
         except Exception as e:
             logger.error(f"Błąd podczas przetwarzania teczki {case_id}: {e}", exc_info=True)
 
     logger.info("Zakończono główną pętlę cyklu analitycznego.")
 
-def _handle_pending_case(case_doc_snapshot: Any, kline: Kline):
+def _handle_pending_case(case_doc_snapshot: Any, kline: Kline, rule: Dict[str, Any]):
     case_doc = case_doc_snapshot.to_dict()
     case_id = case_doc_snapshot.id
     alert = AlertData.model_validate(case_doc.get('alert_data'))
-    entry_price = alert.entry
-    
-    logger.info(
-        f"[DIAGNOSTYKA PENDING][{case_id}] Sprawdzam warunek wejścia dla {alert.symbol} ({alert.direction}). "
-        f"Entry: {entry_price}, Kline Low: {kline.low}, Kline High: {kline.high}"
-    )
+    tick_size = rule['tickSize']
+
+    # Używamy tych samych, zaokrąglonych cen, co w procesie transakcyjnym
+    if alert.direction == 'LONG':
+        final_entry = round_price_by_tick(alert.entry, tick_size, 'up')
+    else: # SHORT
+        final_entry = round_price_by_tick(alert.entry, tick_size, 'down')
     
     entry_triggered = False
-    if alert.direction == 'LONG' and kline.low <= entry_price:
+    if alert.direction == 'LONG' and kline.low <= final_entry:
         entry_triggered = True
-    elif alert.direction == 'SHORT' and kline.high >= entry_price:
+    elif alert.direction == 'SHORT' and kline.high >= final_entry:
         entry_triggered = True
         
     if entry_triggered:
-        logger.info(f"--- [TRIGGER] --- [{alert.symbol}] | ID: {case_id} | Cena wejścia {entry_price} dotknięta.")
+        logger.info(f"--- [ANALYSIS TRIGGER] --- [{alert.symbol}] | ID: {case_id} | Cena wejścia {final_entry} dotknięta.")
         updates = {
             "status": "TRIGGERED",
             "triggered_at": datetime.now(timezone.utc)
@@ -393,12 +407,13 @@ def _handle_pending_case(case_doc_snapshot: Any, kline: Kline):
 
 
 
-def _handle_triggered_case(case_doc_snapshot: Any, kline: Kline):
+def _handle_triggered_case(case_doc_snapshot: Any, kline: Kline, rule: Dict[str, Any]):
     case_doc = case_doc_snapshot.to_dict()
     case_id = case_doc_snapshot.id
     symbol = case_doc.get('symbol')
     alert = AlertData.model_validate(case_doc.get('alert_data'))
     results = case_doc.get('results', {})
+    tick_size = rule['tickSize']
 
     unresolved_targets = {k: v for k, v in results.items() if v == "UNRESOLVED"}
     if not unresolved_targets:
@@ -406,29 +421,27 @@ def _handle_triggered_case(case_doc_snapshot: Any, kline: Kline):
         state_manager.delete_case_by_id(case_id)
         return
 
-    sl_price = alert.sl
     direction = alert.direction
     
-    # --- NOWA, BARDZIEJ PRECYZYJNA LOGIKA SYMULACJI ---
+    # Używamy tych samych, zaokrąglonych cen, co w procesie transakcyjnym
+    if direction == 'LONG':
+        final_sl = round_price_by_tick(alert.sl, tick_size, 'down')
+    else: # SHORT
+        final_sl = round_price_by_tick(alert.sl, tick_size, 'up')
     
     resolved_scenarios = {}
     close_timestamp = datetime.fromtimestamp(kline.timestamp / 1000, tz=timezone.utc)
-    # ... (base_log_data bez zmian) ...
     base_log_data = {
         "analysis_id": case_id, "symbol": symbol, "direction": direction,
-        "entry_price": alert.entry, "sl_price": sl_price,
+        "entry_price": alert.entry, "sl_price": alert.sl, # W logach BQ zapisujemy surowe ceny
         "timestamp_alert": alert.received_at.isoformat() if alert.received_at else None,
         "timestamp_entry": case_doc.get('triggered_at').isoformat() if case_doc.get('triggered_at') else None,
         "timestamp_close": close_timestamp.isoformat(),
         "risk_percentage": _calculate_risk_percentage(alert.entry, alert.sl)
     }
 
-    # Krok 1: Zawsze sprawdzaj najpierw warunek przegranej (SL).
-    sl_hit = False
-    if direction == 'LONG' and kline.low <= sl_price:
-        sl_hit = True
-    elif direction == 'SHORT' and kline.high >= sl_price:
-        sl_hit = True
+    # "Zasada Pesymisty": Najpierw sprawdzamy SL
+    sl_hit = (direction == 'LONG' and kline.low <= final_sl) or (direction == 'SHORT' and kline.high >= final_sl)
 
     if sl_hit:
         logger.info(f"--- [ANALYSIS SL HIT] --- [{symbol}] | ID: {case_id} | Wszystkie nierozstrzygnięte scenariusze = LOSE.")
@@ -438,27 +451,25 @@ def _handle_triggered_case(case_doc_snapshot: Any, kline: Kline):
             log_analysis_result(log_data)
             resolved_scenarios[f'results.{target_level}'] = "LOSE"
     else:
-        # Krok 2: Jeśli SL NIE został trafiony, dopiero wtedy sprawdzaj warunki wygranej (TP).
+        # Dopiero jeśli SL nie został trafiony, sprawdzamy TP
         for target_level in unresolved_targets:
-            target_price = getattr(alert, target_level)
-            tp_hit = False
-            if direction == 'LONG' and kline.high >= target_price:
-                tp_hit = True
-            elif direction == 'SHORT' and kline.low <= target_price:
-                tp_hit = True
+            # Używamy zaokrąglonych cen TP
+            if direction == 'LONG':
+                final_tp = round_price_by_tick(getattr(alert, target_level), tick_size, 'up')
+            else: # SHORT
+                final_tp = round_price_by_tick(getattr(alert, target_level), tick_size, 'down')
+
+            tp_hit = (direction == 'LONG' and kline.high >= final_tp) or (direction == 'SHORT' and kline.low <= final_tp)
             
             if tp_hit:
                 logger.info(f"--- [ANALYSIS TP HIT] --- [{symbol}] | ID: {case_id} | Scenariusz {target_level} = WIN.")
                 log_data = base_log_data.copy()
-                log_data.update({"target_level": target_level, "target_price": target_price, "result": "WIN"})
+                log_data.update({"target_level": target_level, "target_price": getattr(alert, target_level), "result": "WIN"})
                 log_analysis_result(log_data)
                 resolved_scenarios[f'results.{target_level}'] = "WIN"
 
-    # --- KONIEC NOWEJ LOGIKI ---
-
     if resolved_scenarios:
         state_manager.update_case_status_and_results(case_id, resolved_scenarios)
-        # Sprawdzamy, czy po aktualizacji wszystkie scenariusze są już rozstrzygnięte
         if len(results) - len(unresolved_targets) + len(resolved_scenarios) >= 6:
             logger.info(f"[{case_id}] Wszystkie 6 scenariuszy rozstrzygnięte. Finalne usunięcie teczki.")
             state_manager.delete_case_by_id(case_id)
