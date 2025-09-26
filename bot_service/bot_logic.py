@@ -56,28 +56,7 @@ def round_price_by_tick(price: float, tick_size: str, direction: str) -> float:
         
     return float(quantized)
 
-def _is_alert_still_valid(alert: AlertData, current_price: float) -> bool:
-    """
-    Sprawdza, czy alert nie jest przestarzały w kontekście aktualnej ceny rynkowej.
-    Zwraca False, jeśli poziom SL został już naruszony.
-    """
-    if alert.direction == 'LONG':
-        if current_price <= alert.sl:
-            logger.warning(
-                f"[{alert.symbol}] ODRZUCONO PRZESTARZAŁY ALERT (LONG). "
-                f"Aktualna cena ({current_price}) jest już poniżej lub równa SL ({alert.sl})."
-            )
-            return False
-    elif alert.direction == 'SHORT':
-        if current_price >= alert.sl:
-            logger.warning(
-                f"[{alert.symbol}] ODRZUCONO PRZESTARZAŁY ALERT (SHORT). "
-                f"Aktualna cena ({current_price}) jest już powyżej lub równa SL ({alert.sl})."
-            )
-            return False
-            
-    logger.info(f"[{alert.symbol}] Alert jest aktualny. Aktualna cena: {current_price}, SL: {alert.sl}, Kierunek: {alert.direction}.")
-    return True
+
 
 def _calculate_risk_percentage(entry_price: float, sl_price: float) -> Optional[float]:
     """Oblicza procentową odległość SL od ceny wejścia."""
@@ -123,6 +102,8 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
 def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecutor):
     """
     Przetwarza alerty z ulepszonym logowaniem diagnostycznym.
+    Logika analityczna jest teraz powiązana z transakcyjną ("cyfrowy bliźniak").
+    Filtr "Puls Rynku" został usunięty zgodnie ze strategią.
     """
     instrument_rules = get_instrument_rules()
     if not instrument_rules:
@@ -146,11 +127,12 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
                 logger.info(f"[{symbol}] Pomijam (symbol już przetworzony w tym cyklu).")
                 continue
 
+            # FILTR 1: "Strażnik Pozycji"
             open_position_side = executor.get_open_position_side(symbol)
             
             if open_position_side and open_position_side != "ERROR":
                 if alert_model.direction != open_position_side:
-                    logger.warning(f"[{symbol}] ODRZUCONO (Strażnik Pozycji): Wykryto otwartą pozycję {open_position_side}.")
+                    logger.warning(f"[{symbol}] ODRZUCONO (Strażnik Pozycji): Wykryto otwartą, przeciwną pozycję {open_position_side}.")
                     processed_symbols_in_cycle.add(symbol)
                     continue
                 else:
@@ -159,24 +141,16 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
                 logger.info(f"[{symbol}] Brak otwartej pozycji. Anuluję wszystkie oczekujące zlecenia.")
                 executor.cancel_all_open_orders_for_symbol(symbol)
 
-            if not _correct_and_validate_alert(alert_model): # Tutaj jest nasz filtr 0.43%
-                # _correct_and_validate_alert już loguje powód, więc tylko dodajemy znacznik
+            # FILTR 2: "Walidacja Logiczna"
+            if not _correct_and_validate_alert(alert_model):
                 logger.warning(f"[{symbol}] ODRZUCONO (Walidacja Logiczna).")
                 processed_symbols_in_cycle.add(symbol)
                 continue
 
-            current_price = executor.get_latest_ticker_price(symbol)
-            if current_price is None:
-                logger.warning(f"[{symbol}] ODRZUCONO (Brak Ceny Rynkowej): Nie udało się pobrać ceny z giełdy.")
-                processed_symbols_in_cycle.add(symbol)
-                continue
-            if not _is_alert_still_valid(alert_model, current_price):
-                logger.warning(f"[{symbol}] ODRZUCONO (Walidacja Rynkowa): Alert przestarzały.")
-                processed_symbols_in_cycle.add(symbol)
-                continue
+            # FILTR "Puls Rynku" został celowo usunięty.
             
-            logger.info(f"[{symbol}] Alert przeszedł wszystkie wstępne walidacje.")
-            # --- KONIEC FILTRÓW. ALERT JEST AKCEPTOWANY ---
+            logger.info(f"[{symbol}] Alert przeszedł wszystkie filtry transakcyjne.")
+            # --- KONIEC FILTRÓW. ALERT JEST AKCEPTOWANY DO DALSZEGO PRZETWARZANIA ---
 
             rule = instrument_rules.get(symbol)
             if not rule or "tickSize" not in rule or "qtyStep" not in rule:
@@ -186,6 +160,7 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
             
             tick_size, qty_step = rule["tickSize"], rule["qtyStep"]
 
+            # Obliczenia cen i wielkości pozycji
             if alert_model.direction == 'LONG':
                 final_entry = round_price_by_tick(alert_model.entry, tick_size, 'up')
                 final_sl = round_price_by_tick(alert_model.sl, tick_size, 'down')
@@ -206,11 +181,25 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
                 processed_symbols_in_cycle.add(symbol)
                 continue
 
-            logger.info(
-                f"[{symbol}] Zlecenie (TP z alertu): Entry={final_entry}, SL={final_sl}, "
-                f"TP={final_tp} (z alertu tp_2_0), Qty={final_qty}."
-            )
+            # --- ATOMOWE URUCHOMIENIE PROCESU ANALITYCZNEGO I TRANSAKCYJNEGO ---
             
+            # Krok 1: Utwórz teczkę analityczną ("cyfrowy bliźniak")
+            logger.info(f"[{symbol}] Uruchamiam proces analityczny.")
+            existing_pending_case = state_manager.get_pending_case_for_symbol(symbol)
+            if existing_pending_case:
+                state_manager.delete_case_by_id(existing_pending_case.id)
+            
+            new_case = AnalyticalCase(
+                alert_id=alert_model.id, symbol=symbol,
+                alert_data=alert_model.model_dump(by_alias=True)
+            )
+            state_manager.create_analytical_case(new_case)
+
+            # Krok 2: Spróbuj złożyć zlecenie transakcyjne
+            logger.info(
+                f"[{symbol}] Przygotowano zlecenie: Entry={final_entry}, SL={final_sl}, "
+                f"TP={final_tp}, Qty={final_qty}."
+            )
             order_params = {
                 "symbol": symbol, "side": "Buy" if alert_model.direction == "LONG" else "Sell",
                 "orderType": "Limit", "qty": final_qty, "price": final_entry,
@@ -220,19 +209,10 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
             }
 
             response = executor.place_order(order_params)
+            
+            # Krok 3: Weryfikacja i zapis stanu
             if response:
-                logger.info(f"[{symbol}] Zlecenie zintegrowane pomyślnie złożone. Uruchamiam proces analityczny.")
-                
-                existing_pending_case = state_manager.get_pending_case_for_symbol(symbol)
-                if existing_pending_case:
-                    state_manager.delete_case_by_id(existing_pending_case.id)
-                
-                new_case = AnalyticalCase(
-                    alert_id=alert_model.id, symbol=symbol,
-                    alert_data=alert_model.model_dump(by_alias=True)
-                )
-                state_manager.create_analytical_case(new_case)
-                
+                logger.info(f"[{symbol}] Zlecenie zintegrowane pomyślnie złożone. Order ID: {response.get('orderId')}")
                 order_data_to_save = {
                     "symbol": symbol, "orderId": response.get("orderId"), "status": "NEW_BRACKET",
                     "alert_id": alert_id, "final_entry_price": final_entry,
@@ -241,13 +221,16 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
                 }
                 state_manager.save_active_order(response.get("orderId"), order_data_to_save)
             else:
-                raise Exception("Nie udało się złożyć zlecenia zintegrowanego (brak odpowiedzi).")
+                # ROLLBACK: Jeśli zlecenie się nie powiodło, usuwamy teczkę analityczną dla zachowania spójności.
+                logger.error(f"[{symbol}] Nie udało się złożyć zlecenia. Wycofuję teczkę analityczną {new_case.alert_id}.")
+                state_manager.delete_case_by_id(new_case.alert_id)
+                raise Exception("Nie udało się złożyć zlecenia zintegrowanego (brak odpowiedzi od Bybit).")
 
             processed_symbols_in_cycle.add(symbol)
 
         except BybitAPIError as e:
-            if e.ret_code == 110093:
-                logger.warning(f"[{symbol}] Zlecenie odrzucone (110093) z powodu race condition. Pomijam.")
+            if e.ret_code == 110093: # "Position is in cross margin mode, cannot set TP/SL" - błąd, który można zignorować
+                logger.warning(f"[{symbol}] Zlecenie odrzucone (110093) z powodu ustawień margin. Pomijam.")
             else:
                 logger.error(f"Błąd API Bybit dla alertu {alert_id}: {e}", exc_info=False)
             processed_symbols_in_cycle.add(symbol)
