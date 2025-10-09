@@ -216,6 +216,7 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
                 order_data_to_save = {
                     "symbol": symbol, "orderId": response.get("orderId"), "status": "NEW_BRACKET",
                     "alert_id": alert_id, "final_entry_price": final_entry,
+                    "direction": alert_model.direction,
                     "final_sl_price": final_sl, "final_tp_price": final_tp,
                     "tp_price_chart": alert_model.tp_3_0
                 }
@@ -240,7 +241,8 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
 
 def log_closed_positions_pnl(executor: BybitExecutor) -> int:
     """
-    Pobiera historię zamkniętych pozycji, dopasowuje je po symbolu z Firestore i loguje do BigQuery.
+    Pobiera historię zamkniętych pozycji, dopasowuje je (jeśli to możliwe) 
+    z Firestore i loguje KAŻDY rekord do BigQuery.
     """
     logger.info("[PNL_LOGGER] Rozpoczynam cykl logowania PnL.")
     last_check_ts_dt = load_last_processed_timestamp("pnl_logger_last_fetch_state")
@@ -263,29 +265,32 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
             logger.warning("[PNL_LOGGER] Pominięto rekord PnL bez symbolu.", extra={"json_fields": {"pnl_record": pnl_record}})
             continue
 
+        # --- POCZĄTEK KLUCZOWEJ POPRAWKI ---
+        # Spróbuj znaleźć dopasowanie, ale nie przerywaj, jeśli się nie uda.
         active_order_data = state_manager.get_active_order_by_symbol(symbol)
         
         if not active_order_data:
-            logger.warning(f"[PNL_LOGGER] Nie znaleziono aktywnego zlecenia dla symbolu {symbol} w Firestore. Prawdopodobnie transakcja manualna. Pomijam.")
-            continue
+            logger.warning(f"[PNL_LOGGER] Nie znaleziono dopasowania dla {symbol} w Firestore. Transakcja zostanie zalogowana jako 'UNMATCHED'.")
+            # Stwórz "pusty" obiekt, aby uniknąć błędów w dalszej części kodu.
+            active_order_data = {} 
+        
+        # Użyj orderId z rekordu PnL jako rezerwowego, jeśli nie ma dopasowania.
+        original_order_id = active_order_data.get('orderId') or pnl_record.get('orderId', 'unknown')
+        alert_id = active_order_data.get('alert_id', 'UNMATCHED_OR_MANUAL')
 
-        alert_id = active_order_data.get('alert_id', 'unknown')
-        original_order_id = active_order_data.get('orderId')
-
-        if not original_order_id:
-            logger.error(f"[PNL_LOGGER] Krytyczny błąd: znaleziono dopasowanie dla {symbol}, ale brak orderId w dokumencie Firestore. Pomijam.", extra={"json_fields": active_order_data})
-            continue
-
-        logger.info(f"[PNL_LOGGER] Pomyślnie dopasowano zamkniętą pozycję {symbol} do alertu {alert_id} (Order ID: {original_order_id}).")
+        logger.info(f"[PNL_LOGGER] Przetwarzanie zamkniętej pozycji {symbol} (Alert ID: {alert_id}, Order ID: {original_order_id}).")
 
         enriched_pnl_data = pnl_record.copy()
         enriched_pnl_data['alert_id'] = alert_id
         
-        # Przekazujemy `active_order_data` do funkcji logującej
+        # Przekazujemy `active_order_data` (pełne lub puste) do funkcji logującej.
         log_real_trade_result(enriched_pnl_data, active_order_data)
         processed_count += 1
         
-        state_manager.delete_active_order_by_id(original_order_id)
+        # Usuń dokument z active_orders tylko, jeśli go znaleźliśmy i miał orderId.
+        if active_order_data.get('orderId'):
+            state_manager.delete_active_order_by_id(active_order_data.get('orderId'))
+        # --- KONIEC KLUCZOWEJ POPRAWKI ---
 
         updated_time_ms = int(pnl_record.get("updatedTime", 0))
         if updated_time_ms > 0:
