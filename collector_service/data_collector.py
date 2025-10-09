@@ -4,14 +4,17 @@ import logging
 import asyncio
 import aiohttp
 from typing import List, Dict, Any, Optional
-
+from aiohttp import ClientError
+from asyncio import TimeoutError
 from shared_lib import constants
 from shared_lib.firebase_client import get_db, get_symbols_to_watch_from_config
 
 logger = logging.getLogger(__name__)
 
 async def _fetch_kline_for_symbol(session: aiohttp.ClientSession, symbol: str, cycle_id: str) -> Optional[Dict[str, Any]]:
-    """Pobiera najnowszą świecę dla danego symbolu, logując z cycle_id."""
+    """
+    Pobiera najnowszą świecę dla danego symbolu, z ulepszonym logowaniem błędów.
+    """
     api_symbol = symbol.replace('.P', '')
     params = {"category": "linear", "symbol": api_symbol, "interval": "1", "limit": 2}
     max_retries = 3
@@ -23,24 +26,28 @@ async def _fetch_kline_for_symbol(session: aiohttp.ClientSession, symbol: str, c
             async with session.get(constants.BYBIT_API_URL_V5_KLINE, params=params, timeout=5) as response:
                 response.raise_for_status()
                 data = await response.json()
+                
                 if data.get("retCode") == 0 and data.get("result") and data["result"].get("list"):
                     kline_list = data["result"]["list"]
+                    # Bierzemy przedostatnią świecę, ponieważ ostatnia jest jeszcze "na żywo" i niekompletna
                     target_kline = kline_list[1] if len(kline_list) > 1 else kline_list[0]
                     return {
                         "symbol": symbol, 
                         "high": float(target_kline[2]), 
                         "low": float(target_kline[3]), 
                         "close": float(target_kline[4]), 
-                        "timestamp": int(target_kline[0]) # <-- POPRAWIONA NAZWA POLA
+                        "timestamp": int(target_kline[0])
                     }
                 else:
                     logger.warning(f"API Bybit zwróciło błąd: {data.get('retMsg', 'Brak wiadomości')}", extra=log_extra)
-        except Exception as e:
-            logger.warning(f"Błąd w _fetch_kline_for_symbol (próba {attempt+1}): {e}", extra=log_extra)
-            await asyncio.sleep(0.5) 
-            
-    logger.error(f"Nie udało się pobrać danych dla {symbol} po {max_retries} próbach.", extra=log_extra)
-    return None
+
+        except (ClientError, TimeoutError) as e: # Jawnie łapiemy oczekiwane błędy sieciowe
+            logger.warning(
+                f"Błąd sieciowy w _fetch_kline_for_symbol (próba {attempt+1}) dla {symbol}: {type(e).__name__}",
+                exc_info=True, # Zawsze loguj pełny traceback dla błędów
+                extra=log_extra
+            )
+            await asyncio.sleep(0.5) # Czekamy chwilę przed ponowieniem
 
 async def get_latest_klines_for_all_symbols(symbols_to_watch: List[str], cycle_id: str) -> Dict[str, Dict[str, Any]]:
     """Asynchronicznie pobiera świece dla wszystkich symboli."""
