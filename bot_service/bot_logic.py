@@ -86,9 +86,9 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
         )
         return False
     risk_perc = _calculate_risk_percentage(alert.entry, alert.sl)
-    if risk_perc is None or risk_perc < 0.25:
+    if risk_perc is None or risk_perc < 0.43:
         logger.warning(
-            f"Odrzucono alert [{alert.symbol}]: Ryzyko poniżej minimum 0.25%. "
+            f"Odrzucono alert [{alert.symbol}]: Ryzyko poniżej minimum 0.43%. "
             f"Obliczone ryzyko: {risk_perc}% (Wejście: {alert.entry}, SL: {alert.sl})."
         )
         return False
