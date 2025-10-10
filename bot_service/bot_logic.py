@@ -100,11 +100,6 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
     return True
 
 def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecutor):
-    """
-    Przetwarza alerty z ulepszonym logowaniem diagnostycznym.
-    Logika analityczna jest teraz powiązana z transakcyjną ("cyfrowy bliźniak").
-    Filtr "Puls Rynku" został usunięty zgodnie ze strategią.
-    """
     instrument_rules = get_instrument_rules()
     if not instrument_rules:
         logger.error("Nie udało się wczytać zasad instrumentów z Firestore. Przerywam przetwarzanie alertów.")
@@ -122,12 +117,10 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
             symbol = alert_model.symbol
             logger.info(f"--- Rozpoczynam przetwarzanie alertu [{symbol}] ID: {alert_id} ---")
 
-            # --- POCZĄTEK FILTRÓW TRANSAKCYJNYCH ---
             if symbol in processed_symbols_in_cycle:
                 logger.info(f"[{symbol}] Pomijam (symbol już przetworzony w tym cyklu).")
                 continue
 
-            # FILTR 1: "Strażnik Pozycji"
             open_position_side = executor.get_open_position_side(symbol)
             
             if open_position_side and open_position_side != "ERROR":
@@ -138,19 +131,17 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
                 else:
                     logger.info(f"[{symbol}] Wykryto otwartą pozycję {open_position_side}. Nowy, zgodny alert ({alert_model.direction}) będzie przetworzony.")
             else:
+                # --- KLUCZOWA ZMIANA: Anulowanie zleceń przeniesione tutaj ---
+                # Ta operacja wykona się TYLKO wtedy, gdy NIE MA otwartej pozycji.
                 logger.info(f"[{symbol}] Brak otwartej pozycji. Anuluję wszystkie oczekujące zlecenia.")
                 executor.cancel_all_open_orders_for_symbol(symbol)
 
-            # FILTR 2: "Walidacja Logiczna"
             if not _correct_and_validate_alert(alert_model):
                 logger.warning(f"[{symbol}] ODRZUCONO (Walidacja Logiczna).")
                 processed_symbols_in_cycle.add(symbol)
                 continue
-
-            # FILTR "Puls Rynku" został celowo usunięty.
             
             logger.info(f"[{symbol}] Alert przeszedł wszystkie filtry transakcyjne.")
-            # --- KONIEC FILTRÓW. ALERT JEST AKCEPTOWANY DO DALSZEGO PRZETWARZANIA ---
 
             rule = instrument_rules.get(symbol)
             if not rule or "tickSize" not in rule or "qtyStep" not in rule:
@@ -160,7 +151,6 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
             
             tick_size, qty_step = rule["tickSize"], rule["qtyStep"]
 
-            # Obliczenia cen i wielkości pozycji
             if alert_model.direction == 'LONG':
                 final_entry = round_price_by_tick(alert_model.entry, tick_size, 'up')
                 final_sl = round_price_by_tick(alert_model.sl, tick_size, 'down')
@@ -181,21 +171,9 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
                 processed_symbols_in_cycle.add(symbol)
                 continue
 
-            # --- ATOMOWE URUCHOMIENIE PROCESU ANALITYCZNEGO I TRANSAKCYJNEGO ---
-            
-            # Krok 1: Utwórz teczkę analityczną ("cyfrowy bliźniak")
-            logger.info(f"[{symbol}] Uruchamiam proces analityczny.")
-            existing_pending_case = state_manager.get_pending_case_for_symbol(symbol)
-            if existing_pending_case:
-                state_manager.delete_case_by_id(existing_pending_case.id)
-            
-            new_case = AnalyticalCase(
-                alert_id=alert_model.id, symbol=symbol,
-                alert_data=alert_model.model_dump(by_alias=True)
-            )
-            state_manager.create_analytical_case(new_case)
+            # --- Wyłączono tryb analityczny ---
+            logger.info(f"[{symbol}] Tworzenie teczek analitycznych jest obecnie wyłączone. Przechodzę do trybu transakcyjnego.")
 
-            # Krok 2: Spróbuj złożyć zlecenie transakcyjne
             logger.info(
                 f"[{symbol}] Przygotowano zlecenie: Entry={final_entry}, SL={final_sl}, "
                 f"TP={final_tp}, Qty={final_qty}."
@@ -210,27 +188,22 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
 
             response = executor.place_order(order_params)
             
-            # Krok 3: Weryfikacja i zapis stanu
             if response:
                 logger.info(f"[{symbol}] Zlecenie zintegrowane pomyślnie złożone. Order ID: {response.get('orderId')}")
                 order_data_to_save = {
                     "symbol": symbol, "orderId": response.get("orderId"), "status": "NEW_BRACKET",
-                    "alert_id": alert_id, "final_entry_price": final_entry,
-                    "direction": alert_model.direction,
-                    "final_sl_price": final_sl, "final_tp_price": final_tp,
-                    "tp_price_chart": alert_model.tp_3_0
+                    "alert_id": alert_id, "direction": alert_model.direction,
+                    "final_entry_price": final_entry, "final_sl_price": final_sl, 
+                    "final_tp_price": final_tp, "tp_price_chart": alert_model.tp_3_0
                 }
                 state_manager.save_active_order(response.get("orderId"), order_data_to_save)
             else:
-                # ROLLBACK: Jeśli zlecenie się nie powiodło, usuwamy teczkę analityczną dla zachowania spójności.
-                logger.error(f"[{symbol}] Nie udało się złożyć zlecenia. Wycofuję teczkę analityczną {new_case.alert_id}.")
-                state_manager.delete_case_by_id(new_case.alert_id)
                 raise Exception("Nie udało się złożyć zlecenia zintegrowanego (brak odpowiedzi od Bybit).")
 
             processed_symbols_in_cycle.add(symbol)
 
         except BybitAPIError as e:
-            if e.ret_code == 110093: # "Position is in cross margin mode, cannot set TP/SL" - błąd, który można zignorować
+            if e.ret_code == 110093:
                 logger.warning(f"[{symbol}] Zlecenie odrzucone (110093) z powodu ustawień margin. Pomijam.")
             else:
                 logger.error(f"Błąd API Bybit dla alertu {alert_id}: {e}", exc_info=False)
@@ -240,10 +213,6 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
             processed_symbols_in_cycle.add(symbol)
 
 def log_closed_positions_pnl(executor: BybitExecutor) -> int:
-    """
-    Pobiera historię zamkniętych pozycji, dopasowuje je (jeśli to możliwe) 
-    z Firestore i loguje KAŻDY rekord do BigQuery.
-    """
     logger.info("[PNL_LOGGER] Rozpoczynam cykl logowania PnL.")
     last_check_ts_dt = load_last_processed_timestamp("pnl_logger_last_fetch_state")
     logger.info(f"[PNL_LOGGER] Sprawdzam zamknięte pozycje od: {last_check_ts_dt.isoformat()}")
@@ -265,16 +234,12 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
             logger.warning("[PNL_LOGGER] Pominięto rekord PnL bez symbolu.", extra={"json_fields": {"pnl_record": pnl_record}})
             continue
 
-        # --- POCZĄTEK KLUCZOWEJ POPRAWKI ---
-        # Spróbuj znaleźć dopasowanie, ale nie przerywaj, jeśli się nie uda.
         active_order_data = state_manager.get_active_order_by_symbol(symbol)
         
         if not active_order_data:
             logger.warning(f"[PNL_LOGGER] Nie znaleziono dopasowania dla {symbol} w Firestore. Transakcja zostanie zalogowana jako 'UNMATCHED'.")
-            # Stwórz "pusty" obiekt, aby uniknąć błędów w dalszej części kodu.
             active_order_data = {} 
         
-        # Użyj orderId z rekordu PnL jako rezerwowego, jeśli nie ma dopasowania.
         original_order_id = active_order_data.get('orderId') or pnl_record.get('orderId', 'unknown')
         alert_id = active_order_data.get('alert_id', 'UNMATCHED_OR_MANUAL')
 
@@ -283,14 +248,11 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
         enriched_pnl_data = pnl_record.copy()
         enriched_pnl_data['alert_id'] = alert_id
         
-        # Przekazujemy `active_order_data` (pełne lub puste) do funkcji logującej.
         log_real_trade_result(enriched_pnl_data, active_order_data)
         processed_count += 1
         
-        # Usuń dokument z active_orders tylko, jeśli go znaleźliśmy i miał orderId.
         if active_order_data.get('orderId'):
             state_manager.delete_active_order_by_id(active_order_data.get('orderId'))
-        # --- KONIEC KLUCZOWEJ POPRAWKI ---
 
         updated_time_ms = int(pnl_record.get("updatedTime", 0))
         if updated_time_ms > 0:
@@ -304,7 +266,6 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
         
     logger.info(f"[PNL_LOGGER] Zakończono cykl. Przetworzono i zalogowano {processed_count} rekordów.")
     return processed_count
-
 
 
 def _run_analysis_of_existing_cases():

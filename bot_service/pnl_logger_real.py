@@ -38,7 +38,6 @@ REAL_TRADES_HISTORY_SCHEMA = [
 
 
 def log_real_trade_result(enriched_pnl_data: Dict[str, Any], active_order_data: Dict[str, Any]):
-    """Transformuje dane PnL, wzbogaca je o DOKŁADNE dane zlecenia i zapisuje do BigQuery."""
     if not initialize_bigquery():
         logger.error("[PNL_LOGGER] BigQuery nie zostało zainicjalizowane – pomijam zapis.")
         return
@@ -74,25 +73,19 @@ def log_real_trade_result(enriched_pnl_data: Dict[str, Any], active_order_data: 
         
         PRECISION = Decimal('0.00000001')
 
-        # --- POCZĄTEK POPRAWKI KIERUNKU ---
-        # Domyślny kierunek, jeśli nie znajdziemy dopasowania
         final_direction = "UNKNOWN"
-        
-        # Jeśli mamy dane z naszego zlecenia, użyj ich - to jest nasze źródło prawdy
         if active_order_data.get("direction"):
             final_direction = active_order_data.get("direction")
-        # Jeśli nie, spróbujmy odgadnąć na podstawie danych z Bybit (zostanie jako UNKNOWN, jeśli side nie istnieje)
         elif enriched_pnl_data.get("side") == "Buy":
             final_direction = "LONG"
         elif enriched_pnl_data.get("side") == "Sell":
             final_direction = "SHORT"
-        # --- KONIEC POPRAWKI KIERUNKU ---
 
         transformed_data = {
             "alert_id": alert_id,
             "order_id": order_id,
             "symbol": enriched_pnl_data.get("symbol"),
-            "direction": final_direction, # <-- Użycie nowej, bezpiecznej zmiennej
+            "direction": final_direction,
             "qty": float(qty.quantize(PRECISION)),
             "leverage": leverage,
             "avg_entry_price": float(avg_entry_price.quantize(PRECISION)),
