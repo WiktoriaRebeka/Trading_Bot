@@ -131,8 +131,7 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
                 else:
                     logger.info(f"[{symbol}] Wykryto otwartą pozycję {open_position_side}. Nowy, zgodny alert ({alert_model.direction}) będzie przetworzony.")
             else:
-                # --- KLUCZOWA ZMIANA: Anulowanie zleceń przeniesione tutaj ---
-                # Ta operacja wykona się TYLKO wtedy, gdy NIE MA otwartej pozycji.
+                # --- KLUCZOWA POPRAWKA: Anulowanie zleceń jest tutaj bezpieczne ---
                 logger.info(f"[{symbol}] Brak otwartej pozycji. Anuluję wszystkie oczekujące zlecenia.")
                 executor.cancel_all_open_orders_for_symbol(symbol)
 
@@ -229,39 +228,44 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
     processed_count = 0
     
     for pnl_record in pnl_records:
-        symbol = pnl_record.get("symbol")
-        if not symbol:
-            logger.warning("[PNL_LOGGER] Pominięto rekord PnL bez symbolu.", extra={"json_fields": {"pnl_record": pnl_record}})
+        symbol = None # Reset symbol for each record
+        try:
+            symbol = pnl_record.get("symbol")
+            if not symbol:
+                logger.warning("[PNL_LOGGER] Pominięto rekord PnL bez symbolu.", extra={"json_fields": {"pnl_record": pnl_record}})
+                continue
+
+            active_order_data = state_manager.get_active_order_by_symbol(symbol)
+            
+            if active_order_data:
+                logger.info(f"[PNL_LOGGER] Znaleziono dopasowanie dla {symbol} w Firestore.")
+                alert_id = active_order_data.get('alert_id', 'MATCHED_NO_ALERT_ID')
+                order_id_from_db = active_order_data.get('orderId')
+            else:
+                logger.warning(f"[PNL_LOGGER] Nie znaleziono dopasowania dla {symbol}. Transakcja zostanie zalogowana jako 'UNMATCHED'.")
+                active_order_data = {}
+                alert_id = 'UNMATCHED_OR_MANUAL'
+                order_id_from_db = None
+
+            enriched_pnl_data = pnl_record.copy()
+            enriched_pnl_data['alert_id'] = alert_id
+            
+            log_real_trade_result(enriched_pnl_data, active_order_data)
+            processed_count += 1
+            
+            if order_id_from_db:
+                state_manager.delete_active_order_by_id(order_id_from_db)
+
+            updated_time_ms = int(pnl_record.get("updatedTime", 0))
+            if updated_time_ms > 0:
+                record_ts = datetime.fromtimestamp(updated_time_ms / 1000, tz=timezone.utc)
+                if record_ts > new_max_ts:
+                    new_max_ts = record_ts
+        except Exception as e:
+            logger.error(f"Krytyczny błąd podczas przetwarzania rekordu PnL dla symbolu {symbol}: {e}", exc_info=True)
             continue
-
-        active_order_data = state_manager.get_active_order_by_symbol(symbol)
-        
-        if not active_order_data:
-            logger.warning(f"[PNL_LOGGER] Nie znaleziono dopasowania dla {symbol} w Firestore. Transakcja zostanie zalogowana jako 'UNMATCHED'.")
-            active_order_data = {} 
-        
-        original_order_id = active_order_data.get('orderId') or pnl_record.get('orderId', 'unknown')
-        alert_id = active_order_data.get('alert_id', 'UNMATCHED_OR_MANUAL')
-
-        logger.info(f"[PNL_LOGGER] Przetwarzanie zamkniętej pozycji {symbol} (Alert ID: {alert_id}, Order ID: {original_order_id}).")
-
-        enriched_pnl_data = pnl_record.copy()
-        enriched_pnl_data['alert_id'] = alert_id
-        
-        log_real_trade_result(enriched_pnl_data, active_order_data)
-        processed_count += 1
-        
-        if active_order_data.get('orderId'):
-            state_manager.delete_active_order_by_id(active_order_data.get('orderId'))
-
-        updated_time_ms = int(pnl_record.get("updatedTime", 0))
-        if updated_time_ms > 0:
-            record_ts = datetime.fromtimestamp(updated_time_ms / 1000, tz=timezone.utc)
-            if record_ts > new_max_ts:
-                new_max_ts = record_ts
     
     if new_max_ts > last_check_ts_dt:
-        logger.info(f"[PNL_LOGGER] Zapisuję nowy timestamp ostatniego sprawdzenia: {new_max_ts.isoformat()}")
         save_last_processed_timestamp(new_max_ts + timedelta(seconds=1), "pnl_logger_last_fetch_state")
         
     logger.info(f"[PNL_LOGGER] Zakończono cykl. Przetworzono i zalogowano {processed_count} rekordów.")
