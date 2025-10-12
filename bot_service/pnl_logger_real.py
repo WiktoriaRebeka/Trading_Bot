@@ -117,33 +117,5 @@ def log_real_trade_result(enriched_pnl_data: Dict[str, Any], active_order_data: 
         logger.critical(f"{log_prefix} Krytyczny błąd podczas zapisu do BigQuery: {e}", exc_info=True)
 
 
-def get_active_order_by_symbol(symbol: str) -> Optional[Dict[str, Any]]:
-    """
-    Pobiera dane aktywnego zlecenia na podstawie jego symbolu.
-    Gwarantuje, że zawsze szukamy symbolu w naszym wewnętrznym formacie (.P).
-    Zakłada, że może istnieć tylko jedno aktywne zlecenie na dany symbol.
-    """
-    try:
-        # Krok 1: Ujednolicenie formatu symbolu do naszego wewnętrznego standardu (.P)
-        symbol_with_p = symbol if symbol.endswith('.P') else f"{symbol}.P"
-        logger.info(f"Próba znalezienia aktywnego zlecenia dla symbolu: '{symbol_with_p}' (oryginalny: '{symbol}')")
 
-        # Krok 2: Zapytanie do Firestore
-        docs_stream = _get_db().collection(constants.ACTIVE_ORDERS_COLLECTION) \
-            .where('symbol', '==', symbol_with_p) \
-            .limit(1) \
-            .stream()
-        
-        doc = next(docs_stream, None)
-        
-        # Krok 3: Przetworzenie wyniku
-        if doc and doc.exists:
-            logger.info(f"SUKCES: Znaleziono dopasowanie w active_orders dla symbolu {symbol_with_p} (ID dokumentu: {doc.id})")
-            return doc.to_dict()
-        
-        logger.warning(f"Nie znaleziono dokumentu w active_orders dla symbolu {symbol_with_p}")
-        return None
-    except Exception as e:
-        logger.error(f"Błąd podczas pobierania aktywnego zlecenia dla symbolu {symbol}: {e}", exc_info=True)
-        return None
 
