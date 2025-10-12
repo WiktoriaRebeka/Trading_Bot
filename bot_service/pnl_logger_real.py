@@ -114,13 +114,9 @@ def log_real_trade_result(enriched_pnl_data: Dict[str, Any], active_order_data: 
         else:
             logger.error(f"{log_prefix} Błąd podczas wstawiania wierszy do BigQuery: {errors}")
     except Exception as e:
-        logger.critical(f"{log_prefix} Krytyczny błąd podczas zapisu do BigQuery: {e}", exc_info=True)```
+        logger.critical(f"{log_prefix} Krytyczny błąd podczas zapisu do BigQuery: {e}", exc_info=True)
 
-*   **Lokalizacja 3:** `bot_service/state_manager.py`
-*   **Akcja 3:** Upewnij się, że funkcja `get_active_order_by_symbol` jest w najnowszej, poprawionej wersji.
 
-**Kod do wklejenia:**
-```python
 def get_active_order_by_symbol(symbol: str) -> Optional[Dict[str, Any]]:
     """
     Pobiera dane aktywnego zlecenia na podstawie jego symbolu.
