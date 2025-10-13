@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 REAL_TABLE_REF = f"{constants.BIGQUERY_PROJECT_ID}.{constants.BIGQUERY_DATASET_ID}.{constants.BIGQUERY_REAL_TRADES_TABLE_ID}"
 
+# --- POPRAWKA 1: Pełna synchronizacja schematu z definicją tabeli w BigQuery ---
 REAL_TRADES_HISTORY_SCHEMA = [
     bigquery.SchemaField("alert_id", "STRING", mode="REQUIRED"),
     bigquery.SchemaField("order_id", "STRING", mode="REQUIRED"),
@@ -31,9 +32,13 @@ REAL_TRADES_HISTORY_SCHEMA = [
     bigquery.SchemaField("exit_type", "STRING", mode="NULLABLE"),
     bigquery.SchemaField("timestamp_entry", "TIMESTAMP", mode="REQUIRED"),
     bigquery.SchemaField("timestamp_close", "TIMESTAMP", mode="REQUIRED"),
-    bigquery.SchemaField("sl_price", "NUMERIC", mode="NULLABLE"),
     bigquery.SchemaField("planned_risk_usdt", "NUMERIC", mode="NULLABLE"),
     bigquery.SchemaField("realized_rrr", "NUMERIC", mode="NULLABLE"),
+    bigquery.SchemaField("entry_price_alert", "NUMERIC", mode="NULLABLE"),
+    bigquery.SchemaField("sl_price_alert", "NUMERIC", mode="NULLABLE"),
+    bigquery.SchemaField("tp_price_alert", "NUMERIC", mode="NULLABLE"),
+    bigquery.SchemaField("exit_price_result", "NUMERIC", mode="NULLABLE"),
+    bigquery.SchemaField("tp_price_chart", "NUMERIC", mode="NULLABLE"),
 ]
 
 
@@ -58,7 +63,12 @@ def log_real_trade_result(enriched_pnl_data: Dict[str, Any], active_order_data: 
         exit_value = qty * avg_exit_price
         gross_pnl = net_pnl + commission
 
+        # --- POPRAWKA 2: Pobieranie wszystkich potrzebnych danych z active_order_data ---
+        entry_price_from_order = active_order_data.get("final_entry_price")
         sl_price_from_order = active_order_data.get("final_sl_price")
+        tp_price_from_order = active_order_data.get("final_tp_price")
+        tp_price_chart_from_order = active_order_data.get("tp_price_chart")
+
         sl_price_final = Decimal(str(sl_price_from_order)) if sl_price_from_order is not None else Decimal("0.0")
 
         planned_risk_usdt = Decimal("0.0")
@@ -73,21 +83,15 @@ def log_real_trade_result(enriched_pnl_data: Dict[str, Any], active_order_data: 
         
         PRECISION = Decimal('0.00000001')
 
-        ### POCZĄTEK POPRAWKI ###
-        # Priorytet 1: Użyj kierunku z naszej wewnętrznej bazy 'active_orders' - to jest źródło prawdy.
-        final_direction = active_order_data.get("direction")
+        final_direction = "UNKNOWN"
+        if active_order_data.get("direction"):
+            final_direction = active_order_data.get("direction")
+        elif enriched_pnl_data.get("side") == "Buy":
+            final_direction = "LONG"
+        elif enriched_pnl_data.get("side") == "Sell":
+            final_direction = "SHORT"
 
-        # Priorytet 2 (fallback): Jeśli nie ma dopasowania, spróbuj odgadnąć na podstawie danych z Bybit.
-        if not final_direction:
-            bybit_side = enriched_pnl_data.get("side")
-            if bybit_side == "Buy":
-                final_direction = "LONG"
-            elif bybit_side == "Sell":
-                final_direction = "SHORT"
-            else:
-                final_direction = "UNKNOWN" # Domyślna wartość, jeśli nic nie pasuje
-        ### KONIEC POPRAWKI ###
-
+        # --- POPRAWKA 3: Budowanie obiektu `transformed_data` ze wszystkimi wymaganymi polami ---
         transformed_data = {
             "alert_id": alert_id,
             "order_id": order_id,
@@ -105,10 +109,15 @@ def log_real_trade_result(enriched_pnl_data: Dict[str, Any], active_order_data: 
             "exit_type": enriched_pnl_data.get("exitType"),
             "timestamp_entry": datetime.fromtimestamp(int(enriched_pnl_data.get("createdTime")) / 1000, tz=timezone.utc).isoformat(),
             "timestamp_close": datetime.fromtimestamp(int(enriched_pnl_data.get("updatedTime")) / 1000, tz=timezone.utc).isoformat(),
-            # Poprawka nazwy pola, aby pasowała do schematu BQ
-            "sl_price": float(sl_price_final.quantize(PRECISION)) if sl_price_final > 0 else None,
             "planned_risk_usdt": float(planned_risk_usdt.quantize(PRECISION)) if planned_risk_usdt > 0 else None,
             "realized_rrr": float(realized_rrr.quantize(PRECISION)) if planned_risk_usdt > 0 else None,
+            
+            # Dodane/poprawione pola, aby pasowały do schematu
+            "entry_price_alert": float(entry_price_from_order) if entry_price_from_order is not None else None,
+            "sl_price_alert": float(sl_price_from_order) if sl_price_from_order is not None else None,
+            "tp_price_alert": float(tp_price_from_order) if tp_price_from_order is not None else None,
+            "exit_price_result": float(avg_exit_price.quantize(PRECISION)), # Zgodnie z definicją, to rzeczywista cena zamknięcia
+            "tp_price_chart": float(tp_price_chart_from_order) if tp_price_chart_from_order is not None else None,
         }
     except (TypeError, ValueError, KeyError) as e:
         logger.error(f"{log_prefix} Błąd podczas transformacji danych PnL: {e}", exc_info=True)
@@ -123,7 +132,5 @@ def log_real_trade_result(enriched_pnl_data: Dict[str, Any], active_order_data: 
             logger.error(f"{log_prefix} Błąd podczas wstawiania wierszy do BigQuery: {errors}")
     except Exception as e:
         logger.critical(f"{log_prefix} Krytyczny błąd podczas zapisu do BigQuery: {e}", exc_info=True)
-
-
 
 
