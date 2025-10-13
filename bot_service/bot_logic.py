@@ -1,5 +1,3 @@
-# Lokalizacja: bot_service/bot_logic.py
-
 import logging
 import os
 import math
@@ -16,7 +14,7 @@ from shared_lib.risk_manager import calculate_position_size
 from bot_service import state_manager
 from bot_service.bigquery_logger import log_analysis_result
 from bot_service.pnl_logger_real import log_real_trade_result
-from bot_service.bybit_executor import BybitExecutor, BybitAPIError # <-- WAŻNE: Dodaj import BybitAPIError
+from bot_service.bybit_executor import BybitExecutor, BybitAPIError
 from bot_service.fetch_from_firestore import fetch_new_alerts_since, save_last_processed_timestamp, load_last_processed_timestamp
 
 logger = logging.getLogger(__name__)
@@ -30,7 +28,6 @@ def run_combined_cycle(executor: BybitExecutor):
     new_alerts, new_ts = fetch_new_alerts_since(last_ts)
 
     if new_alerts:
-        # Zamiast dwóch oddzielnych funkcji, mamy jedną, która przetwarza alerty atomowo
         process_alerts_atomically(new_alerts, executor)
         
         if new_ts and (not last_ts or new_ts > last_ts):
@@ -121,14 +118,10 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
                 logger.info(f"[{symbol}] Pomijam (symbol już przetworzony w tym cyklu).")
                 continue
 
-            ### POCZĄTEK POPRAWKI ###
-            # Krok 1: Weryfikacja stanu rynku PRZED podjęciem jakichkolwiek działań.
             open_position_side = executor.get_open_position_side(symbol)
             
             if open_position_side and open_position_side != "ERROR":
-                # SCENARIUSZ A: Pozycja już istnieje.
                 logger.info(f"[{symbol}] Wykryto otwartą pozycję: {open_position_side}.")
-                # Absolutnie NIE WOLNO anulować żadnych zleceń, aby chronić istniejący SL/TP.
                 if alert_model.direction != open_position_side:
                     logger.warning(f"[{symbol}] ODRZUCONO (Strażnik Pozycji): Nowy alert ({alert_model.direction}) jest przeciwny do otwartej pozycji.")
                     processed_symbols_in_cycle.add(symbol)
@@ -136,11 +129,8 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
                 else:
                     logger.info(f"[{symbol}] Nowy alert jest zgodny z otwartą pozycją. Kontynuuję przetwarzanie bez anulowania zleceń.")
             else:
-                # SCENARIUSZ B: Rynek jest czysty (brak otwartej pozycji).
-                # TYLKO W TYM PRZYPADKU możemy bezpiecznie posprzątać "osierocone" zlecenia.
                 logger.info(f"[{symbol}] Brak otwartej pozycji. Anuluję wszystkie oczekujące zlecenia limit dla tego symbolu.")
                 executor.cancel_all_open_orders_for_symbol(symbol)
-            ### KONIEC POPRAWKI ###
 
             if not _correct_and_validate_alert(alert_model):
                 logger.warning(f"[{symbol}] ODRZUCONO (Walidacja Logiczna).")
@@ -223,34 +213,35 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
     
     last_check_ts_dt = load_last_processed_timestamp("pnl_logger_last_fetch_state")
     if not last_check_ts_dt:
-        logger.error("[PNL_LOGGER] Nie udało się załadować ostatniego znacznika czasu. Przerywam cykl, aby uniknąć duplikatów.")
-        return 0
+        logger.warning("[PNL_LOGGER] Nie udało się załadować ostatniego znacznika czasu. Używam domyślnego (1h w przeszłość).")
+        # W przypadku braku timestampu, użycie wartości domyślnej jest bezpieczniejsze niż przerwanie cyklu
+        last_check_ts_dt = datetime.now(timezone.utc) - timedelta(hours=1)
 
-    # ZAPISUJEMY CZAS ROZPOCZĘCIA CYKLU, ABY MIEĆ PEWNOŚĆ, ŻE ZAWSZE PRZESUNIEMY SIĘ DO PRZODU
     current_cycle_start_time = datetime.now(timezone.utc)
     logger.info(f"[PNL_LOGGER] Sprawdzam zamknięte pozycje od: {last_check_ts_dt.isoformat()}")
     
     start_time_ms = int(last_check_ts_dt.timestamp() * 1000)
     
-    # --- POCZĄTEK POPRAWKI: Usunięcie błędnego parametru i prawidłowa logika aktualizacji czasu ---
-    
-    # Krok 1: Wywołujemy funkcję w sposób, który na pewno jest poprawny (bez `end_time_ms`)
     try:
-        pnl_records = sorted(
-            executor.get_closed_pnl_history(start_time_ms=start_time_ms),
-            key=lambda r: int(r.get("updatedTime", 0))
-        )
+        pnl_records = executor.get_closed_pnl_history(start_time_ms=start_time_ms)
     except Exception as e:
         logger.critical(f"[PNL_LOGGER] Krytyczny błąd podczas pobierania historii PnL z Bybit: {e}", exc_info=True)
         # W przypadku błędu komunikacji z giełdą NIE aktualizujemy znacznika czasu, aby spróbować ponownie w następnym cyklu
         return 0
 
     processed_count = 0
-    new_max_ts_dt = last_check_ts_dt
-
+    
+    ### POCZĄTEK POPRAWKI: Rozdzielenie logiki aktualizacji timestampu ###
+    
     if pnl_records:
         logger.info(f"[PNL_LOGGER] Znaleziono {len(pnl_records)} zamkniętych pozycji na Bybit. Rozpoczynam przetwarzanie.")
-        for pnl_record in pnl_records:
+        
+        # Sortujemy po `updatedTime`, aby upewnić się, że przetwarzamy w porządku chronologicznym
+        pnl_records_sorted = sorted(pnl_records, key=lambda r: int(r.get("updatedTime", 0)))
+        
+        latest_processed_ts_dt = last_check_ts_dt
+
+        for pnl_record in pnl_records_sorted:
             symbol = pnl_record.get("symbol")
             order_id_from_db = None
             
@@ -283,25 +274,27 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
                 updated_time_ms = int(pnl_record.get("updatedTime", 0))
                 if updated_time_ms > 0:
                     record_ts_dt = datetime.fromtimestamp(updated_time_ms / 1000, tz=timezone.utc)
-                    if record_ts_dt > new_max_ts_dt:
-                        new_max_ts_dt = record_ts_dt
+                    if record_ts_dt > latest_processed_ts_dt:
+                        latest_processed_ts_dt = record_ts_dt
 
             except Exception as e:
                 logger.error(f"[PNL_LOGGER] Krytyczny błąd podczas przetwarzania rekordu PnL dla symbolu {symbol}. Rekord zostanie pominięty. Błąd: {e}", exc_info=True, extra={"json_fields": {"pnl_record": pnl_record}})
                 continue
-    else:
-        logger.info("[PNL_LOGGER] Nie znaleziono nowych zamkniętych pozycji na Bybit od ostatniego sprawdzenia.")
+        
+        # Po przetworzeniu wszystkich rekordów, zapisz nowy timestamp na podstawie ostatniego z nich + 1 milisekunda
+        final_timestamp_to_save = latest_processed_ts_dt + timedelta(milliseconds=1)
+        save_last_processed_timestamp(final_timestamp_to_save, "pnl_logger_last_fetch_state")
+        logger.info(f"[PNL_LOGGER] Zakończono cykl. Przetworzono {processed_count} rekordów. Zaktualizowano znacznik czasu na {final_timestamp_to_save.isoformat()}.")
 
-    # Krok 2: Zawsze aktualizuj znacznik czasu, aby uniknąć utknięcia w przeszłości.
-    # Jeśli znaleziono rekordy, użyj czasu ostatniego z nich.
-    # Jeśli nie, użyj czasu rozpoczęcia bieżącego cyklu.
-    # Dodajemy 1 sekundę, aby uniknąć ponownego pobrania tego samego ostatniego rekordu.
-    final_timestamp_to_save = max(new_max_ts_dt, current_cycle_start_time) + timedelta(seconds=1)
-    
-    save_last_processed_timestamp(final_timestamp_to_save, "pnl_logger_last_fetch_state")
-    logger.info(f"[PNL_LOGGER] Zakończono cykl. Przetworzono {processed_count} rekordów. Zaktualizowano znacznik czasu na {final_timestamp_to_save.isoformat()}.")
-    
-    # --- KONIEC POPRAWKI ---
+    else:
+        # Jeśli nie znaleziono żadnych rekordów, bezpiecznie przesuń znacznik czasu do momentu rozpoczęcia tego cyklu.
+        # To zapobiega utknięciu w pętli, jeśli nie ma nowych transakcji, i unika "przeskoku" nad danymi.
+        logger.info("[PNL_LOGGER] Nie znaleziono nowych zamkniętych pozycji na Bybit od ostatniego sprawdzenia.")
+        final_timestamp_to_save = current_cycle_start_time
+        save_last_processed_timestamp(final_timestamp_to_save, "pnl_logger_last_fetch_state")
+        logger.info(f"[PNL_LOGGER] Zakończono cykl. Przetworzono 0 rekordów. Zaktualizowano znacznik czasu na {final_timestamp_to_save.isoformat()}.")
+
+    ### KONIEC POPRAWKI ###
     
     return processed_count
 
@@ -313,7 +306,6 @@ def _run_analysis_of_existing_cases():
         logger.info("Brak aktywnych teczek analitycznych. Kończę cykl.")
         return
 
-    # Krok 1: Pobieramy zasady instrumentów, aby mieć dostęp do 'tickSize'
     instrument_rules = get_instrument_rules()
     if not instrument_rules:
         logger.error("Nie udało się wczytać zasad instrumentów dla procesu analitycznego. Pomijam cykl.")
@@ -344,7 +336,6 @@ def _run_analysis_of_existing_cases():
             symbol = case_doc.get('symbol')
             status = case_doc.get('status')
             
-            # Krok 2: Pobieramy zasady dla konkretnego symbolu
             rule = instrument_rules.get(symbol)
             if not rule or "tickSize" not in rule:
                 logger.warning(f"Brak zasad 'tickSize' dla symbolu {symbol} (teczka {case_id}). Pomijam.")
@@ -355,7 +346,6 @@ def _run_analysis_of_existing_cases():
                 logger.warning(f"Brak danych kline dla symbolu {symbol} (teczka {case_id}). Pomijam tę teczkę w cyklu.")
                 continue
             
-            # Krok 3: Przekazujemy 'rule' do funkcji obsługujących
             if status == 'PENDING':
                 _handle_pending_case(case_doc_snapshot, latest_kline, rule)
             elif status == 'TRIGGERED':
@@ -371,7 +361,6 @@ def _handle_pending_case(case_doc_snapshot: Any, kline: Kline, rule: Dict[str, A
     alert = AlertData.model_validate(case_doc.get('alert_data'))
     tick_size = rule['tickSize']
 
-    # Używamy tych samych, zaokrąglonych cen, co w procesie transakcyjnym
     if alert.direction == 'LONG':
         final_entry = round_price_by_tick(alert.entry, tick_size, 'up')
     else: # SHORT
@@ -409,7 +398,6 @@ def _handle_triggered_case(case_doc_snapshot: Any, kline: Kline, rule: Dict[str,
 
     direction = alert.direction
     
-    # Używamy tych samych, zaokrąglonych cen, co w procesie transakcyjnym
     if direction == 'LONG':
         final_sl = round_price_by_tick(alert.sl, tick_size, 'down')
     else: # SHORT
@@ -419,14 +407,13 @@ def _handle_triggered_case(case_doc_snapshot: Any, kline: Kline, rule: Dict[str,
     close_timestamp = datetime.fromtimestamp(kline.timestamp / 1000, tz=timezone.utc)
     base_log_data = {
         "analysis_id": case_id, "symbol": symbol, "direction": direction,
-        "entry_price": alert.entry, "sl_price": alert.sl, # W logach BQ zapisujemy surowe ceny
+        "entry_price": alert.entry, "sl_price": alert.sl,
         "timestamp_alert": alert.received_at.isoformat() if alert.received_at else None,
         "timestamp_entry": case_doc.get('triggered_at').isoformat() if case_doc.get('triggered_at') else None,
         "timestamp_close": close_timestamp.isoformat(),
         "risk_percentage": _calculate_risk_percentage(alert.entry, alert.sl)
     }
 
-    # "Zasada Pesymisty": Najpierw sprawdzamy SL
     sl_hit = (direction == 'LONG' and kline.low <= final_sl) or (direction == 'SHORT' and kline.high >= final_sl)
 
     if sl_hit:
@@ -437,9 +424,7 @@ def _handle_triggered_case(case_doc_snapshot: Any, kline: Kline, rule: Dict[str,
             log_analysis_result(log_data)
             resolved_scenarios[f'results.{target_level}'] = "LOSE"
     else:
-        # Dopiero jeśli SL nie został trafiony, sprawdzamy TP
         for target_level in unresolved_targets:
-            # Używamy zaokrąglonych cen TP
             if direction == 'LONG':
                 final_tp = round_price_by_tick(getattr(alert, target_level), tick_size, 'up')
             else: # SHORT
