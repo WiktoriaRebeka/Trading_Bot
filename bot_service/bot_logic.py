@@ -226,68 +226,82 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
         logger.error("[PNL_LOGGER] Nie udało się załadować ostatniego znacznika czasu. Przerywam cykl, aby uniknąć duplikatów.")
         return 0
 
-    ### POCZĄTEK POPRAWKI ###
-    # Krok 1: Ustal "punkt kontrolny" dla bieżącego cyklu PRZED zapytaniem do API.
-    # To jest czas, do którego będziemy sprawdzać i który zapiszemy na koniec.
-    current_cycle_timestamp = datetime.now(timezone.utc)
-    logger.info(f"[PNL_LOGGER] Sprawdzam zamknięte pozycje w przedziale od {last_check_ts_dt.isoformat()} do {current_cycle_timestamp.isoformat()}")
+    # ZAPISUJEMY CZAS ROZPOCZĘCIA CYKLU, ABY MIEĆ PEWNOŚĆ, ŻE ZAWSZE PRZESUNIEMY SIĘ DO PRZODU
+    current_cycle_start_time = datetime.now(timezone.utc)
+    logger.info(f"[PNL_LOGGER] Sprawdzam zamknięte pozycje od: {last_check_ts_dt.isoformat()}")
     
     start_time_ms = int(last_check_ts_dt.timestamp() * 1000)
-    # Dodajemy endTimeMs, aby mieć pewność, że nie pobierzemy transakcji, które zamknęły się w trakcie działania tej funkcji.
-    end_time_ms = int(current_cycle_timestamp.timestamp() * 1000)
-
-    pnl_records = sorted(
-        executor.get_closed_pnl_history(start_time_ms=start_time_ms, end_time_ms=end_time_ms),
-        key=lambda r: int(r.get("updatedTime", 0))
-    )
     
-    if not pnl_records:
-        logger.info("[PNL_LOGGER] Nie znaleziono nowych zamkniętych pozycji na Bybit w tym przedziale czasowym.")
-        # Krok 2: Mimo braku rekordów, MUSIMY zaktualizować znacznik czasu.
-        save_last_processed_timestamp(current_cycle_timestamp, "pnl_logger_last_fetch_state")
-        logger.info(f"[PNL_LOGGER] Zaktualizowano znacznik czasu na {current_cycle_timestamp.isoformat()}.")
+    # --- POCZĄTEK POPRAWKI: Usunięcie błędnego parametru i prawidłowa logika aktualizacji czasu ---
+    
+    # Krok 1: Wywołujemy funkcję w sposób, który na pewno jest poprawny (bez `end_time_ms`)
+    try:
+        pnl_records = sorted(
+            executor.get_closed_pnl_history(start_time_ms=start_time_ms),
+            key=lambda r: int(r.get("updatedTime", 0))
+        )
+    except Exception as e:
+        logger.critical(f"[PNL_LOGGER] Krytyczny błąd podczas pobierania historii PnL z Bybit: {e}", exc_info=True)
+        # W przypadku błędu komunikacji z giełdą NIE aktualizujemy znacznika czasu, aby spróbować ponownie w następnym cyklu
         return 0
 
-    logger.info(f"[PNL_LOGGER] Znaleziono {len(pnl_records)} zamkniętych pozycji na Bybit. Rozpoczynam przetwarzanie.")
     processed_count = 0
-    
-    for pnl_record in pnl_records:
-        symbol = pnl_record.get("symbol")
-        order_id_from_db = None
-        
-        try:
-            if not symbol:
-                logger.warning("[PNL_LOGGER] Pominięto rekord PnL bez symbolu.", extra={"json_fields": {"pnl_record": pnl_record}})
+    new_max_ts_dt = last_check_ts_dt
+
+    if pnl_records:
+        logger.info(f"[PNL_LOGGER] Znaleziono {len(pnl_records)} zamkniętych pozycji na Bybit. Rozpoczynam przetwarzanie.")
+        for pnl_record in pnl_records:
+            symbol = pnl_record.get("symbol")
+            order_id_from_db = None
+            
+            try:
+                if not symbol:
+                    logger.warning("[PNL_LOGGER] Pominięto rekord PnL bez symbolu.", extra={"json_fields": {"pnl_record": pnl_record}})
+                    continue
+
+                active_order_data = state_manager.get_active_order_by_symbol(symbol)
+                
+                if active_order_data:
+                    logger.info(f"[PNL_LOGGER] Znaleziono dopasowanie dla {symbol} w Firestore.")
+                    alert_id = active_order_data.get('alert_id', 'MATCHED_NO_ALERT_ID')
+                    order_id_from_db = active_order_data.get('orderId')
+                else:
+                    logger.warning(f"[PNL_LOGGER] Nie znaleziono dopasowania dla {symbol}. Transakcja zostanie zalogowana jako 'UNMATCHED'.")
+                    active_order_data = {}
+                    alert_id = 'UNMATCHED_OR_MANUAL'
+
+                enriched_pnl_data = pnl_record.copy()
+                enriched_pnl_data['alert_id'] = alert_id
+                
+                log_real_trade_result(enriched_pnl_data, active_order_data)
+                processed_count += 1
+                
+                if order_id_from_db:
+                    state_manager.delete_active_order_by_id(order_id_from_db)
+
+                # Śledzimy najnowszy timestamp z faktycznie przetworzonych rekordów
+                updated_time_ms = int(pnl_record.get("updatedTime", 0))
+                if updated_time_ms > 0:
+                    record_ts_dt = datetime.fromtimestamp(updated_time_ms / 1000, tz=timezone.utc)
+                    if record_ts_dt > new_max_ts_dt:
+                        new_max_ts_dt = record_ts_dt
+
+            except Exception as e:
+                logger.error(f"[PNL_LOGGER] Krytyczny błąd podczas przetwarzania rekordu PnL dla symbolu {symbol}. Rekord zostanie pominięty. Błąd: {e}", exc_info=True, extra={"json_fields": {"pnl_record": pnl_record}})
                 continue
+    else:
+        logger.info("[PNL_LOGGER] Nie znaleziono nowych zamkniętych pozycji na Bybit od ostatniego sprawdzenia.")
 
-            active_order_data = state_manager.get_active_order_by_symbol(symbol)
-            
-            if active_order_data:
-                logger.info(f"[PNL_LOGGER] Znaleziono dopasowanie dla {symbol} w Firestore.")
-                alert_id = active_order_data.get('alert_id', 'MATCHED_NO_ALERT_ID')
-                order_id_from_db = active_order_data.get('orderId')
-            else:
-                logger.warning(f"[PNL_LOGGER] Nie znaleziono dopasowania dla {symbol}. Transakcja zostanie zalogowana jako 'UNMATCHED'.")
-                active_order_data = {}
-                alert_id = 'UNMATCHED_OR_MANUAL'
-
-            enriched_pnl_data = pnl_record.copy()
-            enriched_pnl_data['alert_id'] = alert_id
-            
-            log_real_trade_result(enriched_pnl_data, active_order_data)
-            processed_count += 1
-            
-            if order_id_from_db:
-                state_manager.delete_active_order_by_id(order_id_from_db)
-
-        except Exception as e:
-            logger.error(f"[PNL_LOGGER] Krytyczny błąd podczas przetwarzania rekordu PnL dla symbolu {symbol}. Rekord zostanie pominięty. Błąd: {e}", exc_info=True, extra={"json_fields": {"pnl_record": pnl_record}})
-            continue
-            
-    # Krok 3: Zaktualizuj znacznik czasu na sam koniec, po przetworzeniu wszystkich znalezionych rekordów.
-    save_last_processed_timestamp(current_cycle_timestamp, "pnl_logger_last_fetch_state")
-    logger.info(f"[PNL_LOGGER] Zakończono cykl. Przetworzono {processed_count} rekordów. Zaktualizowano znacznik czasu na {current_cycle_timestamp.isoformat()}.")
-    ### KONIEC POPRAWKI ###
+    # Krok 2: Zawsze aktualizuj znacznik czasu, aby uniknąć utknięcia w przeszłości.
+    # Jeśli znaleziono rekordy, użyj czasu ostatniego z nich.
+    # Jeśli nie, użyj czasu rozpoczęcia bieżącego cyklu.
+    # Dodajemy 1 sekundę, aby uniknąć ponownego pobrania tego samego ostatniego rekordu.
+    final_timestamp_to_save = max(new_max_ts_dt, current_cycle_start_time) + timedelta(seconds=1)
+    
+    save_last_processed_timestamp(final_timestamp_to_save, "pnl_logger_last_fetch_state")
+    logger.info(f"[PNL_LOGGER] Zakończono cykl. Przetworzono {processed_count} rekordów. Zaktualizowano znacznik czasu na {final_timestamp_to_save.isoformat()}.")
+    
+    # --- KONIEC POPRAWKI ---
     
     return processed_count
 
