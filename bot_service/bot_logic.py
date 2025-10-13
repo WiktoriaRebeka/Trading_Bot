@@ -24,6 +24,16 @@ def run_combined_cycle(executor: BybitExecutor):
     """Główna, połączona pętla logiki z zapewnioną atomowością."""
     logger.info("Uruchamiam połączony cykl analityczno-transakcyjny.")
     
+    # --- POCZĄTEK ZMIANY ---
+    # Najpierw logujemy zamknięte pozycje, aby "posprzątać" po poprzednich cyklach
+    try:
+        log_closed_positions_pnl(executor)
+    except Exception as e:
+        # Logujemy błąd, ale nie przerywamy całego cyklu, 
+        # aby przetwarzanie alertów nadal mogło się odbyć.
+        logger.error(f"Błąd podczas logowania PnL w cyklu połączonym: {e}", exc_info=True)
+    # --- KONIEC ZMIANY ---
+
     last_ts = load_last_processed_timestamp("main_cycle_last_fetch_state")
     new_alerts, new_ts = fetch_new_alerts_since(last_ts)
 
