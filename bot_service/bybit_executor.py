@@ -20,7 +20,6 @@ class BybitAPIError(Exception):
 
 class BybitExecutor:
     def __init__(self, api_key: str, api_secret: str, testnet: bool = True):
-        # ... (bez zmian)
         if not api_key or not api_secret:
             raise ValueError("Klucze API Bybit nie mogą być puste.")
         
@@ -31,7 +30,6 @@ class BybitExecutor:
         logger.info(f"BybitExecutor zainicjalizowany. Tryb Testnet: {testnet}. URL: {self.base_url}")
 
     def _send_request(self, method: str, endpoint: str, params: Optional[Dict] = None) -> Dict[str, Any]:
-        # ... (bez zmian)
         timestamp = str(int(time.time() * 1000))
         recv_window = "10000"
         
@@ -85,11 +83,7 @@ class BybitExecutor:
             logger.error(f"Nieoczekiwany błąd w _send_request: {e}", exc_info=True)
             raise
 
-
     def get_latest_ticker_price(self, symbol: str) -> Optional[float]:
-        """
-        Pobiera ostatnią cenę (last price) dla danego symbolu.
-        """
         api_symbol = symbol.replace('.P', '')
         params = {"category": "linear", "symbol": api_symbol}
         try:
@@ -104,8 +98,8 @@ class BybitExecutor:
         except (RequestException, BybitAPIError) as e:
             logger.error(f"[{symbol}] Błąd podczas pobierania aktualnej ceny rynkowej: {e}")
             return None
+
     def get_instrument_info(self, symbol: str) -> Optional[Dict[str, Any]]:
-     
         api_symbol = symbol.replace('.P', '')
         params = {"category": "linear", "symbol": api_symbol}
         try:
@@ -124,10 +118,6 @@ class BybitExecutor:
             return None
 
     def place_order(self, params: Dict[str, Any]) -> Optional[Dict[str, str]]:
-        """
-        Uniwersalna funkcja do składania zleceń.
-        Obsługuje zlecenia proste, warunkowe oraz zintegrowane SL/TP.
-        """
         symbol = params.get('symbol')
         if not symbol:
             logger.error("Brak 'symbol' w parametrach zlecenia.")
@@ -135,7 +125,6 @@ class BybitExecutor:
 
         api_symbol = symbol.replace('.P', '')
         
-        # Budujemy payload dynamicznie
         payload = {
             "category": "linear",
             "symbol": api_symbol,
@@ -144,16 +133,13 @@ class BybitExecutor:
             "qty": str(params['qty']),
         }
 
-        # Dodajemy parametry, jeśli istnieją w słowniku wejściowym
-        # To sprawia, że funkcja jest uniwersalna
         optional_params = [
             "price", "triggerPrice", "triggerDirection", "triggerBy", "orderFilter",
             "reduceOnly", "closeOnTrigger", "timeInForce", "orderLinkId",
-            "takeProfit", "stopLoss" # <-- Kluczowe dodane parametry
+            "takeProfit", "stopLoss"
         ]
         for param in optional_params:
             if param in params:
-                # triggerDirection musi być liczbą
                 if param == "triggerDirection":
                     payload[param] = 1 if params[param] == 'Rising' else 2
                 else:
@@ -171,13 +157,12 @@ class BybitExecutor:
             logger.error(f"[{symbol}] API Bybit nie zwróciło orderId. Pełna odpowiedź 'result': {result}")
             return None
         except (RequestException, BybitAPIError) as e:
-            raise  # Przekazujemy wyjątek wyżej, do bot_logic
+            raise
         except Exception as e:
             logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD podczas składania zlecenia. Błąd: {e}", exc_info=True)
             raise
 
     def place_conditional_order(self, params: Dict[str, Any]) -> Optional[Dict[str, str]]:
-        """Składa zaawansowane zlecenie warunkowe (dla TP lub SL)."""
         symbol = params.get('symbol')
         logger.info(f"[{symbol}] Składanie zlecenia warunkowego: {params}")
         try:
@@ -193,7 +178,6 @@ class BybitExecutor:
             return None
 
     def get_order_status(self, order_id: str) -> Optional[Dict[str, Any]]:
-        """Pobiera status konkretnego zlecenia."""
         params = {"category": "linear", "orderId": order_id}
         try:
             result = self._send_request("GET", "/v5/order/realtime", params=params)
@@ -204,7 +188,6 @@ class BybitExecutor:
             return None
 
     def close_position_market(self, symbol: str, qty: str, side: str):
-        """Awaryjnie zamyka pozycję zleceniem MARKET."""
         api_symbol = symbol.replace('.P', '')
         payload = {
             "category": "linear", "symbol": api_symbol,
@@ -218,7 +201,6 @@ class BybitExecutor:
             logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD podczas awaryjnego zamykania pozycji: {e}", exc_info=True)
 
     def cancel_all_open_orders_for_symbol(self, symbol: str) -> bool:
-        # ... (bez zmian)
         api_symbol = symbol.replace('.P', '')
         logger.info(f"[{symbol}] Anulowanie wszystkich oczekujących zleceń...")
         try:
@@ -246,11 +228,6 @@ class BybitExecutor:
             return False
 
     def get_open_position_side(self, symbol: str) -> Optional[str]:
-        """
-        Sprawdza, czy istnieje otwarta pozycja dla symbolu.
-        Zwraca 'LONG' lub 'SHORT' jeśli pozycja istnieje, w przeciwnym razie None.
-        W przypadku błędu API zwraca 'ERROR', aby zablokować potencjalnie ryzykowne akcje.
-        """
         api_symbol = symbol.replace('.P', '')
         params = {"category": "linear", "symbol": api_symbol}
         try:
@@ -267,24 +244,53 @@ class BybitExecutor:
             return None
         except (RequestException, BybitAPIError) as e:
             logger.error(f"[{symbol}] Błąd podczas sprawdzania otwartych pozycji: {e}")
-            # W przypadku błędu, bezpieczniej jest założyć, że pozycja istnieje, aby uniknąć konfliktu
             return "ERROR"
 
+    ### POCZĄTEK POPRAWKI: Implementacja paginacji ###
     def get_closed_pnl_history(self, start_time_ms: int, limit: int = 50) -> List[Dict[str, Any]]:
-        # ... (bez zmian)
+        """
+        Pobiera historię zamkniętych pozycji (PnL), obsługując paginację.
+        Będzie pobierać dane w pętli, dopóki API zwraca 'nextPageCursor'.
+        """
         endpoint = "/v5/position/closed-pnl"
-        params = {
-            "category": "linear",
-            "startTime": start_time_ms,
-            "limit": limit
-        }
+        all_pnl_records = []
+        cursor = None
+        
         logger.info(f"Pobieranie historii P&L od timestampu {start_time_ms}...")
-        try:
-            result = self._send_request("GET", endpoint, params=params)
-            pnl_list = result.get('list', [])
-            if pnl_list:
-                logger.info(f"Pomyślnie pobrano {len(pnl_list)} rekordów P&L.")
-            return list(reversed(pnl_list))
-        except (RequestException, BybitAPIError) as e:
-            logger.error(f"Błąd podczas pobierania historii P&L: {e}")
-            return []
+
+        while True:
+            params = {
+                "category": "linear",
+                "startTime": start_time_ms,
+                "limit": limit
+            }
+            if cursor:
+                params["cursor"] = cursor
+
+            try:
+                result = self._send_request("GET", endpoint, params=params)
+                
+                pnl_list = result.get('list', [])
+                if pnl_list:
+                    all_pnl_records.extend(pnl_list)
+                    logger.info(f"Pobrano {len(pnl_list)} rekordów P&L. Łącznie: {len(all_pnl_records)}.")
+                
+                cursor = result.get('nextPageCursor')
+                
+                # Jeśli nie ma kursora, to znaczy, że to ostatnia strona. Przerywamy pętlę.
+                if not cursor:
+                    break
+                
+                logger.info(f"Znaleziono nextPageCursor, pobieram kolejną stronę danych...")
+
+            except (RequestException, BybitAPIError) as e:
+                logger.error(f"Błąd podczas pobierania historii P&L: {e}")
+                # W przypadku błędu przerywamy i zwracamy to, co udało się zebrać do tej pory
+                break
+        
+        if all_pnl_records:
+            logger.info(f"Zakończono pobieranie. Łącznie pobrano {len(all_pnl_records)} rekordów P&L.")
+        
+        # Odwracamy listę, aby najstarsze transakcje były pierwsze, co jest ważne dla logiki zapisu timestampu
+        return list(reversed(all_pnl_records))
+    ### KONIEC POPRAWKI ###
