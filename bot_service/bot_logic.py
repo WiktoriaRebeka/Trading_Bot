@@ -220,39 +220,46 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
 
 def log_closed_positions_pnl(executor: BybitExecutor) -> int:
     logger.info("[PNL_LOGGER] Rozpoczynam cykl logowania PnL.")
+    
     last_check_ts_dt = load_last_processed_timestamp("pnl_logger_last_fetch_state")
     if not last_check_ts_dt:
         logger.error("[PNL_LOGGER] Nie udało się załadować ostatniego znacznika czasu. Przerywam cykl, aby uniknąć duplikatów.")
         return 0
-        
-    logger.info(f"[PNL_LOGGER] Sprawdzam zamknięte pozycje od: {last_check_ts_dt.isoformat()}")
+
+    ### POCZĄTEK POPRAWKI ###
+    # Krok 1: Ustal "punkt kontrolny" dla bieżącego cyklu PRZED zapytaniem do API.
+    # To jest czas, do którego będziemy sprawdzać i który zapiszemy na koniec.
+    current_cycle_timestamp = datetime.now(timezone.utc)
+    logger.info(f"[PNL_LOGGER] Sprawdzam zamknięte pozycje w przedziale od {last_check_ts_dt.isoformat()} do {current_cycle_timestamp.isoformat()}")
     
     start_time_ms = int(last_check_ts_dt.timestamp() * 1000)
-    # Pobieramy historię i sortujemy ją chronologicznie, aby zapewnić prawidłową kolejność aktualizacji timestampu
+    # Dodajemy endTimeMs, aby mieć pewność, że nie pobierzemy transakcji, które zamknęły się w trakcie działania tej funkcji.
+    end_time_ms = int(current_cycle_timestamp.timestamp() * 1000)
+
     pnl_records = sorted(
-        executor.get_closed_pnl_history(start_time_ms=start_time_ms),
+        executor.get_closed_pnl_history(start_time_ms=start_time_ms, end_time_ms=end_time_ms),
         key=lambda r: int(r.get("updatedTime", 0))
     )
     
     if not pnl_records:
-        logger.info("[PNL_LOGGER] Nie znaleziono nowych zamkniętych pozycji na Bybit od ostatniego sprawdzenia.")
+        logger.info("[PNL_LOGGER] Nie znaleziono nowych zamkniętych pozycji na Bybit w tym przedziale czasowym.")
+        # Krok 2: Mimo braku rekordów, MUSIMY zaktualizować znacznik czasu.
+        save_last_processed_timestamp(current_cycle_timestamp, "pnl_logger_last_fetch_state")
+        logger.info(f"[PNL_LOGGER] Zaktualizowano znacznik czasu na {current_cycle_timestamp.isoformat()}.")
         return 0
 
     logger.info(f"[PNL_LOGGER] Znaleziono {len(pnl_records)} zamkniętych pozycji na Bybit. Rozpoczynam przetwarzanie.")
     processed_count = 0
     
-    ### POCZĄTEK POPRAWKI ###
     for pnl_record in pnl_records:
         symbol = pnl_record.get("symbol")
         order_id_from_db = None
         
         try:
-            # Krok 1: Gwarancja, że każdy rekord jest przetwarzany
             if not symbol:
                 logger.warning("[PNL_LOGGER] Pominięto rekord PnL bez symbolu.", extra={"json_fields": {"pnl_record": pnl_record}})
                 continue
 
-            # Krok 2: Obsługa transakcji niedopasowanych
             active_order_data = state_manager.get_active_order_by_symbol(symbol)
             
             if active_order_data:
@@ -261,35 +268,27 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
                 order_id_from_db = active_order_data.get('orderId')
             else:
                 logger.warning(f"[PNL_LOGGER] Nie znaleziono dopasowania dla {symbol}. Transakcja zostanie zalogowana jako 'UNMATCHED'.")
-                active_order_data = {} # Przekazujemy pusty słownik, aby uniknąć błędów
+                active_order_data = {}
                 alert_id = 'UNMATCHED_OR_MANUAL'
 
             enriched_pnl_data = pnl_record.copy()
             enriched_pnl_data['alert_id'] = alert_id
             
-            # Przekazanie do logowania w BigQuery
             log_real_trade_result(enriched_pnl_data, active_order_data)
             processed_count += 1
             
-            # Jeśli było dopasowanie, usuwamy "notatkę" z active_orders
             if order_id_from_db:
                 state_manager.delete_active_order_by_id(order_id_from_db)
 
-            # Krok 3: Atomowy zapis postępu po każdym sukcesie
-            updated_time_ms = int(pnl_record.get("updatedTime", 0))
-            if updated_time_ms > 0:
-                # Dodajemy 1 milisekundę, aby następne zapytanie nie pobrało tego samego rekordu
-                next_timestamp_to_save = datetime.fromtimestamp((updated_time_ms + 1) / 1000, tz=timezone.utc)
-                save_last_processed_timestamp(next_timestamp_to_save, "pnl_logger_last_fetch_state")
-                logger.info(f"[PNL_LOGGER] Pomyślnie przetworzono rekord dla {symbol}. Zaktualizowano timestamp na {next_timestamp_to_save.isoformat()}.")
-
         except Exception as e:
-            # Krok 4: Odporność na błędy - logujemy i kontynuujemy
             logger.error(f"[PNL_LOGGER] Krytyczny błąd podczas przetwarzania rekordu PnL dla symbolu {symbol}. Rekord zostanie pominięty. Błąd: {e}", exc_info=True, extra={"json_fields": {"pnl_record": pnl_record}})
-            continue # Przechodzimy do następnego rekordu, nie przerywając cyklu
+            continue
+            
+    # Krok 3: Zaktualizuj znacznik czasu na sam koniec, po przetworzeniu wszystkich znalezionych rekordów.
+    save_last_processed_timestamp(current_cycle_timestamp, "pnl_logger_last_fetch_state")
+    logger.info(f"[PNL_LOGGER] Zakończono cykl. Przetworzono {processed_count} rekordów. Zaktualizowano znacznik czasu na {current_cycle_timestamp.isoformat()}.")
     ### KONIEC POPRAWKI ###
-        
-    logger.info(f"[PNL_LOGGER] Zakończono cykl. Przetworzono i zalogowano {processed_count} z {len(pnl_records)} rekordów.")
+    
     return processed_count
 
 def _run_analysis_of_existing_cases():
