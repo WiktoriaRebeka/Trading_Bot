@@ -246,22 +246,26 @@ class BybitExecutor:
             logger.error(f"[{symbol}] Błąd podczas sprawdzania otwartych pozycji: {e}")
             return "ERROR"
 
-    # --- POCZĄTEK KODU NAPRAWCZEGO ---
+    # --- POCZĄTEK OSTATECZNEJ POPRAWKI ---
     def get_closed_pnl_history(self, start_time_ms: int, limit: int = 50) -> List[Dict[str, Any]]:
         """
-        Pobiera historię zamkniętych pozycji (PnL), obsługując paginację, aby pobrać WSZYSTKIE rekordy.
-        Będzie pobierać dane w pętli, dopóki API zwraca 'nextPageCursor'.
+        Pobiera historię zamkniętych pozycji (PnL), obsługując paginację i wysyłając
+        zapytanie w 100% zgodne z dokumentacją API (z parametrem endTime).
         """
         endpoint = "/v5/position/closed-pnl"
         all_pnl_records = []
         cursor = None
         
-        logger.info(f"Rozpoczynam pobieranie historii P&L od timestampu {start_time_ms}...")
+        # Zgodnie z dokumentacją Bybit, `endTime` jest wymagany, gdy podajemy `startTime`.
+        end_time_ms = int(time.time() * 1000)
+        
+        logger.info(f"Pobieranie historii P&L od {start_time_ms} do {end_time_ms}...")
 
         while True:
             params = {
                 "category": "linear",
                 "startTime": start_time_ms,
+                "endTime": end_time_ms,  # <-- KLUCZOWY DODANY PARAMETR
                 "limit": limit
             }
             if cursor:
@@ -275,10 +279,8 @@ class BybitExecutor:
                     all_pnl_records.extend(pnl_list)
                     logger.info(f"Pobrano {len(pnl_list)} rekordów P&L. Łącznie: {len(all_pnl_records)}.")
                 
-                # Pobierz kursor do następnej strony
                 cursor = result.get('nextPageCursor')
                 
-                # Jeśli nie ma kursora, to znaczy, że to ostatnia strona. Przerywamy pętlę.
                 if not cursor:
                     logger.info("Brak 'nextPageCursor' w odpowiedzi. To była ostatnia strona.")
                     break
@@ -287,14 +289,10 @@ class BybitExecutor:
 
             except (RequestException, BybitAPIError) as e:
                 logger.error(f"Błąd podczas pobierania strony historii P&L: {e}. Przerywam i zwracam dotychczas zebrane dane.")
-                # W przypadku błędu przerywamy i zwracamy to, co udało się zebrać do tej pory
                 break
         
         if all_pnl_records:
             logger.info(f"Zakończono pobieranie. Łącznie pobrano {len(all_pnl_records)} rekordów P&L.")
         
-        # API zwraca dane od najnowszych do najstarszych.
-        # Odwracamy listę, aby najstarsze transakcje były na początku.
-        # Jest to kluczowe dla logiki przetwarzania i aktualizacji znacznika czasu.
         return list(reversed(all_pnl_records))
-    # --- KONIEC KODU NAPRAWCZEGO ---
+    # --- KONIEC OSTATECZNEJ POPRAWKI ---
