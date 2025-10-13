@@ -121,19 +121,26 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
                 logger.info(f"[{symbol}] Pomijam (symbol już przetworzony w tym cyklu).")
                 continue
 
+            ### POCZĄTEK POPRAWKI ###
+            # Krok 1: Weryfikacja stanu rynku PRZED podjęciem jakichkolwiek działań.
             open_position_side = executor.get_open_position_side(symbol)
             
             if open_position_side and open_position_side != "ERROR":
+                # SCENARIUSZ A: Pozycja już istnieje.
+                logger.info(f"[{symbol}] Wykryto otwartą pozycję: {open_position_side}.")
+                # Absolutnie NIE WOLNO anulować żadnych zleceń, aby chronić istniejący SL/TP.
                 if alert_model.direction != open_position_side:
-                    logger.warning(f"[{symbol}] ODRZUCONO (Strażnik Pozycji): Wykryto otwartą, przeciwną pozycję {open_position_side}.")
+                    logger.warning(f"[{symbol}] ODRZUCONO (Strażnik Pozycji): Nowy alert ({alert_model.direction}) jest przeciwny do otwartej pozycji.")
                     processed_symbols_in_cycle.add(symbol)
                     continue
                 else:
-                    logger.info(f"[{symbol}] Wykryto otwartą pozycję {open_position_side}. Nowy, zgodny alert ({alert_model.direction}) będzie przetworzony.")
+                    logger.info(f"[{symbol}] Nowy alert jest zgodny z otwartą pozycją. Kontynuuję przetwarzanie bez anulowania zleceń.")
             else:
-                # --- KLUCZOWA POPRAWKA: Anulowanie zleceń jest tutaj bezpieczne ---
-                logger.info(f"[{symbol}] Brak otwartej pozycji. Anuluję wszystkie oczekujące zlecenia.")
+                # SCENARIUSZ B: Rynek jest czysty (brak otwartej pozycji).
+                # TYLKO W TYM PRZYPADKU możemy bezpiecznie posprzątać "osierocone" zlecenia.
+                logger.info(f"[{symbol}] Brak otwartej pozycji. Anuluję wszystkie oczekujące zlecenia limit dla tego symbolu.")
                 executor.cancel_all_open_orders_for_symbol(symbol)
+            ### KONIEC POPRAWKI ###
 
             if not _correct_and_validate_alert(alert_model):
                 logger.warning(f"[{symbol}] ODRZUCONO (Walidacja Logiczna).")
@@ -170,7 +177,6 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
                 processed_symbols_in_cycle.add(symbol)
                 continue
 
-            # --- Wyłączono tryb analityczny ---
             logger.info(f"[{symbol}] Tworzenie teczek analitycznych jest obecnie wyłączone. Przechodzę do trybu transakcyjnego.")
 
             logger.info(
@@ -211,30 +217,42 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
             logger.error(f"Krytyczny błąd podczas atomowego przetwarzania alertu {alert_id}: {e}", exc_info=True)
             processed_symbols_in_cycle.add(symbol)
 
+
 def log_closed_positions_pnl(executor: BybitExecutor) -> int:
     logger.info("[PNL_LOGGER] Rozpoczynam cykl logowania PnL.")
     last_check_ts_dt = load_last_processed_timestamp("pnl_logger_last_fetch_state")
+    if not last_check_ts_dt:
+        logger.error("[PNL_LOGGER] Nie udało się załadować ostatniego znacznika czasu. Przerywam cykl, aby uniknąć duplikatów.")
+        return 0
+        
     logger.info(f"[PNL_LOGGER] Sprawdzam zamknięte pozycje od: {last_check_ts_dt.isoformat()}")
     
     start_time_ms = int(last_check_ts_dt.timestamp() * 1000)
-    pnl_records = executor.get_closed_pnl_history(start_time_ms=start_time_ms)
+    # Pobieramy historię i sortujemy ją chronologicznie, aby zapewnić prawidłową kolejność aktualizacji timestampu
+    pnl_records = sorted(
+        executor.get_closed_pnl_history(start_time_ms=start_time_ms),
+        key=lambda r: int(r.get("updatedTime", 0))
+    )
     
     if not pnl_records:
         logger.info("[PNL_LOGGER] Nie znaleziono nowych zamkniętych pozycji na Bybit od ostatniego sprawdzenia.")
         return 0
 
     logger.info(f"[PNL_LOGGER] Znaleziono {len(pnl_records)} zamkniętych pozycji na Bybit. Rozpoczynam przetwarzanie.")
-    new_max_ts = last_check_ts_dt
     processed_count = 0
     
+    ### POCZĄTEK POPRAWKI ###
     for pnl_record in pnl_records:
-        symbol = None # Reset symbol for each record
+        symbol = pnl_record.get("symbol")
+        order_id_from_db = None
+        
         try:
-            symbol = pnl_record.get("symbol")
+            # Krok 1: Gwarancja, że każdy rekord jest przetwarzany
             if not symbol:
                 logger.warning("[PNL_LOGGER] Pominięto rekord PnL bez symbolu.", extra={"json_fields": {"pnl_record": pnl_record}})
                 continue
 
+            # Krok 2: Obsługa transakcji niedopasowanych
             active_order_data = state_manager.get_active_order_by_symbol(symbol)
             
             if active_order_data:
@@ -243,34 +261,36 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
                 order_id_from_db = active_order_data.get('orderId')
             else:
                 logger.warning(f"[PNL_LOGGER] Nie znaleziono dopasowania dla {symbol}. Transakcja zostanie zalogowana jako 'UNMATCHED'.")
-                active_order_data = {}
+                active_order_data = {} # Przekazujemy pusty słownik, aby uniknąć błędów
                 alert_id = 'UNMATCHED_OR_MANUAL'
-                order_id_from_db = None
 
             enriched_pnl_data = pnl_record.copy()
             enriched_pnl_data['alert_id'] = alert_id
             
+            # Przekazanie do logowania w BigQuery
             log_real_trade_result(enriched_pnl_data, active_order_data)
             processed_count += 1
             
+            # Jeśli było dopasowanie, usuwamy "notatkę" z active_orders
             if order_id_from_db:
                 state_manager.delete_active_order_by_id(order_id_from_db)
 
+            # Krok 3: Atomowy zapis postępu po każdym sukcesie
             updated_time_ms = int(pnl_record.get("updatedTime", 0))
             if updated_time_ms > 0:
-                record_ts = datetime.fromtimestamp(updated_time_ms / 1000, tz=timezone.utc)
-                if record_ts > new_max_ts:
-                    new_max_ts = record_ts
-        except Exception as e:
-            logger.error(f"Krytyczny błąd podczas przetwarzania rekordu PnL dla symbolu {symbol}: {e}", exc_info=True)
-            continue
-    
-    if new_max_ts > last_check_ts_dt:
-        save_last_processed_timestamp(new_max_ts + timedelta(seconds=1), "pnl_logger_last_fetch_state")
-        
-    logger.info(f"[PNL_LOGGER] Zakończono cykl. Przetworzono i zalogowano {processed_count} rekordów.")
-    return processed_count
+                # Dodajemy 1 milisekundę, aby następne zapytanie nie pobrało tego samego rekordu
+                next_timestamp_to_save = datetime.fromtimestamp((updated_time_ms + 1) / 1000, tz=timezone.utc)
+                save_last_processed_timestamp(next_timestamp_to_save, "pnl_logger_last_fetch_state")
+                logger.info(f"[PNL_LOGGER] Pomyślnie przetworzono rekord dla {symbol}. Zaktualizowano timestamp na {next_timestamp_to_save.isoformat()}.")
 
+        except Exception as e:
+            # Krok 4: Odporność na błędy - logujemy i kontynuujemy
+            logger.error(f"[PNL_LOGGER] Krytyczny błąd podczas przetwarzania rekordu PnL dla symbolu {symbol}. Rekord zostanie pominięty. Błąd: {e}", exc_info=True, extra={"json_fields": {"pnl_record": pnl_record}})
+            continue # Przechodzimy do następnego rekordu, nie przerywając cyklu
+    ### KONIEC POPRAWKI ###
+        
+    logger.info(f"[PNL_LOGGER] Zakończono cykl. Przetworzono i zalogowano {processed_count} z {len(pnl_records)} rekordów.")
+    return processed_count
 
 def _run_analysis_of_existing_cases():
     logger.info("Rozpoczynam główną pętlę cyklu analitycznego.")

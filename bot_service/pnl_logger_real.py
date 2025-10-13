@@ -73,13 +73,20 @@ def log_real_trade_result(enriched_pnl_data: Dict[str, Any], active_order_data: 
         
         PRECISION = Decimal('0.00000001')
 
-        final_direction = "UNKNOWN"
-        if active_order_data.get("direction"):
-            final_direction = active_order_data.get("direction")
-        elif enriched_pnl_data.get("side") == "Buy":
-            final_direction = "LONG"
-        elif enriched_pnl_data.get("side") == "Sell":
-            final_direction = "SHORT"
+        ### POCZĄTEK POPRAWKI ###
+        # Priorytet 1: Użyj kierunku z naszej wewnętrznej bazy 'active_orders' - to jest źródło prawdy.
+        final_direction = active_order_data.get("direction")
+
+        # Priorytet 2 (fallback): Jeśli nie ma dopasowania, spróbuj odgadnąć na podstawie danych z Bybit.
+        if not final_direction:
+            bybit_side = enriched_pnl_data.get("side")
+            if bybit_side == "Buy":
+                final_direction = "LONG"
+            elif bybit_side == "Sell":
+                final_direction = "SHORT"
+            else:
+                final_direction = "UNKNOWN" # Domyślna wartość, jeśli nic nie pasuje
+        ### KONIEC POPRAWKI ###
 
         transformed_data = {
             "alert_id": alert_id,
@@ -98,7 +105,8 @@ def log_real_trade_result(enriched_pnl_data: Dict[str, Any], active_order_data: 
             "exit_type": enriched_pnl_data.get("exitType"),
             "timestamp_entry": datetime.fromtimestamp(int(enriched_pnl_data.get("createdTime")) / 1000, tz=timezone.utc).isoformat(),
             "timestamp_close": datetime.fromtimestamp(int(enriched_pnl_data.get("updatedTime")) / 1000, tz=timezone.utc).isoformat(),
-            "sl_price_alert": float(sl_price_final.quantize(PRECISION)) if sl_price_final > 0 else None,
+            # Poprawka nazwy pola, aby pasowała do schematu BQ
+            "sl_price": float(sl_price_final.quantize(PRECISION)) if sl_price_final > 0 else None,
             "planned_risk_usdt": float(planned_risk_usdt.quantize(PRECISION)) if planned_risk_usdt > 0 else None,
             "realized_rrr": float(realized_rrr.quantize(PRECISION)) if planned_risk_usdt > 0 else None,
         }
