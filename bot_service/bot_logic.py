@@ -160,11 +160,11 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
             if alert_model.direction == 'LONG':
                 final_entry = round_price_by_tick(alert_model.entry, tick_size, 'up')
                 final_sl = round_price_by_tick(alert_model.sl, tick_size, 'down')
-                final_tp = round_price_by_tick(alert_model.tp_2_0, tick_size, 'up')
+                final_tp = round_price_by_tick(alert_model.tp_3_0, tick_size, 'up')
             else: # SHORT
                 final_entry = round_price_by_tick(alert_model.entry, tick_size, 'down')
                 final_sl = round_price_by_tick(alert_model.sl, tick_size, 'up')
-                final_tp = round_price_by_tick(alert_model.tp_2_0, tick_size, 'down')
+                final_tp = round_price_by_tick(alert_model.tp_3_0, tick_size, 'down')
 
             risk_usdt = float(os.getenv("RISK_PER_TRADE_USDT", "2.5"))
             final_qty = calculate_position_size(
