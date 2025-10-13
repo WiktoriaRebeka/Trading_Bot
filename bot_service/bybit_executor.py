@@ -246,17 +246,17 @@ class BybitExecutor:
             logger.error(f"[{symbol}] Błąd podczas sprawdzania otwartych pozycji: {e}")
             return "ERROR"
 
-    ### POCZĄTEK POPRAWKI: Implementacja paginacji ###
+    # --- POCZĄTEK KODU NAPRAWCZEGO ---
     def get_closed_pnl_history(self, start_time_ms: int, limit: int = 50) -> List[Dict[str, Any]]:
         """
-        Pobiera historię zamkniętych pozycji (PnL), obsługując paginację.
+        Pobiera historię zamkniętych pozycji (PnL), obsługując paginację, aby pobrać WSZYSTKIE rekordy.
         Będzie pobierać dane w pętli, dopóki API zwraca 'nextPageCursor'.
         """
         endpoint = "/v5/position/closed-pnl"
         all_pnl_records = []
         cursor = None
         
-        logger.info(f"Pobieranie historii P&L od timestampu {start_time_ms}...")
+        logger.info(f"Rozpoczynam pobieranie historii P&L od timestampu {start_time_ms}...")
 
         while True:
             params = {
@@ -275,22 +275,26 @@ class BybitExecutor:
                     all_pnl_records.extend(pnl_list)
                     logger.info(f"Pobrano {len(pnl_list)} rekordów P&L. Łącznie: {len(all_pnl_records)}.")
                 
+                # Pobierz kursor do następnej strony
                 cursor = result.get('nextPageCursor')
                 
                 # Jeśli nie ma kursora, to znaczy, że to ostatnia strona. Przerywamy pętlę.
                 if not cursor:
+                    logger.info("Brak 'nextPageCursor' w odpowiedzi. To była ostatnia strona.")
                     break
                 
-                logger.info(f"Znaleziono nextPageCursor, pobieram kolejną stronę danych...")
+                logger.info(f"Znaleziono nextPageCursor ('...{cursor[-6:]}'). Pobieram kolejną stronę danych...")
 
             except (RequestException, BybitAPIError) as e:
-                logger.error(f"Błąd podczas pobierania historii P&L: {e}")
+                logger.error(f"Błąd podczas pobierania strony historii P&L: {e}. Przerywam i zwracam dotychczas zebrane dane.")
                 # W przypadku błędu przerywamy i zwracamy to, co udało się zebrać do tej pory
                 break
         
         if all_pnl_records:
             logger.info(f"Zakończono pobieranie. Łącznie pobrano {len(all_pnl_records)} rekordów P&L.")
         
-        # Odwracamy listę, aby najstarsze transakcje były pierwsze, co jest ważne dla logiki zapisu timestampu
+        # API zwraca dane od najnowszych do najstarszych.
+        # Odwracamy listę, aby najstarsze transakcje były na początku.
+        # Jest to kluczowe dla logiki przetwarzania i aktualizacji znacznika czasu.
         return list(reversed(all_pnl_records))
-    ### KONIEC POPRAWKI ###
+    # --- KONIEC KODU NAPRAWCZEGO ---
