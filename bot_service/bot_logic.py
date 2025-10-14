@@ -24,15 +24,10 @@ def run_combined_cycle(executor: BybitExecutor):
     """Główna, połączona pętla logiki z zapewnioną atomowością."""
     logger.info("Uruchamiam połączony cykl analityczno-transakcyjny.")
     
-    # --- POCZĄTEK ZMIANY ---
-    # Najpierw logujemy zamknięte pozycje, aby "posprzątać" po poprzednich cyklach
     try:
         log_closed_positions_pnl(executor)
     except Exception as e:
-        # Logujemy błąd, ale nie przerywamy całego cyklu, 
-        # aby przetwarzanie alertów nadal mogło się odbyć.
         logger.error(f"Błąd podczas logowania PnL w cyklu połączonym: {e}", exc_info=True)
-    # --- KONIEC ZMIANY ---
 
     last_ts = load_last_processed_timestamp("main_cycle_last_fetch_state")
     new_alerts, new_ts = fetch_new_alerts_since(last_ts)
@@ -45,66 +40,6 @@ def run_combined_cycle(executor: BybitExecutor):
     
     _run_analysis_of_existing_cases()
     logger.info("Zakończono połączony cykl analityczno-transakcyjny.")
-
-def round_price_by_tick(price: float, tick_size: str, direction: str) -> float:
-    """
-    Zaokrągla cenę do najbliższego kroku (ticka) w dół ('down') lub w górę ('up').
-    Używa Decimal dla precyzji.
-    """
-    price_decimal = Decimal(str(price))
-    tick_decimal = Decimal(tick_size)
-    
-    if direction == 'down':
-        quantized = (price_decimal / tick_decimal).to_integral_value(rounding=ROUND_DOWN) * tick_decimal
-    elif direction == 'up':
-        quantized = (price_decimal / tick_decimal).to_integral_value(rounding=ROUND_UP) * tick_decimal
-    else: 
-        quantized = round(price_decimal / tick_decimal) * tick_decimal
-        
-    return float(quantized)
-
-
-
-def _calculate_risk_percentage(entry_price: float, sl_price: float) -> Optional[float]:
-    """Oblicza procentową odległość SL od ceny wejścia."""
-    if entry_price == 0:
-        return None
-    risk_distance = abs(entry_price - sl_price)
-    return round((risk_distance / entry_price) * 100, 4)
-
-
-def _correct_and_validate_alert(alert: AlertData) -> bool:
-    """
-    Waliduje logikę biznesową alertu. Zwraca True, jeśli jest poprawny, False w przeciwnym razie.
-    """
-    if not alert.direction or alert.direction not in ["LONG", "SHORT"]:
-        logger.warning(
-            f"Odrzucono alert [{alert.symbol}]: Brak lub nieprawidłowy kierunek ('{alert.direction}'). "
-            f"Oryginalny directionCode: {alert.direction_code}."
-        )
-        return False
-    is_long_ok = (alert.direction == 'LONG' and alert.sl < alert.entry)
-    is_short_ok = (alert.direction == 'SHORT' and alert.sl > alert.entry)
-
-    if not (is_long_ok or is_short_ok):
-        logger.warning(
-            f"Odrzucono alert [{alert.symbol}]: Nielogiczna pozycja. "
-            f"Kierunek: {alert.direction}, Wejście: {alert.entry}, SL: {alert.sl}."
-        )
-        return False
-    risk_perc = _calculate_risk_percentage(alert.entry, alert.sl)
-    if risk_perc is None or risk_perc < 0.43:
-        logger.warning(
-            f"Odrzucono alert [{alert.symbol}]: Ryzyko poniżej minimum 0.43%. "
-            f"Obliczone ryzyko: {risk_perc}% (Wejście: {alert.entry}, SL: {alert.sl})."
-        )
-        return False
-    
-    logger.info(
-        f"Alert [{alert.symbol}] przeszedł walidację. "
-        f"Kierunek: {alert.direction}, Ryzyko: {risk_perc}%."
-    )
-    return True
 
 def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecutor):
     instrument_rules = get_instrument_rules()
@@ -183,10 +118,14 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
                 f"[{symbol}] Przygotowano zlecenie: Entry={final_entry}, SL={final_sl}, "
                 f"TP={final_tp}, Qty={final_qty}."
             )
+            
             order_params = {
                 "symbol": symbol, "side": "Buy" if alert_model.direction == "LONG" else "Sell",
                 "orderType": "Limit", "qty": final_qty, "price": final_entry,
-                "takeProfit": final_tp, "stopLoss": final_sl,
+                "takeProfit": final_tp,
+                "stopLoss": final_sl,
+                "tpTriggerBy": "MarkPrice",
+                "slTriggerBy": "MarkPrice",
                 "orderLinkId": f"bracket_{alert_id.replace('-', '')[:12]}_{int(datetime.now().timestamp())}",
                 "timeInForce": "GTC"
             }
@@ -217,14 +156,29 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
             logger.error(f"Krytyczny błąd podczas atomowego przetwarzania alertu {alert_id}: {e}", exc_info=True)
             processed_symbols_in_cycle.add(symbol)
 
+def _transform_liquidation_record(liq_record: Dict[str, Any]) -> Dict[str, Any]:
+    """Tłumaczy rekord likwidacji na format zgodny z rekordem PnL."""
+    return {
+        "symbol": liq_record.get("symbol"),
+        "orderId": f"liq_{liq_record.get('symbol')}_{liq_record.get('updatedTime')}",
+        "side": "Buy" if liq_record.get("side") == "Sell" else "Sell",
+        "qty": liq_record.get("size"),
+        "avgEntryPrice": None,
+        "avgExitPrice": liq_record.get("deliveryPrice"),
+        "closedPnl": liq_record.get("realisedPnl"),
+        "cumCommission": "0",
+        "leverage": None,
+        "createdTime": liq_record.get("updatedTime"),
+        "updatedTime": liq_record.get("updatedTime"),
+        "exitType": "Liquidation"
+    }
 
 def log_closed_positions_pnl(executor: BybitExecutor) -> int:
-    logger.info("[PNL_LOGGER] Rozpoczynam cykl logowania PnL.")
+    logger.info("[PNL_LOGGER] Rozpoczynam cykl logowania PnL (w tym likwidacji).")
     
     last_check_ts_dt = load_last_processed_timestamp("pnl_logger_last_fetch_state")
     if not last_check_ts_dt:
         logger.warning("[PNL_LOGGER] Nie udało się załadować ostatniego znacznika czasu. Używam domyślnego (1h w przeszłość).")
-        # W przypadku braku timestampu, użycie wartości domyślnej jest bezpieczniejsze niż przerwanie cyklu
         last_check_ts_dt = datetime.now(timezone.utc) - timedelta(hours=1)
 
     current_cycle_start_time = datetime.now(timezone.utc)
@@ -232,32 +186,40 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
     
     start_time_ms = int(last_check_ts_dt.timestamp() * 1000)
     
+    all_records = []
     try:
         pnl_records = executor.get_closed_pnl_history(start_time_ms=start_time_ms)
+        all_records.extend(pnl_records)
+
+        liq_records_raw = executor.get_liquidation_history(start_time_ms=start_time_ms)
+        liq_records_transformed = [_transform_liquidation_record(rec) for rec in liq_records_raw]
+        all_records.extend(liq_records_transformed)
+
     except Exception as e:
-        logger.critical(f"[PNL_LOGGER] Krytyczny błąd podczas pobierania historii PnL z Bybit: {e}", exc_info=True)
-        # W przypadku błędu komunikacji z giełdą NIE aktualizujemy znacznika czasu, aby spróbować ponownie w następnym cyklu
+        logger.critical(f"[PNL_LOGGER] Krytyczny błąd podczas pobierania historii z Bybit: {e}", exc_info=True)
         return 0
 
     processed_count = 0
     
-    ### POCZĄTEK POPRAWKI: Rozdzielenie logiki aktualizacji timestampu ###
-    
-    if pnl_records:
-        logger.info(f"[PNL_LOGGER] Znaleziono {len(pnl_records)} zamkniętych pozycji na Bybit. Rozpoczynam przetwarzanie.")
+    if all_records:
+        logger.info(f"[PNL_LOGGER] Znaleziono łącznie {len(all_records)} zamkniętych pozycji (w tym likwidacje). Rozpoczynam przetwarzanie.")
         
-        # Sortujemy po `updatedTime`, aby upewnić się, że przetwarzamy w porządku chronologicznym
-        pnl_records_sorted = sorted(pnl_records, key=lambda r: int(r.get("updatedTime", 0)))
+        pnl_records_sorted = sorted(all_records, key=lambda r: int(r.get("updatedTime", 0)))
         
         latest_processed_ts_dt = last_check_ts_dt
 
         for pnl_record in pnl_records_sorted:
+            ### POCZĄTEK DODATKOWYCH LOGÓW ###
+            order_id = pnl_record.get("orderId", "N/A")
             symbol = pnl_record.get("symbol")
+            logger.info(f"[PNL_LOGGER] Przetwarzanie rekordu PnL dla symbolu {symbol} [OrderID: {order_id}]")
+            ### KONIEC DODATKOWYCH LOGÓW ###
+            
             order_id_from_db = None
             
             try:
                 if not symbol:
-                    logger.warning("[PNL_LOGGER] Pominięto rekord PnL bez symbolu.", extra={"json_fields": {"pnl_record": pnl_record}})
+                    logger.warning("[PNL_LOGGER] Pominięto rekord bez symbolu.", extra={"json_fields": {"pnl_record": pnl_record}})
                     continue
 
                 active_order_data = state_manager.get_active_order_by_symbol(symbol)
@@ -280,7 +242,6 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
                 if order_id_from_db:
                     state_manager.delete_active_order_by_id(order_id_from_db)
 
-                # Śledzimy najnowszy timestamp z faktycznie przetworzonych rekordów
                 updated_time_ms = int(pnl_record.get("updatedTime", 0))
                 if updated_time_ms > 0:
                     record_ts_dt = datetime.fromtimestamp(updated_time_ms / 1000, tz=timezone.utc)
@@ -288,81 +249,96 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
                         latest_processed_ts_dt = record_ts_dt
 
             except Exception as e:
-                logger.error(f"[PNL_LOGGER] Krytyczny błąd podczas przetwarzania rekordu PnL dla symbolu {symbol}. Rekord zostanie pominięty. Błąd: {e}", exc_info=True, extra={"json_fields": {"pnl_record": pnl_record}})
+                logger.error(f"[PNL_LOGGER] Krytyczny błąd podczas przetwarzania rekordu dla symbolu {symbol}. Rekord zostanie pominięty. Błąd: {e}", exc_info=True, extra={"json_fields": {"pnl_record": pnl_record}})
                 continue
         
-        # Po przetworzeniu wszystkich rekordów, zapisz nowy timestamp na podstawie ostatniego z nich + 1 milisekunda
         final_timestamp_to_save = latest_processed_ts_dt + timedelta(milliseconds=1)
         save_last_processed_timestamp(final_timestamp_to_save, "pnl_logger_last_fetch_state")
         logger.info(f"[PNL_LOGGER] Zakończono cykl. Przetworzono {processed_count} rekordów. Zaktualizowano znacznik czasu na {final_timestamp_to_save.isoformat()}.")
 
     else:
-        # Jeśli nie znaleziono żadnych rekordów, bezpiecznie przesuń znacznik czasu do momentu rozpoczęcia tego cyklu.
-        # To zapobiega utknięciu w pętli, jeśli nie ma nowych transakcji, i unika "przeskoku" nad danymi.
-        logger.info("[PNL_LOGGER] Nie znaleziono nowych zamkniętych pozycji na Bybit od ostatniego sprawdzenia.")
+        logger.info("[PNL_LOGGER] Nie znaleziono nowych zamkniętych pozycji (w tym likwidacji) na Bybit od ostatniego sprawdzenia.")
         final_timestamp_to_save = current_cycle_start_time
         save_last_processed_timestamp(final_timestamp_to_save, "pnl_logger_last_fetch_state")
         logger.info(f"[PNL_LOGGER] Zakończono cykl. Przetworzono 0 rekordów. Zaktualizowano znacznik czasu na {final_timestamp_to_save.isoformat()}.")
-
-    ### KONIEC POPRAWKI ###
     
     return processed_count
 
+# Pozostałe funkcje bez zmian
+def round_price_by_tick(price: float, tick_size: str, direction: str) -> float:
+    price_decimal = Decimal(str(price))
+    tick_decimal = Decimal(tick_size)
+    if direction == 'down':
+        quantized = (price_decimal / tick_decimal).to_integral_value(rounding=ROUND_DOWN) * tick_decimal
+    elif direction == 'up':
+        quantized = (price_decimal / tick_decimal).to_integral_value(rounding=ROUND_UP) * tick_decimal
+    else: 
+        quantized = round(price_decimal / tick_decimal) * tick_decimal
+    return float(quantized)
+
+def _calculate_risk_percentage(entry_price: float, sl_price: float) -> Optional[float]:
+    if entry_price == 0: return None
+    risk_distance = abs(entry_price - sl_price)
+    return round((risk_distance / entry_price) * 100, 4)
+
+def _correct_and_validate_alert(alert: AlertData) -> bool:
+    if not alert.direction or alert.direction not in ["LONG", "SHORT"]:
+        logger.warning(f"Odrzucono alert [{alert.symbol}]: Brak lub nieprawidłowy kierunek ('{alert.direction}'). Oryginalny directionCode: {alert.direction_code}.")
+        return False
+    is_long_ok = (alert.direction == 'LONG' and alert.sl < alert.entry)
+    is_short_ok = (alert.direction == 'SHORT' and alert.sl > alert.entry)
+    if not (is_long_ok or is_short_ok):
+        logger.warning(f"Odrzucono alert [{alert.symbol}]: Nielogiczna pozycja. Kierunek: {alert.direction}, Wejście: {alert.entry}, SL: {alert.sl}.")
+        return False
+    risk_perc = _calculate_risk_percentage(alert.entry, alert.sl)
+    if risk_perc is None or risk_perc < 0.43:
+        logger.warning(f"Odrzucono alert [{alert.symbol}]: Ryzyko poniżej minimum 0.43%. Obliczone ryzyko: {risk_perc}% (Wejście: {alert.entry}, SL: {alert.sl}).")
+        return False
+    logger.info(f"Alert [{alert.symbol}] przeszedł walidację. Kierunek: {alert.direction}, Ryzyko: {risk_perc}%.")
+    return True
+
 def _run_analysis_of_existing_cases():
     logger.info("Rozpoczynam główną pętlę cyklu analitycznego.")
-    
     all_cases_docs = list(state_manager.get_all_analytical_cases())
     if not all_cases_docs:
         logger.info("Brak aktywnych teczek analitycznych. Kończę cykl.")
         return
-
     instrument_rules = get_instrument_rules()
     if not instrument_rules:
         logger.error("Nie udało się wczytać zasad instrumentów dla procesu analitycznego. Pomijam cykl.")
         return
-
     logger.info(f"[DIAGNOSTYKA] Znaleziono {len(all_cases_docs)} teczek analitycznych do przetworzenia.")
     symbols_to_watch = {doc.to_dict().get('symbol') for doc in all_cases_docs if doc.to_dict()}
     valid_symbols = {s for s in symbols_to_watch if s}
-    
     if not valid_symbols:
         logger.info("Brak symboli do monitorowania w aktywnych teczkach.")
         return
-
     klines_data_from_cache = state_manager.get_latest_klines_from_cache(list(valid_symbols))
     if not klines_data_from_cache:
         logger.warning("Nie udało się pobrać danych kline z cache'u. Pomijam cykl.")
         return
-
-    klines_models = {
-        symbol: Kline.model_validate(data) for symbol, data in klines_data_from_cache.items()
-    }
+    klines_models = {symbol: Kline.model_validate(data) for symbol, data in klines_data_from_cache.items()}
     logger.info(f"[DIAGNOSTYKA] Pomyślnie pobrano {len(klines_models)} świec z cache'u.")
-
     for case_doc_snapshot in all_cases_docs:
         case_id = case_doc_snapshot.id
         try:
             case_doc = case_doc_snapshot.to_dict()
             symbol = case_doc.get('symbol')
             status = case_doc.get('status')
-            
             rule = instrument_rules.get(symbol)
             if not rule or "tickSize" not in rule:
                 logger.warning(f"Brak zasad 'tickSize' dla symbolu {symbol} (teczka {case_id}). Pomijam.")
                 continue
-
             latest_kline = klines_models.get(symbol)
             if not latest_kline:
                 logger.warning(f"Brak danych kline dla symbolu {symbol} (teczka {case_id}). Pomijam tę teczkę w cyklu.")
                 continue
-            
             if status == 'PENDING':
                 _handle_pending_case(case_doc_snapshot, latest_kline, rule)
             elif status == 'TRIGGERED':
                 _handle_triggered_case(case_doc_snapshot, latest_kline, rule)
         except Exception as e:
             logger.error(f"Błąd podczas przetwarzania teczki {case_id}: {e}", exc_info=True)
-
     logger.info("Zakończono główną pętlę cyklu analitycznego.")
 
 def _handle_pending_case(case_doc_snapshot: Any, kline: Kline, rule: Dict[str, Any]):
@@ -370,27 +346,19 @@ def _handle_pending_case(case_doc_snapshot: Any, kline: Kline, rule: Dict[str, A
     case_id = case_doc_snapshot.id
     alert = AlertData.model_validate(case_doc.get('alert_data'))
     tick_size = rule['tickSize']
-
     if alert.direction == 'LONG':
         final_entry = round_price_by_tick(alert.entry, tick_size, 'up')
     else: # SHORT
         final_entry = round_price_by_tick(alert.entry, tick_size, 'down')
-    
     entry_triggered = False
     if alert.direction == 'LONG' and kline.low <= final_entry:
         entry_triggered = True
     elif alert.direction == 'SHORT' and kline.high >= final_entry:
         entry_triggered = True
-        
     if entry_triggered:
         logger.info(f"--- [ANALYSIS TRIGGER] --- [{alert.symbol}] | ID: {case_id} | Cena wejścia {final_entry} dotknięta.")
-        updates = {
-            "status": "TRIGGERED",
-            "triggered_at": datetime.now(timezone.utc)
-        }
+        updates = {"status": "TRIGGERED", "triggered_at": datetime.now(timezone.utc)}
         state_manager.update_case_status_and_results(case_id, updates)
-
-
 
 def _handle_triggered_case(case_doc_snapshot: Any, kline: Kline, rule: Dict[str, Any]):
     case_doc = case_doc_snapshot.to_dict()
@@ -399,20 +367,16 @@ def _handle_triggered_case(case_doc_snapshot: Any, kline: Kline, rule: Dict[str,
     alert = AlertData.model_validate(case_doc.get('alert_data'))
     results = case_doc.get('results', {})
     tick_size = rule['tickSize']
-
     unresolved_targets = {k: v for k, v in results.items() if v == "UNRESOLVED"}
     if not unresolved_targets:
         logger.info(f"[{case_id}] Wszystkie scenariusze rozstrzygnięte. Usuwam teczkę.")
         state_manager.delete_case_by_id(case_id)
         return
-
     direction = alert.direction
-    
     if direction == 'LONG':
         final_sl = round_price_by_tick(alert.sl, tick_size, 'down')
     else: # SHORT
         final_sl = round_price_by_tick(alert.sl, tick_size, 'up')
-    
     resolved_scenarios = {}
     close_timestamp = datetime.fromtimestamp(kline.timestamp / 1000, tz=timezone.utc)
     base_log_data = {
@@ -423,9 +387,7 @@ def _handle_triggered_case(case_doc_snapshot: Any, kline: Kline, rule: Dict[str,
         "timestamp_close": close_timestamp.isoformat(),
         "risk_percentage": _calculate_risk_percentage(alert.entry, alert.sl)
     }
-
     sl_hit = (direction == 'LONG' and kline.low <= final_sl) or (direction == 'SHORT' and kline.high >= final_sl)
-
     if sl_hit:
         logger.info(f"--- [ANALYSIS SL HIT] --- [{symbol}] | ID: {case_id} | Wszystkie nierozstrzygnięte scenariusze = LOSE.")
         for target_level in unresolved_targets:
@@ -439,16 +401,13 @@ def _handle_triggered_case(case_doc_snapshot: Any, kline: Kline, rule: Dict[str,
                 final_tp = round_price_by_tick(getattr(alert, target_level), tick_size, 'up')
             else: # SHORT
                 final_tp = round_price_by_tick(getattr(alert, target_level), tick_size, 'down')
-
             tp_hit = (direction == 'LONG' and kline.high >= final_tp) or (direction == 'SHORT' and kline.low <= final_tp)
-            
             if tp_hit:
                 logger.info(f"--- [ANALYSIS TP HIT] --- [{symbol}] | ID: {case_id} | Scenariusz {target_level} = WIN.")
                 log_data = base_log_data.copy()
                 log_data.update({"target_level": target_level, "target_price": getattr(alert, target_level), "result": "WIN"})
                 log_analysis_result(log_data)
                 resolved_scenarios[f'results.{target_level}'] = "WIN"
-
     if resolved_scenarios:
         state_manager.update_case_status_and_results(case_id, resolved_scenarios)
         if len(results) - len(unresolved_targets) + len(resolved_scenarios) >= 6:
