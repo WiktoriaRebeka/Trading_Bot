@@ -83,6 +83,164 @@ class BybitExecutor:
             logger.error(f"Nieoczekiwany błąd w _send_request: {e}", exc_info=True)
             raise
 
+    def place_order(self, params: Dict[str, Any]) -> Optional[Dict[str, str]]:
+        symbol = params.get('symbol')
+        if not symbol:
+            logger.error("Brak 'symbol' w parametrach zlecenia.")
+            return None
+
+        api_symbol = symbol.replace('.P', '')
+        
+        payload = {
+            "category": "linear",
+            "symbol": api_symbol,
+            "side": params['side'],
+            "orderType": params['orderType'],
+            "qty": str(params['qty']),
+        }
+
+        optional_params = [
+            "price", "triggerPrice", "triggerDirection", "triggerBy", "orderFilter",
+            "reduceOnly", "closeOnTrigger", "timeInForce", "orderLinkId",
+            "takeProfit", "stopLoss", "tpTriggerBy", "slTriggerBy"
+        ]
+
+        for param in optional_params:
+            if param in params:
+                payload[param] = str(params[param])
+
+        logger.info(f"[{symbol}] Wysyłanie zlecenia do Bybit: {payload}")
+        try:
+            result = self._send_request("POST", "/v5/order/create", params=payload)
+            logger.info(f"[{symbol}] Odpowiedź Bybit na place_order: {result}")
+            
+            order_id = result.get("orderId")
+            if order_id:
+                return result
+            
+            logger.error(f"[{symbol}] API Bybit nie zwróciło orderId. Pełna odpowiedź 'result': {result}")
+            return None
+        except (RequestException, BybitAPIError) as e:
+            raise
+        except Exception as e:
+            logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD podczas składania zlecenia. Błąd: {e}", exc_info=True)
+            raise
+
+    def get_closed_pnl_history(self, start_time_ms: int, limit: int = 50) -> List[Dict[str, Any]]:
+        endpoint = "/v5/position/closed-pnl"
+        all_pnl_records = []
+        cursor = None
+        end_time_ms = int(time.time() * 1000)
+        
+        logger.info(f"Pobieranie historii P&L (Trade/SL/TP) od {start_time_ms} do {end_time_ms}...")
+
+        while True:
+            params = {
+                "category": "linear",
+                "startTime": start_time_ms,
+                "endTime": end_time_ms,
+                "limit": limit
+            }
+            if cursor:
+                params["cursor"] = cursor
+
+            try:
+                result = self._send_request("GET", endpoint, params=params)
+                pnl_list = result.get('list', [])
+                if pnl_list:
+                    all_pnl_records.extend(pnl_list)
+                cursor = result.get('nextPageCursor')
+                if not cursor:
+                    break
+            except (RequestException, BybitAPIError) as e:
+                logger.error(f"Błąd podczas pobierania strony historii P&L: {e}.")
+                break
+        
+        logger.info(f"Pobrano {len(all_pnl_records)} rekordów P&L.")
+        return list(reversed(all_pnl_records))
+
+    def get_liquidation_history(self, start_time_ms: int, limit: int = 50) -> List[Dict[str, Any]]:
+        """Pobiera historię likwidacji z dedykowanego endpointu."""
+        endpoint = "/v5/asset/delivery-record"
+        all_liq_records = []
+        cursor = None
+        end_time_ms = int(time.time() * 1000)
+
+        logger.info(f"Pobieranie historii LIKWIDACJI od {start_time_ms} do {end_time_ms}...")
+
+        while True:
+            params = {
+                "category": "linear",
+                "type": "LIQUIDATION",
+                "startTime": start_time_ms,
+                "endTime": end_time_ms,
+                "limit": limit
+            }
+            if cursor:
+                params["cursor"] = cursor
+
+            try:
+                result = self._send_request("GET", endpoint, params=params)
+                liq_list = result.get('list', [])
+                if liq_list:
+                    all_liq_records.extend(liq_list)
+                cursor = result.get('nextPageCursor')
+                if not cursor:
+                    break
+            except (RequestException, BybitAPIError) as e:
+                logger.error(f"Błąd podczas pobierania strony historii likwidacji: {e}.")
+                break
+        
+        logger.info(f"Pobrano {len(all_liq_records)} rekordów likwidacji.")
+        return list(reversed(all_liq_records))
+
+    def get_open_position_side(self, symbol: str) -> Optional[str]:
+        api_symbol = symbol.replace('.P', '')
+        params = {"category": "linear", "symbol": api_symbol}
+        try:
+            result = self._send_request("GET", "/v5/position/list", params=params)
+            if result and result.get('list'):
+                position_data = result['list'][0]
+                position_size = float(position_data.get("size", "0"))
+                if position_size > 0:
+                    side = position_data.get("side")
+                    if side == "Buy":
+                        return "LONG"
+                    elif side == "Sell":
+                        return "SHORT"
+            return None
+        except (RequestException, BybitAPIError) as e:
+            logger.error(f"[{symbol}] Błąd podczas sprawdzania otwartych pozycji: {e}")
+            return "ERROR"
+
+    def cancel_all_open_orders_for_symbol(self, symbol: str) -> bool:
+        api_symbol = symbol.replace('.P', '')
+        logger.info(f"[{symbol}] Anulowanie wszystkich oczekujących zleceń...")
+        try:
+            payload = {"category": "linear", "symbol": api_symbol}
+            result = self._send_request("POST", "/v5/order/cancel-all", params=payload)
+            
+            if 'list' in result:
+                cancelled_orders = result.get('list', [])
+                if cancelled_orders:
+                    logger.info(f"[{symbol}] Pomyślnie wysłano polecenie anulowania dla {len(cancelled_orders)} zleceń.")
+                else:
+                    logger.info(f"[{symbol}] Brak otwartych zleceń do anulowania.")
+                return True
+            else:
+                logger.error(f"[{symbol}] API Bybit nie zwróciło oczekiwanej listy po próbie anulowania zleceń. Odpowiedź: {result}")
+                return False
+        except BybitAPIError as e:
+            if e.ret_code == 110021:
+                 logger.info(f"[{symbol}] Brak otwartych zleceń do anulowania (API zwróciło 'Order does not exist').")
+                 return True
+            logger.critical(f"[{symbol}] Błąd API podczas czyszczenia otwartych zleceń: {e}", exc_info=True)
+            return False
+        except Exception as e:
+            logger.critical(f"[{symbol}] Nieoczekiwany błąd podczas czyszczenia otwartych zleceń: {e}", exc_info=True)
+            return False
+
+    # Pozostałe funkcje pomocnicze bez zmian
     def get_latest_ticker_price(self, symbol: str) -> Optional[float]:
         api_symbol = symbol.replace('.P', '')
         params = {"category": "linear", "symbol": api_symbol}
@@ -116,51 +274,6 @@ class BybitExecutor:
             return None
         except (RequestException, BybitAPIError):
             return None
-
-    def place_order(self, params: Dict[str, Any]) -> Optional[Dict[str, str]]:
-        symbol = params.get('symbol')
-        if not symbol:
-            logger.error("Brak 'symbol' w parametrach zlecenia.")
-            return None
-
-        api_symbol = symbol.replace('.P', '')
-        
-        payload = {
-            "category": "linear",
-            "symbol": api_symbol,
-            "side": params['side'],
-            "orderType": params['orderType'],
-            "qty": str(params['qty']),
-        }
-
-        optional_params = [
-            "price", "triggerPrice", "triggerDirection", "triggerBy", "orderFilter",
-            "reduceOnly", "closeOnTrigger", "timeInForce", "orderLinkId",
-            "takeProfit", "stopLoss"
-        ]
-        for param in optional_params:
-            if param in params:
-                if param == "triggerDirection":
-                    payload[param] = 1 if params[param] == 'Rising' else 2
-                else:
-                    payload[param] = str(params[param])
-
-        logger.info(f"[{symbol}] Wysyłanie zlecenia do Bybit: {payload}")
-        try:
-            result = self._send_request("POST", "/v5/order/create", params=payload)
-            logger.info(f"[{symbol}] Odpowiedź Bybit na place_order: {result}")
-            
-            order_id = result.get("orderId")
-            if order_id:
-                return result
-            
-            logger.error(f"[{symbol}] API Bybit nie zwróciło orderId. Pełna odpowiedź 'result': {result}")
-            return None
-        except (RequestException, BybitAPIError) as e:
-            raise
-        except Exception as e:
-            logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD podczas składania zlecenia. Błąd: {e}", exc_info=True)
-            raise
 
     def place_conditional_order(self, params: Dict[str, Any]) -> Optional[Dict[str, str]]:
         symbol = params.get('symbol')
@@ -199,100 +312,3 @@ class BybitExecutor:
             self._send_request("POST", "/v5/order/create", params=payload)
         except Exception as e:
             logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD podczas awaryjnego zamykania pozycji: {e}", exc_info=True)
-
-    def cancel_all_open_orders_for_symbol(self, symbol: str) -> bool:
-        api_symbol = symbol.replace('.P', '')
-        logger.info(f"[{symbol}] Anulowanie wszystkich oczekujących zleceń...")
-        try:
-            payload = {"category": "linear", "symbol": api_symbol}
-            result = self._send_request("POST", "/v5/order/cancel-all", params=payload)
-            
-            if 'list' in result:
-                cancelled_orders = result.get('list', [])
-                if cancelled_orders:
-                    logger.info(f"[{symbol}] Pomyślnie wysłano polecenie anulowania dla {len(cancelled_orders)} zleceń.")
-                else:
-                    logger.info(f"[{symbol}] Brak otwartych zleceń do anulowania.")
-                return True
-            else:
-                logger.error(f"[{symbol}] API Bybit nie zwróciło oczekiwanej listy po próbie anulowania zleceń. Odpowiedź: {result}")
-                return False
-        except BybitAPIError as e:
-            if e.ret_code == 110021:
-                 logger.info(f"[{symbol}] Brak otwartych zleceń do anulowania (API zwróciło 'Order does not exist').")
-                 return True
-            logger.critical(f"[{symbol}] Błąd API podczas czyszczenia otwartych zleceń: {e}", exc_info=True)
-            return False
-        except Exception as e:
-            logger.critical(f"[{symbol}] Nieoczekiwany błąd podczas czyszczenia otwartych zleceń: {e}", exc_info=True)
-            return False
-
-    def get_open_position_side(self, symbol: str) -> Optional[str]:
-        api_symbol = symbol.replace('.P', '')
-        params = {"category": "linear", "symbol": api_symbol}
-        try:
-            result = self._send_request("GET", "/v5/position/list", params=params)
-            if result and result.get('list'):
-                position_data = result['list'][0]
-                position_size = float(position_data.get("size", "0"))
-                if position_size > 0:
-                    side = position_data.get("side")
-                    if side == "Buy":
-                        return "LONG"
-                    elif side == "Sell":
-                        return "SHORT"
-            return None
-        except (RequestException, BybitAPIError) as e:
-            logger.error(f"[{symbol}] Błąd podczas sprawdzania otwartych pozycji: {e}")
-            return "ERROR"
-
-    # --- POCZĄTEK OSTATECZNEJ POPRAWKI ---
-    def get_closed_pnl_history(self, start_time_ms: int, limit: int = 50) -> List[Dict[str, Any]]:
-        """
-        Pobiera historię zamkniętych pozycji (PnL), obsługując paginację i wysyłając
-        zapytanie w 100% zgodne z dokumentacją API (z parametrem endTime).
-        """
-        endpoint = "/v5/position/closed-pnl"
-        all_pnl_records = []
-        cursor = None
-        
-        # Zgodnie z dokumentacją Bybit, `endTime` jest wymagany, gdy podajemy `startTime`.
-        end_time_ms = int(time.time() * 1000)
-        
-        logger.info(f"Pobieranie historii P&L od {start_time_ms} do {end_time_ms}...")
-
-        while True:
-            params = {
-                "category": "linear",
-                "startTime": start_time_ms,
-                "endTime": end_time_ms,  # <-- KLUCZOWY DODANY PARAMETR
-                "limit": limit
-            }
-            if cursor:
-                params["cursor"] = cursor
-
-            try:
-                result = self._send_request("GET", endpoint, params=params)
-                
-                pnl_list = result.get('list', [])
-                if pnl_list:
-                    all_pnl_records.extend(pnl_list)
-                    logger.info(f"Pobrano {len(pnl_list)} rekordów P&L. Łącznie: {len(all_pnl_records)}.")
-                
-                cursor = result.get('nextPageCursor')
-                
-                if not cursor:
-                    logger.info("Brak 'nextPageCursor' w odpowiedzi. To była ostatnia strona.")
-                    break
-                
-                logger.info(f"Znaleziono nextPageCursor ('...{cursor[-6:]}'). Pobieram kolejną stronę danych...")
-
-            except (RequestException, BybitAPIError) as e:
-                logger.error(f"Błąd podczas pobierania strony historii P&L: {e}. Przerywam i zwracam dotychczas zebrane dane.")
-                break
-        
-        if all_pnl_records:
-            logger.info(f"Zakończono pobieranie. Łącznie pobrano {len(all_pnl_records)} rekordów P&L.")
-        
-        return list(reversed(all_pnl_records))
-    # --- KONIEC OSTATECZNEJ POPRAWKI ---
