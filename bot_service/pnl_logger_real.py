@@ -10,7 +10,10 @@ from shared_lib import constants
 
 logger = logging.getLogger(__name__)
 
-REAL_TABLE_REF = f"{constants.BIGQUERY_PROJECT_ID}.{constants.BIGQUERY_DATASET_ID}.{constants.BIGQUERY_REAL_TRADES_TABLE_ID}"
+# --- POCZĄTEK KRYTYCZNEJ POPRAWKI ---
+# Definiujemy pełną i jednoznaczną ścieżkę do WŁAŚCIWEJ tabeli.
+REAL_TABLE_REF_STR = f"{constants.BIGQUERY_PROJECT_ID}.{constants.BIGQUERY_DATASET_ID}.{constants.BIGQUERY_REAL_TRADES_TABLE_ID}"
+# --- KONIEC KRYTYCZNEJ POPRAWKI ---
 
 REAL_TRADES_HISTORY_SCHEMA = [
     bigquery.SchemaField("alert_id", "STRING", mode="REQUIRED"),
@@ -48,7 +51,6 @@ def log_real_trade_result(enriched_pnl_data: Dict[str, Any], active_order_data: 
     symbol = enriched_pnl_data.get("symbol", "unknown")
     log_prefix = f"[PNL_REAL_SAVE][{symbol}|{order_id}]"
 
-    ### POCZĄTEK DODATKOWYCH LOGÓW ###
     logger.info(
         f"{log_prefix} Otrzymano dane do przetworzenia i zapisu.", 
         extra={"json_fields": {
@@ -56,10 +58,8 @@ def log_real_trade_result(enriched_pnl_data: Dict[str, Any], active_order_data: 
             "active_order_data": active_order_data
         }}
     )
-    ### KONIEC DODATKOWYCH LOGÓW ###
 
     try:
-        # Sprawdzenie, czy kluczowe dane istnieją, szczególnie dla likwidacji
         if enriched_pnl_data.get('avgEntryPrice') is None and active_order_data.get('final_entry_price'):
             enriched_pnl_data['avgEntryPrice'] = active_order_data['final_entry_price']
             logger.warning(f"{log_prefix} Uzupełniono brakującą cenę wejścia z danych zlecenia (prawdopodobnie likwidacja).")
@@ -134,13 +134,16 @@ def log_real_trade_result(enriched_pnl_data: Dict[str, Any], active_order_data: 
 
     try:
         client = get_bigquery_client()
-        ### POCZĄTEK DODATKOWYCH LOGÓW ###
         logger.info(
             f"{log_prefix} Przygotowano dane do zapisu w BigQuery. Próba wstawienia...", 
             extra={"json_fields": {"bq_payload": transformed_data}}
         )
-        ### KONIEC DODATKOWYCH LOGÓW ###
-        errors = client.insert_rows_json(REAL_TABLE_REF, [transformed_data])
+        
+        # --- POCZĄTEK KRYTYCZNEJ POPRAWKI ---
+        # Używamy jawnie zdefiniowanej, poprawnej referencji do tabeli.
+        errors = client.insert_rows_json(REAL_TABLE_REF_STR, [transformed_data])
+        # --- KONIEC KRYTYCZNEJ POPRAWKI ---
+
         if not errors:
             logger.info(f"{log_prefix} SUKCES! Pomyślnie zapisano realny wynik transakcji do BigQuery.")
         else:
