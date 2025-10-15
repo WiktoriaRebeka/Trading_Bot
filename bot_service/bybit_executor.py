@@ -130,15 +130,15 @@ class BybitExecutor:
         endpoint = "/v5/position/closed-pnl"
         all_pnl_records = []
         cursor = None
-        end_time_ms = int(time.time() * 1000)
         
-        logger.info(f"Pobieranie historii P&L (Trade/SL/TP) od {start_time_ms} do {end_time_ms}...")
+        # --- ZMIANA 1: Usuwamy end_time_ms i modyfikujemy log ---
+        logger.info(f"Pobieranie historii P&L (Trade/SL/TP) od timestampu {start_time_ms}...")
 
         while True:
             params = {
                 "category": "linear",
                 "startTime": start_time_ms,
-                "endTime": end_time_ms,
+                # "endTime": end_time_ms,  <--- KRYTYCZNE: Usuń lub zakomentuj tę linię
                 "limit": limit
             }
             if cursor:
@@ -164,16 +164,16 @@ class BybitExecutor:
         endpoint = "/v5/asset/delivery-record"
         all_liq_records = []
         cursor = None
-        end_time_ms = int(time.time() * 1000)
-
-        logger.info(f"Pobieranie historii LIKWIDACJI od {start_time_ms} do {end_time_ms}...")
+        
+        # --- ZMIANA 2: Usuwamy end_time_ms i modyfikujemy log ---
+        logger.info(f"Pobieranie historii LIKWIDACJI od timestampu {start_time_ms}...")
 
         while True:
             params = {
                 "category": "linear",
                 "type": "LIQUIDATION",
                 "startTime": start_time_ms,
-                "endTime": end_time_ms,
+                # "endTime": end_time_ms, <--- KRYTYCZNE: Usuń lub zakomentuj tę linię
                 "limit": limit
             }
             if cursor:
@@ -193,6 +193,7 @@ class BybitExecutor:
         
         logger.info(f"Pobrano {len(all_liq_records)} rekordów likwidacji.")
         return list(reversed(all_liq_records))
+
 
     def get_open_position_side(self, symbol: str) -> Optional[str]:
         api_symbol = symbol.replace('.P', '')
