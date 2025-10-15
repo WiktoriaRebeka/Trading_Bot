@@ -2,7 +2,6 @@
 
 import logging
 from typing import Dict, Any, Optional
-from datetime import datetime
 from google.cloud import bigquery
 from google.api_core.exceptions import GoogleAPICallError
 
@@ -11,49 +10,43 @@ from shared_lib import constants
 logger = logging.getLogger(__name__)
 
 bigquery_client: Optional[bigquery.Client] = None
-TABLE_REF: Optional[str] = None
-
-# Zgodnie z nową specyfikacją
-NEW_TRADES_HISTORY_SCHEMA = [
-    bigquery.SchemaField("analysis_id", "STRING", mode="REQUIRED"),
-    bigquery.SchemaField("symbol", "STRING", mode="REQUIRED"),
-    bigquery.SchemaField("direction", "STRING", mode="REQUIRED"),
-    bigquery.SchemaField("entry_price", "FLOAT", mode="REQUIRED"),
-    bigquery.SchemaField("sl_price", "FLOAT", mode="REQUIRED"),
-    bigquery.SchemaField("target_level", "STRING", mode="REQUIRED"),
-    bigquery.SchemaField("target_price", "FLOAT", mode="REQUIRED"),
-    bigquery.SchemaField("result", "STRING", mode="REQUIRED"),
-    bigquery.SchemaField("timestamp_alert", "TIMESTAMP", mode="REQUIRED"),
-    bigquery.SchemaField("timestamp_entry", "TIMESTAMP", mode="REQUIRED"),
-    bigquery.SchemaField("timestamp_close", "TIMESTAMP", mode="REQUIRED"),
-    bigquery.SchemaField("risk_percentage", "FLOAT", mode="NULLABLE", description="Procentowa odległość od ceny wejścia do SL, obliczona przy walidacji alertu."),
-]
+# --- POCZĄTEK ZMIANY ---
+ANALYTICAL_TABLE_REF: Optional[bigquery.TableReference] = None
+REAL_TRADES_TABLE_REF: Optional[bigquery.TableReference] = None
+# --- KONIEC ZMIANY ---
 
 def initialize_bigquery() -> bool:
-    global bigquery_client, TABLE_REF
+    global bigquery_client, ANALYTICAL_TABLE_REF, REAL_TRADES_TABLE_REF
     if bigquery_client is not None:
         logger.info("[BQ_INIT] Klient BigQuery jest już zainicjalizowany.")
         return True
     try:
         logger.info("[BQ_INIT] Próba inicjalizacji klienta BigQuery...")
         
-        # --- KLUCZOWA POPRAWKA: JAWNE OKREŚLENIE LOKALIZACJI ---
-        # Jeśli w konsoli BigQuery widzisz inną lokalizację, zmień ją tutaj.
         DATASET_LOCATION = "EU" 
-        
         client = bigquery.Client(location=DATASET_LOCATION)
-        # ---------------------------------------------------------
         
-        table_ref_str = f"{constants.BIGQUERY_PROJECT_ID}.{constants.BIGQUERY_DATASET_ID}.{constants.BIGQUERY_ANALYTICAL_TABLE_ID}"
-        client.get_table(table_ref_str) # Sprawdzenie, czy tabela istnieje
+        # --- POCZĄTEK ZMIANY ---
+        # Inicjalizujemy referencje do obu tabel
+        dataset_ref = client.dataset(constants.BIGQUERY_DATASET_ID)
+        
+        analytical_table_id = constants.BIGQUERY_ANALYTICAL_TABLE_ID
+        ANALYTICAL_TABLE_REF = dataset_ref.table(analytical_table_id)
+        client.get_table(ANALYTICAL_TABLE_REF) # Weryfikacja istnienia
+        logger.info(f"[BQ_INIT] Pomyślnie zweryfikowano tabelę analityczną: {analytical_table_id}")
+
+        real_trades_table_id = constants.BIGQUERY_REAL_TRADES_TABLE_ID
+        REAL_TRADES_TABLE_REF = dataset_ref.table(real_trades_table_id)
+        client.get_table(REAL_TRADES_TABLE_REF) # Weryfikacja istnienia
+        logger.info(f"[BQ_INIT] Pomyślnie zweryfikowano tabelę transakcji rzeczywistych: {real_trades_table_id}")
         
         bigquery_client = client
-        TABLE_REF = table_ref_str
-        logger.info(f"[BQ_INIT] Klient BigQuery pomyślnie zainicjalizowany. Tabela: {TABLE_REF}, Lokalizacja: {DATASET_LOCATION}")
+        logger.info(f"[BQ_INIT] Klient BigQuery pomyślnie zainicjalizowany. Lokalizacja: {DATASET_LOCATION}")
+        # --- KONIEC ZMIANY ---
         return True
     except Exception as e:
         logger.critical(f"[BQ_INIT] KRYTYCZNY BŁĄD: Inicjalizacja klienta BigQuery nie powiodła się: {e}", exc_info=True)
-        bigquery_client, TABLE_REF = None, None
+        bigquery_client, ANALYTICAL_TABLE_REF, REAL_TRADES_TABLE_REF = None, None, None
         return False
 
 def get_bigquery_client() -> bigquery.Client:
@@ -63,9 +56,6 @@ def get_bigquery_client() -> bigquery.Client:
     return bigquery_client
 
 def log_analysis_result(result_data: Dict[str, Any]):
-    """
-    Zapisuje pojedynczy, atomowy wynik rozstrzygnięcia scenariusza do BigQuery.
-    """
     analysis_id = result_data.get('analysis_id')
     logger.info(f"[BQ_LOGGER][{analysis_id}] Rozpoczynam proces zapisu wyniku do BigQuery.")
     try:
@@ -76,7 +66,9 @@ def log_analysis_result(result_data: Dict[str, Any]):
 
     try:
         rows_to_insert = [result_data]
-        errors = client.insert_rows_json(TABLE_REF, rows_to_insert)
+        # --- POCZĄTEK ZMIANY ---
+        errors = client.insert_rows_json(ANALYTICAL_TABLE_REF, rows_to_insert)
+        # --- KONIEC ZMIANY ---
         if not errors:
             logger.info(f"[BQ_LOGGER][{analysis_id}] SUKCES! Pomyślnie wstawiono wiersz dla targetu {result_data.get('target_level')}.")
         else:
