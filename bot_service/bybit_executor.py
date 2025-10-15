@@ -29,7 +29,7 @@ class BybitExecutor:
         self.session = requests.Session()
         logger.info(f"BybitExecutor zainicjalizowany. Tryb Testnet: {testnet}. URL: {self.base_url}")
 
-def _send_request(self, method: str, endpoint: str, params: Optional[Dict] = None) -> Dict[str, Any]:
+    def _send_request(self, method: str, endpoint: str, params: Optional[Dict] = None) -> Dict[str, Any]:
         timestamp = str(int(time.time() * 1000))
         recv_window = "10000"
         
@@ -68,10 +68,8 @@ def _send_request(self, method: str, endpoint: str, params: Optional[Dict] = Non
             response.raise_for_status()
             data = response.json()
 
-            # --- POCZĄTEK KRYTYCZNEJ ZMIANY DIAGNOSTYCZNEJ ---
             # Logujemy PEŁNĄ odpowiedź z serwera, zanim cokolwiek z niej wyciągniemy.
             logger.info(f"Pełna surowa odpowiedź z Bybit dla {endpoint}: {data}")
-            # --- KONIEC KRYTYCZNEJ ZMIANY DIAGNOSTYCZNEJ ---
 
             if data.get("retCode") != 0:
                 raise BybitAPIError(ret_code=data.get("retCode"), ret_msg=data.get("retMsg"))
@@ -136,14 +134,12 @@ def _send_request(self, method: str, endpoint: str, params: Optional[Dict] = Non
         all_pnl_records = []
         cursor = None
         
-        # --- ZMIANA 1: Usuwamy end_time_ms i modyfikujemy log ---
         logger.info(f"Pobieranie historii P&L (Trade/SL/TP) od timestampu {start_time_ms}...")
 
         while True:
             params = {
                 "category": "linear",
                 "startTime": start_time_ms,
-                # "endTime": end_time_ms,  <--- KRYTYCZNE: Usuń lub zakomentuj tę linię
                 "limit": limit
             }
             if cursor:
@@ -165,12 +161,10 @@ def _send_request(self, method: str, endpoint: str, params: Optional[Dict] = Non
         return list(reversed(all_pnl_records))
 
     def get_liquidation_history(self, start_time_ms: int, limit: int = 50) -> List[Dict[str, Any]]:
-        """Pobiera historię likwidacji z dedykowanego endpointu."""
         endpoint = "/v5/asset/delivery-record"
         all_liq_records = []
         cursor = None
         
-        # --- ZMIANA 2: Usuwamy end_time_ms i modyfikujemy log ---
         logger.info(f"Pobieranie historii LIKWIDACJI od timestampu {start_time_ms}...")
 
         while True:
@@ -178,7 +172,6 @@ def _send_request(self, method: str, endpoint: str, params: Optional[Dict] = Non
                 "category": "linear",
                 "type": "LIQUIDATION",
                 "startTime": start_time_ms,
-                # "endTime": end_time_ms, <--- KRYTYCZNE: Usuń lub zakomentuj tę linię
                 "limit": limit
             }
             if cursor:
@@ -198,7 +191,6 @@ def _send_request(self, method: str, endpoint: str, params: Optional[Dict] = Non
         
         logger.info(f"Pobrano {len(all_liq_records)} rekordów likwidacji.")
         return list(reversed(all_liq_records))
-
 
     def get_open_position_side(self, symbol: str) -> Optional[str]:
         api_symbol = symbol.replace('.P', '')
@@ -246,7 +238,6 @@ def _send_request(self, method: str, endpoint: str, params: Optional[Dict] = Non
             logger.critical(f"[{symbol}] Nieoczekiwany błąd podczas czyszczenia otwartych zleceń: {e}", exc_info=True)
             return False
 
-    # Pozostałe funkcje pomocnicze bez zmian
     def get_latest_ticker_price(self, symbol: str) -> Optional[float]:
         api_symbol = symbol.replace('.P', '')
         params = {"category": "linear", "symbol": api_symbol}
