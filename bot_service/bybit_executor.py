@@ -68,7 +68,6 @@ class BybitExecutor:
             response.raise_for_status()
             data = response.json()
 
-            # Logujemy PEŁNĄ odpowiedź z serwera, zanim cokolwiek z niej wyciągniemy.
             logger.info(f"Pełna surowa odpowiedź z Bybit dla {endpoint}: {data}")
 
             if data.get("retCode") != 0:
@@ -129,36 +128,31 @@ class BybitExecutor:
             logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD podczas składania zlecenia. Błąd: {e}", exc_info=True)
             raise
 
-def get_closed_pnl_history(self, start_time_ms: int, limit: int = 50) -> List[Dict[str, Any]]:
-        # --- POCZĄTEK KRYTYCZNEJ POPRAWKI: ZMIANA ENDPOINTU NA v2 ---
+    def get_closed_pnl_history(self, start_time_ms: int, limit: int = 50) -> List[Dict[str, Any]]:
         logger.warning("Używam endpointu /v2/private/trade/list dla kompatybilności ze standardowymi kontami. To jest celowe działanie.")
         endpoint = "/v2/private/trade/list"
         all_pnl_records = []
         
-        # API v2 używa sekund, a nie milisekund
         start_time_s = int(start_time_ms / 1000)
-
-        # API v2 używa paginacji opartej na numerach stron
         page = 1
+        
         while True:
             params = {
-                "symbol": "BTCUSDT", # Ten endpoint wymaga podania dowolnego symbolu, nawet jeśli pobieramy dla wszystkich
+                "symbol": "BTCUSDT",
                 "start_time": start_time_s,
                 "limit": limit,
                 "page": page
             }
 
             try:
-                # UWAGA: API v2 zwraca dane w innej strukturze
                 result_v2 = self._send_request("GET", endpoint, params=params)
                 trade_list = result_v2.get('trade_list', [])
                 
                 if not trade_list:
-                    break # Koniec danych
+                    break
 
-                # Transformujemy odpowiedź z v2 na format, którego oczekuje reszta naszej aplikacji (jak v5)
                 for trade in trade_list:
-                    if trade.get('closed_size', 0) > 0: # Interesują nas tylko zamknięte pozycje
+                    if trade.get('closed_size', 0) > 0:
                         transformed_record = {
                             "symbol": trade.get("symbol"),
                             "orderId": trade.get("order_id"),
@@ -169,15 +163,13 @@ def get_closed_pnl_history(self, start_time_ms: int, limit: int = 50) -> List[Di
                             "closedPnl": str(trade.get("closed_pnl")),
                             "cumCommission": str(trade.get("commission")),
                             "leverage": str(trade.get("leverage")),
-                            # API v2 używa sekund, konwertujemy na milisekundy dla spójności
                             "createdTime": str(trade.get("created_at_e6") // 1000), 
-                            "updatedTime": str(trade.get("created_at_e6") // 1000), # Używamy tego samego czasu jako czasu zamknięcia
-                            "exitType": "Trade" # API v2 nie podaje typu wyjścia, więc używamy generycznego
+                            "updatedTime": str(trade.get("created_at_e6") // 1000),
+                            "exitType": "Trade"
                         }
                         all_pnl_records.append(transformed_record)
                 
                 page += 1
-                # Ograniczenie, aby uniknąć nieskończonej pętli w razie błędu
                 if page > 20: 
                     logger.warning("Osiągnięto limit 20 stron paginacji dla API v2. Przerywam.")
                     break
@@ -188,7 +180,6 @@ def get_closed_pnl_history(self, start_time_ms: int, limit: int = 50) -> List[Di
         
         logger.info(f"Pobrano {len(all_pnl_records)} rekordów P&L z endpointu v2.")
         return list(reversed(all_pnl_records))
-    # --- KONIEC KRYTYCZNEJ POPRAWKI ---
 
     def get_liquidation_history(self, start_time_ms: int, limit: int = 50) -> List[Dict[str, Any]]:
         endpoint = "/v5/asset/delivery-record"
