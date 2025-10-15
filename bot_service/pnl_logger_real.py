@@ -1,19 +1,23 @@
+
+# Lokalizacja: bot_service/pnl_logger_real.py
+
+
 import logging
 from typing import Dict, Any
 from datetime import datetime, timezone
 from google.cloud import bigquery
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal
 
-from bot_service import state_manager 
-from bot_service.bigquery_logger import get_bigquery_client, initialize_bigquery
+# --- POCZĄTEK POPRAWKI 1: Poprawny import ---
+# Importujemy właściwą referencję do tabeli (obiekt), a nie tylko funkcje.
+from bot_service.bigquery_logger import get_bigquery_client, initialize_bigquery, REAL_TRADES_TABLE_REF
+# --- KONIEC POPRAWKI 1 ---
+
 from shared_lib import constants
 
 logger = logging.getLogger(__name__)
 
-# --- POCZĄTEK KRYTYCZNEJ POPRAWKI ---
-# Definiujemy pełną i jednoznaczną ścieżkę do WŁAŚCIWEJ tabeli.
-REAL_TABLE_REF_STR = f"{constants.BIGQUERY_PROJECT_ID}.{constants.BIGQUERY_DATASET_ID}.{constants.BIGQUERY_REAL_TRADES_TABLE_ID}"
-# --- KONIEC KRYTYCZNEJ POPRAWKI ---
+# Zmienna REAL_TABLE_REF_STR jest już niepotrzebna, ponieważ używamy obiektu z bigquery_logger.
 
 REAL_TRADES_HISTORY_SCHEMA = [
     bigquery.SchemaField("alert_id", "STRING", mode="REQUIRED"),
@@ -139,10 +143,10 @@ def log_real_trade_result(enriched_pnl_data: Dict[str, Any], active_order_data: 
             extra={"json_fields": {"bq_payload": transformed_data}}
         )
         
-        # --- POCZĄTEK KRYTYCZNEJ POPRAWKI ---
-        # Używamy jawnie zdefiniowanej, poprawnej referencji do tabeli.
-        errors = client.insert_rows_json(REAL_TABLE_REF_STR, [transformed_data])
-        # --- KONIEC KRYTYCZNEJ POPRAWKI ---
+        # --- POCZĄTEK POPRAWKI 2: Użycie obiektu TableReference ---
+        # Używamy zaimportowanego obiektu TableReference, który "pamięta" lokalizację "EU".
+        errors = client.insert_rows_json(REAL_TRADES_TABLE_REF, [transformed_data])
+        # --- KONIEC POPRAWKI 2 ---
 
         if not errors:
             logger.info(f"{log_prefix} SUKCES! Pomyślnie zapisano realny wynik transakcji do BigQuery.")
