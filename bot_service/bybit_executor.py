@@ -29,7 +29,7 @@ class BybitExecutor:
         self.session = requests.Session()
         logger.info(f"BybitExecutor zainicjalizowany. Tryb Testnet: {testnet}. URL: {self.base_url}")
 
-    def _send_request(self, method: str, endpoint: str, params: Optional[Dict] = None) -> Dict[str, Any]:
+def _send_request(self, method: str, endpoint: str, params: Optional[Dict] = None) -> Dict[str, Any]:
         timestamp = str(int(time.time() * 1000))
         recv_window = "10000"
         
@@ -67,6 +67,11 @@ class BybitExecutor:
 
             response.raise_for_status()
             data = response.json()
+
+            # --- POCZĄTEK KRYTYCZNEJ ZMIANY DIAGNOSTYCZNEJ ---
+            # Logujemy PEŁNĄ odpowiedź z serwera, zanim cokolwiek z niej wyciągniemy.
+            logger.info(f"Pełna surowa odpowiedź z Bybit dla {endpoint}: {data}")
+            # --- KONIEC KRYTYCZNEJ ZMIANY DIAGNOSTYCZNEJ ---
 
             if data.get("retCode") != 0:
                 raise BybitAPIError(ret_code=data.get("retCode"), ret_msg=data.get("retMsg"))
