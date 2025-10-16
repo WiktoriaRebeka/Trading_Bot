@@ -6,13 +6,33 @@ from datetime import datetime, timezone
 from google.cloud import bigquery
 from decimal import Decimal
 
-from bot_service import bigquery_logger
+from bot_service import bigquery_logger, state_manager
 from shared_lib import constants
 
 logger = logging.getLogger(__name__)
 
-def check_if_order_exists_in_bq(order_id: str) -> bool:
-    """Sprawdza, czy order_id już istnieje w tabeli real_trades_history."""
+# Nowa kolekcja w Firestore do śledzenia przetworzonych ID
+PROCESSED_IDS_COLLECTION = "processed_order_ids"
+
+def check_if_order_processed(order_id: str) -> bool:
+    """
+    Nowa, niezawodna funkcja do sprawdzania duplikatów.
+    Krok 1: Sprawdza szybki cache w Firestore.
+    Krok 2: Jeśli nie ma w cache'u, sprawdza BigQuery jako zabezpieczenie.
+    """
+    # Krok 1: Sprawdzenie w cache'u Firestore
+    try:
+        db = state_manager._get_db()
+        doc_ref = db.collection(PROCESSED_IDS_COLLECTION).document(order_id)
+        if doc_ref.get().exists:
+            logger.warning(f"[PNL_DUPLICATE_CHECK][CACHE] Znaleziono wpis dla order_id: {order_id} w cache'u Firestore. Pomijam.")
+            return True
+    except Exception as e:
+        logger.error(f"[PNL_DUPLICATE_CHECK][CACHE] Błąd podczas sprawdzania cache'a dla order_id {order_id}: {e}", exc_info=True)
+        # W przypadku błędu cache'a, dla bezpieczeństwa przechodzimy do sprawdzenia BQ
+        pass
+
+    # Krok 2: Sprawdzenie w BigQuery (jako druga linia obrony)
     try:
         client = bigquery_logger.get_bigquery_client()
         query = f"""
@@ -28,12 +48,26 @@ def check_if_order_exists_in_bq(order_id: str) -> bool:
         
         for row in results:
             if row.count > 0:
-                logger.warning(f"[PNL_DUPLICATE_CHECK] Znaleziono już wpis dla order_id: {order_id}. Pomijam zapis.")
+                logger.warning(f"[PNL_DUPLICATE_CHECK][BQ] Znaleziono wpis dla order_id: {order_id} w BigQuery. Pomijam zapis i aktualizuję cache.")
+                # Jeśli znaleziono w BQ, ale nie w cache'u, naprawiamy cache
+                mark_order_as_processed(order_id)
                 return True
         return False
     except Exception as e:
-        logger.error(f"[PNL_DUPLICATE_CHECK] Błąd podczas sprawdzania istnienia order_id {order_id}: {e}", exc_info=True)
-        return True # Na wszelki wypadek, jeśli sprawdzenie zawiedzie, nie zapisujemy
+        logger.error(f"[PNL_DUPLICATE_CHECK][BQ] Błąd podczas sprawdzania istnienia order_id {order_id} w BQ: {e}", exc_info=True)
+        # Jeśli nawet sprawdzenie BQ zawiedzie, na wszelki wypadek nie zapisujemy
+        return True
+
+def mark_order_as_processed(order_id: str):
+    """Zapisuje ID zlecenia w cache'u Firestore, aby oznaczyć je jako przetworzone."""
+    try:
+        db = state_manager._get_db()
+        doc_ref = db.collection(PROCESSED_IDS_COLLECTION).document(order_id)
+        doc_ref.set({"processed_at": datetime.now(timezone.utc)})
+        logger.info(f"[PNL_CACHE_UPDATE] Pomyślnie oznaczono order_id {order_id} jako przetworzony w cache'u.")
+    except Exception as e:
+        logger.error(f"[PNL_CACHE_UPDATE] Błąd podczas oznaczania order_id {order_id} jako przetworzony: {e}", exc_info=True)
+
 
 def log_real_trade_result(enriched_pnl_data: Dict[str, Any], active_order_data: Dict[str, Any]):
     order_id = enriched_pnl_data.get("orderId", "unknown")
@@ -44,10 +78,10 @@ def log_real_trade_result(enriched_pnl_data: Dict[str, Any], active_order_data: 
         logger.error(f"{log_prefix} BigQuery nie zostało zainicjalizowane – pomijam zapis.")
         return
 
-    # --- OSTATECZNA POPRAWKA: ZABEZPIECZENIE PRZED DUPLIKATAMI ---
-    if check_if_order_exists_in_bq(order_id):
+    # --- UŻYCIE NOWEJ, NIEZAWODNEJ FUNKCJI DEDUPLIKACJI ---
+    if check_if_order_processed(order_id):
         return
-    # --- KONIEC POPRAWKI ---
+    # --- KONIEC ZMIANY ---
 
     logger.info(
         f"{log_prefix} Otrzymano dane do przetworzenia i zapisu.", 
@@ -58,8 +92,6 @@ def log_real_trade_result(enriched_pnl_data: Dict[str, Any], active_order_data: 
     )
 
     try:
-        # ... reszta funkcji log_real_trade_result pozostaje BEZ ZMIAN ...
-        # (cała logika transformacji danych jest poprawna)
         if enriched_pnl_data.get('avgEntryPrice') is None and active_order_data.get('final_entry_price'):
             enriched_pnl_data['avgEntryPrice'] = active_order_data['final_entry_price']
             logger.warning(f"{log_prefix} Uzupełniono brakującą cenę wejścia z danych zlecenia (prawdopodobnie likwidacja).")
@@ -143,6 +175,8 @@ def log_real_trade_result(enriched_pnl_data: Dict[str, Any], active_order_data: 
 
         if not errors:
             logger.info(f"{log_prefix} SUKCES! Pomyślnie zapisano realny wynik transakcji do BigQuery.")
+            # --- AKTUALIZACJA CACHE'A PO POMYŚLNYM ZAPISIE ---
+            mark_order_as_processed(order_id)
         else:
             logger.error(f"{log_prefix} Błąd podczas wstawiania wierszy do BigQuery: {errors}")
     except Exception as e:
