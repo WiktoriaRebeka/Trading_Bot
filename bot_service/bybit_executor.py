@@ -8,7 +8,7 @@ import json
 from typing import Dict, Any, Optional, List
 from urllib.parse import urlencode
 import requests
-from requests.exceptions import RequestException
+from requests.exceptions import RequestException, JSONDecodeError
 
 logger = logging.getLogger(__name__)
 
@@ -66,8 +66,12 @@ class BybitExecutor:
                 response = self.session.post(full_url, headers=headers, data=payload_string, timeout=15)
 
             response.raise_for_status()
+            
+            if not response.text:
+                logger.warning(f"Otrzymano pustą odpowiedź od Bybit dla endpointu {endpoint}. Traktuję jako brak danych.")
+                return {}
+            
             data = response.json()
-
             logger.info(f"Pełna surowa odpowiedź z Bybit dla {endpoint}: {data}")
 
             if data.get("retCode") != 0:
@@ -75,6 +79,9 @@ class BybitExecutor:
             
             return data.get("result", {})
             
+        except JSONDecodeError:
+            logger.error(f"Błąd dekodowania JSON z Bybit dla endpointu {endpoint}. Odpowiedź nie była poprawnym JSON-em. Treść: {response.text}")
+            raise
         except RequestException as e:
             logger.error(f"Błąd sieciowy podczas komunikacji z Bybit. Endpoint: {endpoint}, Błąd: {e}")
             raise
@@ -129,56 +136,34 @@ class BybitExecutor:
             raise
 
     def get_closed_pnl_history(self, start_time_ms: int, limit: int = 50) -> List[Dict[str, Any]]:
-        logger.warning("Używam endpointu /v2/private/trade/list dla kompatybilności ze standardowymi kontami. To jest celowe działanie.")
-        endpoint = "/v2/private/trade/list"
+        endpoint = "/v5/position/closed-pnl"
         all_pnl_records = []
+        cursor = None
         
-        start_time_s = int(start_time_ms / 1000)
-        page = 1
-        
+        logger.info(f"Pobieranie historii P&L (Trade/SL/TP) od timestampu {start_time_ms}...")
+
         while True:
             params = {
-                "symbol": "BTCUSDT",
-                "start_time": start_time_s,
-                "limit": limit,
-                "page": page
+                "category": "linear",
+                "startTime": start_time_ms,
+                "limit": limit
             }
+            if cursor:
+                params["cursor"] = cursor
 
             try:
-                result_v2 = self._send_request("GET", endpoint, params=params)
-                trade_list = result_v2.get('trade_list', [])
-                
-                if not trade_list:
+                result = self._send_request("GET", endpoint, params=params)
+                pnl_list = result.get('list', [])
+                if pnl_list:
+                    all_pnl_records.extend(pnl_list)
+                cursor = result.get('nextPageCursor')
+                if not cursor:
                     break
-
-                for trade in trade_list:
-                    if trade.get('closed_size', 0) > 0:
-                        transformed_record = {
-                            "symbol": trade.get("symbol"),
-                            "orderId": trade.get("order_id"),
-                            "side": trade.get("side"),
-                            "qty": str(trade.get("closed_size")),
-                            "avgEntryPrice": str(trade.get("avg_entry_price")),
-                            "avgExitPrice": str(trade.get("avg_exit_price")),
-                            "closedPnl": str(trade.get("closed_pnl")),
-                            "cumCommission": str(trade.get("commission")),
-                            "leverage": str(trade.get("leverage")),
-                            "createdTime": str(trade.get("created_at_e6") // 1000), 
-                            "updatedTime": str(trade.get("created_at_e6") // 1000),
-                            "exitType": "Trade"
-                        }
-                        all_pnl_records.append(transformed_record)
-                
-                page += 1
-                if page > 20: 
-                    logger.warning("Osiągnięto limit 20 stron paginacji dla API v2. Przerywam.")
-                    break
-
             except (RequestException, BybitAPIError) as e:
-                logger.error(f"Błąd podczas pobierania strony historii P&L z API v2: {e}.")
+                logger.error(f"Błąd podczas pobierania strony historii P&L: {e}.")
                 break
         
-        logger.info(f"Pobrano {len(all_pnl_records)} rekordów P&L z endpointu v2.")
+        logger.info(f"Pobrano {len(all_pnl_records)} rekordów P&L.")
         return list(reversed(all_pnl_records))
 
     def get_liquidation_history(self, start_time_ms: int, limit: int = 50) -> List[Dict[str, Any]]:
