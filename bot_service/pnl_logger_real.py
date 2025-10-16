@@ -1,6 +1,4 @@
-
 # Lokalizacja: bot_service/pnl_logger_real.py
-
 
 import logging
 from typing import Dict, Any
@@ -8,16 +6,14 @@ from datetime import datetime, timezone
 from google.cloud import bigquery
 from decimal import Decimal
 
-# --- POCZĄTEK POPRAWKI 1: Poprawny import ---
-# Importujemy właściwą referencję do tabeli (obiekt), a nie tylko funkcje.
-from bot_service.bigquery_logger import get_bigquery_client, initialize_bigquery, REAL_TRADES_TABLE_REF
+# --- POCZĄTEK POPRAWKI 1: Zmiana sposobu importu ---
+# Importujemy cały moduł, a nie poszczególne zmienne, aby uniknąć problemu z kopiami.
+from bot_service import bigquery_logger
 # --- KONIEC POPRAWKI 1 ---
 
 from shared_lib import constants
 
 logger = logging.getLogger(__name__)
-
-# Zmienna REAL_TABLE_REF_STR jest już niepotrzebna, ponieważ używamy obiektu z bigquery_logger.
 
 REAL_TRADES_HISTORY_SCHEMA = [
     bigquery.SchemaField("alert_id", "STRING", mode="REQUIRED"),
@@ -47,7 +43,7 @@ REAL_TRADES_HISTORY_SCHEMA = [
 
 
 def log_real_trade_result(enriched_pnl_data: Dict[str, Any], active_order_data: Dict[str, Any]):
-    if not initialize_bigquery():
+    if not bigquery_logger.initialize_bigquery():
         logger.error("[PNL_REAL_SAVE] BigQuery nie zostało zainicjalizowane – pomijam zapis.")
         return
 
@@ -137,15 +133,15 @@ def log_real_trade_result(enriched_pnl_data: Dict[str, Any], active_order_data: 
         return
 
     try:
-        client = get_bigquery_client()
+        client = bigquery_logger.get_bigquery_client()
         logger.info(
             f"{log_prefix} Przygotowano dane do zapisu w BigQuery. Próba wstawienia...", 
             extra={"json_fields": {"bq_payload": transformed_data}}
         )
         
-        # --- POCZĄTEK POPRAWKI 2: Użycie obiektu TableReference ---
-        # Używamy zaimportowanego obiektu TableReference, który "pamięta" lokalizację "EU".
-        errors = client.insert_rows_json(REAL_TRADES_TABLE_REF, [transformed_data])
+        # --- POCZĄTEK POPRAWKI 2: Użycie referencji przez moduł ---
+        # Odwołujemy się do zmiennej przez jej moduł, aby uzyskać aktualną wartość.
+        errors = client.insert_rows_json(bigquery_logger.REAL_TRADES_TABLE_REF, [transformed_data])
         # --- KONIEC POPRAWKI 2 ---
 
         if not errors:
