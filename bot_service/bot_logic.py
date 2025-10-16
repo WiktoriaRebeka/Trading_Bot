@@ -186,7 +186,6 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
 
     current_cycle_start_time = datetime.now(timezone.utc)
     
-    # Wprowadzamy bufor bezpieczeństwa
     start_time_with_buffer = last_check_ts_dt - timedelta(seconds=65)
     logger.info(f"[PNL_LOGGER] Sprawdzam zamknięte pozycje od: {start_time_with_buffer.isoformat()} (z 65s buforem).")
     
@@ -220,9 +219,11 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
             updated_time_ms = int(pnl_record.get("updatedTime", 0))
             record_ts_dt = datetime.fromtimestamp(updated_time_ms / 1000, tz=timezone.utc)
 
-            if record_ts_dt <= last_check_ts_dt:
+            # --- OSTATECZNA POPRAWKA: Zmiana z <= na < ---
+            if record_ts_dt < last_check_ts_dt:
                 logger.info(f"[PNL_LOGGER] Pomijam stary rekord (już przetworzony) dla {symbol} [OrderID: {order_id}] z czasu {record_ts_dt.isoformat()}")
                 continue
+            # --- KONIEC OSTATECZNEJ POPRAWKI ---
 
             logger.info(f"[PNL_LOGGER] Przetwarzanie NOWEGO rekordu dla {symbol} [OrderID: {order_id}]")
             
