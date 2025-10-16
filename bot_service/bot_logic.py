@@ -176,110 +176,128 @@ def _transform_liquidation_record(liq_record: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def log_closed_positions_pnl(executor: BybitExecutor) -> int:
-    logger.info("[PNL_LOGGER] Rozpoczynam cykl logowania PnL (w tym likwidacji).")
-    
-    last_check_ts_dt = load_last_processed_timestamp("pnl_logger_last_fetch_state")
-    if not last_check_ts_dt:
-        logger.warning("[PNL_LOGGER] Nie udało się załadować ostatniego znacznika czasu. Używam domyślnego (24h w przeszłość).")
-        last_check_ts_dt = datetime.now(timezone.utc) - timedelta(hours=24)
+def log_real_trade_result(enriched_pnl_data: Dict[str, Any], active_order_data: Dict[str, Any]) -> bool:
+    """
+    Przetwarza, transformuje i zapisuje wynik transakcji do BigQuery.
+    Implementuje logikę deduplikacji opartą na cache'u w Firestore.
 
-    current_cycle_start_time = datetime.now(timezone.utc)
-    
-    # Utrzymujemy duży bufor, aby łapać opóźnione transakcje. 24 godziny to bezpieczny zakres.
-    LOOKBACK_BUFFER_HOURS = 24
-    start_time_with_buffer = last_check_ts_dt - timedelta(hours=LOOKBACK_BUFFER_HOURS)
-    logger.info(f"[PNL_LOGGER] Sprawdzam zamknięte pozycje od: {start_time_with_buffer.isoformat()} (z {LOOKBACK_BUFFER_HOURS}h buforem).")
-    
-    start_time_ms = int(start_time_with_buffer.timestamp() * 1000)
-    
-    all_records = []
+    Returns:
+        bool: True, jeśli rekord został pomyślnie zapisany.
+              False, jeśli rekord był duplikatem lub wystąpił błąd.
+    """
+    order_id = enriched_pnl_data.get("orderId", "unknown")
+    symbol = enriched_pnl_data.get("symbol", "unknown")
+    log_prefix = f"[PNL_REAL_SAVE][{symbol}|{order_id}]"
+
+    if not bigquery_logger.initialize_bigquery():
+        logger.error(f"{log_prefix} BigQuery nie zostało zainicjalizowane – pomijam zapis.")
+        return False
+
+    # --- UŻYCIE NOWEJ, NIEZAWODNEJ FUNKCJI DEDUPLIKACJI ---
+    if check_if_order_processed(order_id):
+        return False  # Zwróć False, jeśli to duplikat
+    # --- KONIEC ZMIANY ---
+
+    logger.info(
+        f"{log_prefix} Otrzymano nowe dane do przetworzenia i zapisu.", 
+        extra={"json_fields": {
+            "pnl_data": enriched_pnl_data,
+            "active_order_data": active_order_data
+        }}
+    )
+
     try:
-        pnl_records = executor.get_closed_pnl_history(start_time_ms=start_time_ms)
-        all_records.extend(pnl_records)
+        if enriched_pnl_data.get('avgEntryPrice') is None and active_order_data.get('final_entry_price'):
+            enriched_pnl_data['avgEntryPrice'] = active_order_data['final_entry_price']
+            logger.warning(f"{log_prefix} Uzupełniono brakującą cenę wejścia z danych zlecenia (prawdopodobnie likwidacja).")
 
-        liq_records_raw = executor.get_liquidation_history(start_time_ms=start_time_ms)
-        liq_records_transformed = [_transform_liquidation_record(rec) for rec in liq_records_raw]
-        all_records.extend(liq_records_transformed)
+        qty = Decimal(enriched_pnl_data.get("qty", "0.0"))
+        avg_entry_price = Decimal(enriched_pnl_data.get("avgEntryPrice", "0.0"))
+        avg_exit_price = Decimal(enriched_pnl_data.get("avgExitPrice", "0.0"))
+        net_pnl = Decimal(enriched_pnl_data.get("closedPnl") or "0.0")
+        commission = Decimal(enriched_pnl_data.get("cumCommission") or "0.0")
+        leverage_str = enriched_pnl_data.get("leverage")
+        leverage = int(float(leverage_str)) if leverage_str else None
 
-    except Exception as e:
-        logger.critical(f"[PNL_LOGGER] Krytyczny błąd podczas pobierania historii z Bybit: {e}", exc_info=True)
-        return 0
+        entry_value = qty * avg_entry_price
+        exit_value = qty * avg_exit_price
+        gross_pnl = net_pnl + commission
 
-    processed_count = 0
-    
-    if all_records:
-        logger.info(f"[PNL_LOGGER] Znaleziono łącznie {len(all_records)} zamkniętych pozycji (w tym likwidacje). Rozpoczynam przetwarzanie.")
-        
-        pnl_records_sorted = sorted(all_records, key=lambda r: int(r.get("updatedTime", 0)))
-        
-        last_processed_record_in_cycle = None
+        entry_price_from_order = active_order_data.get("final_entry_price")
+        sl_price_from_order = active_order_data.get("final_sl_price")
+        tp_price_from_order = active_order_data.get("final_tp_price")
+        tp_price_chart_from_order = active_order_data.get("tp_price_chart")
 
-        for pnl_record in pnl_records_sorted:
-            order_id = pnl_record.get("orderId", "N/A")
-            symbol = pnl_record.get("symbol", "N/A")
-            updated_time_ms = int(pnl_record.get("updatedTime", 0))
-            record_ts_dt = datetime.fromtimestamp(updated_time_ms / 1000, tz=timezone.utc)
+        sl_price_final = Decimal(str(sl_price_from_order)) if sl_price_from_order is not None else Decimal("0.0")
 
-            if record_ts_dt < last_check_ts_dt:
-                logger.info(f"[PNL_LOGGER] Pomijam stary rekord (z bufora) dla {symbol} [OrderID: {order_id}] z czasu {record_ts_dt.isoformat()}")
-                pass
+        planned_risk_usdt = Decimal("0.0")
+        realized_rrr = Decimal("0.0")
 
-            logger.info(f"[PNL_LOGGER] Przetwarzanie rekordu dla {symbol} [OrderID: {order_id}]")
+        if sl_price_final > 0 and avg_entry_price > 0:
+            risk_per_unit = abs(avg_entry_price - sl_price_final)
+            planned_risk_usdt = risk_per_unit * qty
             
-            try:
-                if not symbol or symbol == "N/A" or order_id == "N/A":
-                    logger.warning("[PNL_LOGGER] Pominięto rekord bez symbolu lub orderId.", extra={"json_fields": {"pnl_record": pnl_record}})
-                    continue
-
-                # --- NOWA, POPRAWIONA LOGIKA DOPASOWANIA ---
-                logger.info(f"[PNL_LOGGER] Próba znalezienia dopasowania dla orderId '{order_id}' w active_orders...")
-                active_order_data = state_manager.get_active_order_by_id(order_id)
-                
-                if active_order_data:
-                    logger.info(f"[PNL_LOGGER] SUKCES: Znaleziono dopasowanie dla orderId {order_id} w Firestore.")
-                    alert_id = active_order_data.get('alert_id', 'MATCHED_NO_ALERT_ID')
-                else:
-                    logger.warning(f"[PNL_LOGGER] BRAK DOPASOWANIA dla orderId {order_id}. Transakcja zostanie zalogowana jako 'UNMATCHED'.")
-                    active_order_data = {}
-                    alert_id = 'UNMATCHED_OR_MANUAL'
-                # --- KONIEC NOWEJ LOGIKI DOPASOWANIA ---
-
-                enriched_pnl_data = pnl_record.copy()
-                enriched_pnl_data['alert_id'] = alert_id
-                
-                log_real_trade_result(enriched_pnl_data, active_order_data)
-                processed_count += 1
-                
-                # Usuwamy dokument z active_orders tylko jeśli go znaleźliśmy
-                if active_order_data:
-                    logger.info(f"[PNL_LOGGER] Usuwanie zlecenia {order_id} z kolekcji active_orders.")
-                    state_manager.delete_active_order_by_id(order_id)
-
-                last_processed_record_in_cycle = pnl_record
-
-            except Exception as e:
-                logger.error(f"[PNL_LOGGER] Krytyczny błąd podczas przetwarzania rekordu dla symbolu {symbol}. Rekord zostanie pominięty. Błąd: {e}", exc_info=True, extra={"json_fields": {"pnl_record": pnl_record}})
-                continue
+            if planned_risk_usdt > 0:
+                realized_rrr = (net_pnl / planned_risk_usdt)
         
-        if last_processed_record_in_cycle:
-            last_ts_ms = int(last_processed_record_in_cycle.get("updatedTime", 0))
-            last_ts_dt = datetime.fromtimestamp(last_ts_ms / 1000, tz=timezone.utc)
-            
-            final_timestamp_to_save = max(last_ts_dt, current_cycle_start_time)
-            
-            save_last_processed_timestamp(final_timestamp_to_save, "pnl_logger_last_fetch_state")
-            logger.info(f"[PNL_LOGGER] Zakończono cykl. Przetworzono {processed_count} rekordów. Zaktualizowano znacznik czasu na {final_timestamp_to_save.isoformat()}.")
+        PRECISION = Decimal('0.00000001')
+
+        final_direction = "UNKNOWN"
+        if active_order_data.get("direction"):
+            final_direction = active_order_data.get("direction")
+        elif enriched_pnl_data.get("side") == "Buy":
+            final_direction = "LONG"
+        elif enriched_pnl_data.get("side") == "Sell":
+            final_direction = "SHORT"
+
+        transformed_data = {
+            "alert_id": enriched_pnl_data.get("alert_id", "unknown"),
+            "order_id": order_id,
+            "symbol": symbol,
+            "direction": final_direction,
+            "qty": float(qty.quantize(PRECISION)),
+            "leverage": leverage,
+            "avg_entry_price": float(avg_entry_price.quantize(PRECISION)),
+            "avg_exit_price": float(avg_exit_price.quantize(PRECISION)),
+            "entry_value_usdt": float(entry_value.quantize(PRECISION)),
+            "exit_value_usdt": float(exit_value.quantize(PRECISION)),
+            "gross_pnl_usdt": float(gross_pnl.quantize(PRECISION)),
+            "commission_usdt": float(commission.quantize(PRECISION)),
+            "net_pnl_usdt": float(net_pnl.quantize(PRECISION)),
+            "exit_type": enriched_pnl_data.get("exitType"),
+            "timestamp_entry": datetime.fromtimestamp(int(enriched_pnl_data.get("createdTime")) / 1000, tz=timezone.utc).isoformat(),
+            "timestamp_close": datetime.fromtimestamp(int(enriched_pnl_data.get("updatedTime")) / 1000, tz=timezone.utc).isoformat(),
+            "planned_risk_usdt": float(planned_risk_usdt.quantize(PRECISION)) if planned_risk_usdt > 0 else None,
+            "realized_rrr": float(realized_rrr.quantize(PRECISION)) if planned_risk_usdt > 0 else None,
+            "entry_price_alert": float(entry_price_from_order) if entry_price_from_order is not None else None,
+            "sl_price_alert": float(sl_price_from_order) if sl_price_from_order is not None else None,
+            "tp_price_alert": float(tp_price_from_order) if tp_price_from_order is not None else None,
+            "exit_price_result": float(avg_exit_price.quantize(PRECISION)),
+            "tp_price_chart": float(tp_price_chart_from_order) if tp_price_chart_from_order is not None else None,
+        }
+    except (TypeError, ValueError, KeyError) as e:
+        logger.error(f"{log_prefix} Błąd podczas transformacji danych PnL: {e}", exc_info=True)
+        return False
+
+    try:
+        client = bigquery_logger.get_bigquery_client()
+        logger.info(
+            f"{log_prefix} Przygotowano dane do zapisu w BigQuery. Próba wstawienia...", 
+            extra={"json_fields": {"bq_payload": transformed_data}}
+        )
+        
+        errors = client.insert_rows_json(bigquery_logger.REAL_TRADES_TABLE_REF, [transformed_data])
+
+        if not errors:
+            logger.info(f"{log_prefix} SUKCES! Pomyślnie zapisano realny wynik transakcji do BigQuery.")
+            mark_order_as_processed(order_id)
+            return True  # Zwróć True po pomyślnym zapisie
         else:
-            save_last_processed_timestamp(current_cycle_start_time, "pnl_logger_last_fetch_state")
-            logger.info(f"[PNL_LOGGER] Zakończono cykl. Przetworzono 0 nowych rekordów. Zaktualizowano znacznik czasu na czas startu cyklu: {current_cycle_start_time.isoformat()}.")
-
-    else:
-        logger.info("[PNL_LOGGER] Nie znaleziono żadnych zamkniętych pozycji (w tym likwidacji) na Bybit od ostatniego sprawdzenia.")
-        save_last_processed_timestamp(current_cycle_start_time, "pnl_logger_last_fetch_state")
-        logger.info(f"[PNL_LOGGER] Zakończono cykl. Przetworzono 0 rekordów. Zaktualizowano znacznik czasu na czas startu cyklu: {current_cycle_start_time.isoformat()}.")
-    
-    return processed_count
+            logger.error(f"{log_prefix} Błąd podczas wstawiania wierszy do BigQuery: {errors}")
+            return False  # Zwróć False w przypadku błędu zapisu
+    except Exception as e:
+        logger.critical(f"{log_prefix} Krytyczny błąd podczas zapisu do BigQuery: {e}", exc_info=True)
+        return False  # Zwróć False w przypadku krytycznego błędu
 
 def round_price_by_tick(price: float, tick_size: str, direction: str) -> float:
     price_decimal = Decimal(str(price))
