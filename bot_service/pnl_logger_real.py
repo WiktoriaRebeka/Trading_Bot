@@ -6,50 +6,48 @@ from datetime import datetime, timezone
 from google.cloud import bigquery
 from decimal import Decimal
 
-# --- POCZĄTEK POPRAWKI 1: Zmiana sposobu importu ---
-# Importujemy cały moduł, a nie poszczególne zmienne, aby uniknąć problemu z kopiami.
 from bot_service import bigquery_logger
-# --- KONIEC POPRAWKI 1 ---
-
 from shared_lib import constants
 
 logger = logging.getLogger(__name__)
 
-REAL_TRADES_HISTORY_SCHEMA = [
-    bigquery.SchemaField("alert_id", "STRING", mode="REQUIRED"),
-    bigquery.SchemaField("order_id", "STRING", mode="REQUIRED"),
-    bigquery.SchemaField("symbol", "STRING", mode="REQUIRED"),
-    bigquery.SchemaField("direction", "STRING", mode="REQUIRED"),
-    bigquery.SchemaField("qty", "NUMERIC", mode="REQUIRED"),
-    bigquery.SchemaField("leverage", "INTEGER", mode="NULLABLE"),
-    bigquery.SchemaField("avg_entry_price", "NUMERIC", mode="REQUIRED"),
-    bigquery.SchemaField("avg_exit_price", "NUMERIC", mode="REQUIRED"),
-    bigquery.SchemaField("entry_value_usdt", "NUMERIC", mode="REQUIRED"),
-    bigquery.SchemaField("exit_value_usdt", "NUMERIC", mode="REQUIRED"),
-    bigquery.SchemaField("gross_pnl_usdt", "NUMERIC", mode="REQUIRED"),
-    bigquery.SchemaField("commission_usdt", "NUMERIC", mode="REQUIRED"),
-    bigquery.SchemaField("net_pnl_usdt", "NUMERIC", mode="REQUIRED"),
-    bigquery.SchemaField("exit_type", "STRING", mode="NULLABLE"),
-    bigquery.SchemaField("timestamp_entry", "TIMESTAMP", mode="REQUIRED"),
-    bigquery.SchemaField("timestamp_close", "TIMESTAMP", mode="REQUIRED"),
-    bigquery.SchemaField("planned_risk_usdt", "NUMERIC", mode="NULLABLE"),
-    bigquery.SchemaField("realized_rrr", "NUMERIC", mode="NULLABLE"),
-    bigquery.SchemaField("entry_price_alert", "NUMERIC", mode="NULLABLE"),
-    bigquery.SchemaField("sl_price_alert", "NUMERIC", mode="NULLABLE"),
-    bigquery.SchemaField("tp_price_alert", "NUMERIC", mode="NULLABLE"),
-    bigquery.SchemaField("exit_price_result", "NUMERIC", mode="NULLABLE"),
-    bigquery.SchemaField("tp_price_chart", "NUMERIC", mode="NULLABLE"),
-]
-
+def check_if_order_exists_in_bq(order_id: str) -> bool:
+    """Sprawdza, czy order_id już istnieje w tabeli real_trades_history."""
+    try:
+        client = bigquery_logger.get_bigquery_client()
+        query = f"""
+            SELECT COUNT(1) as count
+            FROM `{bigquery_logger.REAL_TRADES_TABLE_REF.project}.{bigquery_logger.REAL_TRADES_TABLE_REF.dataset_id}.{bigquery_logger.REAL_TRADES_TABLE_REF.table_id}`
+            WHERE order_id = @order_id
+        """
+        query_params = [bigquery.ScalarQueryParameter("order_id", "STRING", order_id)]
+        job_config = bigquery.QueryJobConfig(query_parameters=query_params)
+        
+        query_job = client.query(query, job_config=job_config)
+        results = query_job.result()
+        
+        for row in results:
+            if row.count > 0:
+                logger.warning(f"[PNL_DUPLICATE_CHECK] Znaleziono już wpis dla order_id: {order_id}. Pomijam zapis.")
+                return True
+        return False
+    except Exception as e:
+        logger.error(f"[PNL_DUPLICATE_CHECK] Błąd podczas sprawdzania istnienia order_id {order_id}: {e}", exc_info=True)
+        return True # Na wszelki wypadek, jeśli sprawdzenie zawiedzie, nie zapisujemy
 
 def log_real_trade_result(enriched_pnl_data: Dict[str, Any], active_order_data: Dict[str, Any]):
-    if not bigquery_logger.initialize_bigquery():
-        logger.error("[PNL_REAL_SAVE] BigQuery nie zostało zainicjalizowane – pomijam zapis.")
-        return
-
     order_id = enriched_pnl_data.get("orderId", "unknown")
     symbol = enriched_pnl_data.get("symbol", "unknown")
     log_prefix = f"[PNL_REAL_SAVE][{symbol}|{order_id}]"
+
+    if not bigquery_logger.initialize_bigquery():
+        logger.error(f"{log_prefix} BigQuery nie zostało zainicjalizowane – pomijam zapis.")
+        return
+
+    # --- OSTATECZNA POPRAWKA: ZABEZPIECZENIE PRZED DUPLIKATAMI ---
+    if check_if_order_exists_in_bq(order_id):
+        return
+    # --- KONIEC POPRAWKI ---
 
     logger.info(
         f"{log_prefix} Otrzymano dane do przetworzenia i zapisu.", 
@@ -60,6 +58,8 @@ def log_real_trade_result(enriched_pnl_data: Dict[str, Any], active_order_data: 
     )
 
     try:
+        # ... reszta funkcji log_real_trade_result pozostaje BEZ ZMIAN ...
+        # (cała logika transformacji danych jest poprawna)
         if enriched_pnl_data.get('avgEntryPrice') is None and active_order_data.get('final_entry_price'):
             enriched_pnl_data['avgEntryPrice'] = active_order_data['final_entry_price']
             logger.warning(f"{log_prefix} Uzupełniono brakującą cenę wejścia z danych zlecenia (prawdopodobnie likwidacja).")
@@ -139,10 +139,7 @@ def log_real_trade_result(enriched_pnl_data: Dict[str, Any], active_order_data: 
             extra={"json_fields": {"bq_payload": transformed_data}}
         )
         
-        # --- POCZĄTEK POPRAWKI 2: Użycie referencji przez moduł ---
-        # Odwołujemy się do zmiennej przez jej moduł, aby uzyskać aktualną wartość.
         errors = client.insert_rows_json(bigquery_logger.REAL_TRADES_TABLE_REF, [transformed_data])
-        # --- KONIEC POPRAWKI 2 ---
 
         if not errors:
             logger.info(f"{log_prefix} SUKCES! Pomyślnie zapisano realny wynik transakcji do BigQuery.")
