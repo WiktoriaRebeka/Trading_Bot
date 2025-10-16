@@ -181,18 +181,15 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
     
     last_check_ts_dt = load_last_processed_timestamp("pnl_logger_last_fetch_state")
     if not last_check_ts_dt:
-        logger.warning("[PNL_LOGGER] Nie udało się załadować ostatniego znacznika czasu. Używam domyślnego (1h w przeszłość).")
-        last_check_ts_dt = datetime.now(timezone.utc) - timedelta(hours=1)
+        logger.warning("[PNL_LOGGER] Nie udało się załadować ostatniego znacznika czasu. Używam domyślnego (24h w przeszłość).")
+        last_check_ts_dt = datetime.now(timezone.utc) - timedelta(hours=24)
 
     current_cycle_start_time = datetime.now(timezone.utc)
     
-    # --- KLUCZOWA ZMIANA: Zwiększenie bufora czasowego ---
-    # Zwiększamy bufor z 65 sekund do 15 minut (900 sekund), aby zniwelować opóźnienia API Bybit.
-    # Nasza logika deduplikacji w BigQuery (`check_if_order_exists_in_bq`) ochroni nas przed duplikatami.
-    LOOKBACK_BUFFER_SECONDS = 900 
-    start_time_with_buffer = last_check_ts_dt - timedelta(seconds=LOOKBACK_BUFFER_SECONDS)
-    logger.info(f"[PNL_LOGGER] Sprawdzam zamknięte pozycje od: {start_time_with_buffer.isoformat()} (z {LOOKBACK_BUFFER_SECONDS}s buforem).")
-    # --- KONIEC KLUCZOWEJ ZMIANY ---
+    # Utrzymujemy duży bufor, aby łapać opóźnione transakcje. 24 godziny to bezpieczny zakres.
+    LOOKBACK_BUFFER_HOURS = 24
+    start_time_with_buffer = last_check_ts_dt - timedelta(hours=LOOKBACK_BUFFER_HOURS)
+    logger.info(f"[PNL_LOGGER] Sprawdzam zamknięte pozycje od: {start_time_with_buffer.isoformat()} (z {LOOKBACK_BUFFER_HOURS}h buforem).")
     
     start_time_ms = int(start_time_with_buffer.timestamp() * 1000)
     
@@ -203,7 +200,7 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
 
         liq_records_raw = executor.get_liquidation_history(start_time_ms=start_time_ms)
         liq_records_transformed = [_transform_liquidation_record(rec) for rec in liq_records_raw]
-        all_records.extend(liq_records_raw)
+        all_records.extend(liq_records_transformed)
 
     except Exception as e:
         logger.critical(f"[PNL_LOGGER] Krytyczny błąd podczas pobierania historii z Bybit: {e}", exc_info=True)
@@ -224,34 +221,29 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
             updated_time_ms = int(pnl_record.get("updatedTime", 0))
             record_ts_dt = datetime.fromtimestamp(updated_time_ms / 1000, tz=timezone.utc)
 
-            # Ten warunek jest teraz mniej krytyczny dzięki deduplikacji w BQ, ale zostawiamy go jako pierwszą linię obrony.
             if record_ts_dt < last_check_ts_dt:
                 logger.info(f"[PNL_LOGGER] Pomijam stary rekord (z bufora) dla {symbol} [OrderID: {order_id}] z czasu {record_ts_dt.isoformat()}")
-                # Mimo pominięcia, nadal musimy go przetworzyć, aby upewnić się, że jest w BQ
-                # Dlatego kontynuujemy, a deduplikacja w BQ załatwi resztę.
                 pass
 
             logger.info(f"[PNL_LOGGER] Przetwarzanie rekordu dla {symbol} [OrderID: {order_id}]")
             
-            order_id_from_db = None
-            
             try:
-                if not symbol or symbol == "N/A":
-                    logger.warning("[PNL_LOGGER] Pominięto rekord bez symbolu.", extra={"json_fields": {"pnl_record": pnl_record}})
+                if not symbol or symbol == "N/A" or order_id == "N/A":
+                    logger.warning("[PNL_LOGGER] Pominięto rekord bez symbolu lub orderId.", extra={"json_fields": {"pnl_record": pnl_record}})
                     continue
 
-                # Dalsza logika pozostaje bez zmian, ponieważ deduplikacja w BQ jest kluczowa
-                logger.info(f"[PNL_LOGGER] Próba znalezienia dopasowania dla symbolu '{symbol}' w active_orders...")
-                active_order_data = state_manager.get_active_order_by_symbol(symbol)
+                # --- NOWA, POPRAWIONA LOGIKA DOPASOWANIA ---
+                logger.info(f"[PNL_LOGGER] Próba znalezienia dopasowania dla orderId '{order_id}' w active_orders...")
+                active_order_data = state_manager.get_active_order_by_id(order_id)
                 
                 if active_order_data:
-                    logger.info(f"[PNL_LOGGER] SUKCES: Znaleziono dopasowanie dla {symbol} w Firestore.")
+                    logger.info(f"[PNL_LOGGER] SUKCES: Znaleziono dopasowanie dla orderId {order_id} w Firestore.")
                     alert_id = active_order_data.get('alert_id', 'MATCHED_NO_ALERT_ID')
-                    order_id_from_db = active_order_data.get('orderId')
                 else:
-                    logger.warning(f"[PNL_LOGGER] BRAK DOPASOWANIA dla {symbol}. Transakcja zostanie zalogowana jako 'UNMATCHED'.")
+                    logger.warning(f"[PNL_LOGGER] BRAK DOPASOWANIA dla orderId {order_id}. Transakcja zostanie zalogowana jako 'UNMATCHED'.")
                     active_order_data = {}
                     alert_id = 'UNMATCHED_OR_MANUAL'
+                # --- KONIEC NOWEJ LOGIKI DOPASOWANIA ---
 
                 enriched_pnl_data = pnl_record.copy()
                 enriched_pnl_data['alert_id'] = alert_id
@@ -259,9 +251,10 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
                 log_real_trade_result(enriched_pnl_data, active_order_data)
                 processed_count += 1
                 
-                if order_id_from_db:
-                    logger.info(f"[PNL_LOGGER] Usuwanie zlecenia {order_id_from_db} z kolekcji active_orders.")
-                    state_manager.delete_active_order_by_id(order_id_from_db)
+                # Usuwamy dokument z active_orders tylko jeśli go znaleźliśmy
+                if active_order_data:
+                    logger.info(f"[PNL_LOGGER] Usuwanie zlecenia {order_id} z kolekcji active_orders.")
+                    state_manager.delete_active_order_by_id(order_id)
 
                 last_processed_record_in_cycle = pnl_record
 
@@ -273,14 +266,11 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
             last_ts_ms = int(last_processed_record_in_cycle.get("updatedTime", 0))
             last_ts_dt = datetime.fromtimestamp(last_ts_ms / 1000, tz=timezone.utc)
             
-            # Używamy najnowszego timestampu z paczki LUB czasu startu cyklu - cokolwiek jest nowsze.
-            # To zapobiega cofaniu się w czasie.
             final_timestamp_to_save = max(last_ts_dt, current_cycle_start_time)
             
             save_last_processed_timestamp(final_timestamp_to_save, "pnl_logger_last_fetch_state")
             logger.info(f"[PNL_LOGGER] Zakończono cykl. Przetworzono {processed_count} rekordów. Zaktualizowano znacznik czasu na {final_timestamp_to_save.isoformat()}.")
         else:
-            # Jeśli pętla się wykonała, ale żaden rekord nie był "NOWY", aktualizujemy do czasu startu cyklu.
             save_last_processed_timestamp(current_cycle_start_time, "pnl_logger_last_fetch_state")
             logger.info(f"[PNL_LOGGER] Zakończono cykl. Przetworzono 0 nowych rekordów. Zaktualizowano znacznik czasu na czas startu cyklu: {current_cycle_start_time.isoformat()}.")
 
@@ -290,7 +280,6 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
         logger.info(f"[PNL_LOGGER] Zakończono cykl. Przetworzono 0 rekordów. Zaktualizowano znacznik czasu na czas startu cyklu: {current_cycle_start_time.isoformat()}.")
     
     return processed_count
-
 
 def round_price_by_tick(price: float, tick_size: str, direction: str) -> float:
     price_decimal = Decimal(str(price))
