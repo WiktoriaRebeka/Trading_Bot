@@ -184,11 +184,15 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
         logger.warning("[PNL_LOGGER] Nie udało się załadować ostatniego znacznika czasu. Używam domyślnego (1h w przeszłość).")
         last_check_ts_dt = datetime.now(timezone.utc) - timedelta(hours=1)
 
-    # Zapisujemy czas rozpoczęcia cyklu. Będzie użyty, jeśli nie znajdziemy nowych rekordów.
     current_cycle_start_time = datetime.now(timezone.utc)
     
-    start_time_with_buffer = last_check_ts_dt - timedelta(seconds=65)
-    logger.info(f"[PNL_LOGGER] Sprawdzam zamknięte pozycje od: {start_time_with_buffer.isoformat()} (z 65s buforem).")
+    # --- KLUCZOWA ZMIANA: Zwiększenie bufora czasowego ---
+    # Zwiększamy bufor z 65 sekund do 15 minut (900 sekund), aby zniwelować opóźnienia API Bybit.
+    # Nasza logika deduplikacji w BigQuery (`check_if_order_exists_in_bq`) ochroni nas przed duplikatami.
+    LOOKBACK_BUFFER_SECONDS = 900 
+    start_time_with_buffer = last_check_ts_dt - timedelta(seconds=LOOKBACK_BUFFER_SECONDS)
+    logger.info(f"[PNL_LOGGER] Sprawdzam zamknięte pozycje od: {start_time_with_buffer.isoformat()} (z {LOOKBACK_BUFFER_SECONDS}s buforem).")
+    # --- KONIEC KLUCZOWEJ ZMIANY ---
     
     start_time_ms = int(start_time_with_buffer.timestamp() * 1000)
     
@@ -199,7 +203,7 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
 
         liq_records_raw = executor.get_liquidation_history(start_time_ms=start_time_ms)
         liq_records_transformed = [_transform_liquidation_record(rec) for rec in liq_records_raw]
-        all_records.extend(liq_records_transformed)
+        all_records.extend(liq_records_raw)
 
     except Exception as e:
         logger.critical(f"[PNL_LOGGER] Krytyczny błąd podczas pobierania historii z Bybit: {e}", exc_info=True)
@@ -212,10 +216,7 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
         
         pnl_records_sorted = sorted(all_records, key=lambda r: int(r.get("updatedTime", 0)))
         
-        # --- POCZĄTEK POPRAWKI LOGIKI ---
-        # Zmienna do śledzenia ostatniego przetworzonego rekordu w tym cyklu
         last_processed_record_in_cycle = None
-        # --- KONIEC POPRAWKI LOGIKI ---
 
         for pnl_record in pnl_records_sorted:
             order_id = pnl_record.get("orderId", "N/A")
@@ -223,13 +224,14 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
             updated_time_ms = int(pnl_record.get("updatedTime", 0))
             record_ts_dt = datetime.fromtimestamp(updated_time_ms / 1000, tz=timezone.utc)
 
-            # Ten warunek jest nadal potrzebny, aby odfiltrować rekordy z "bufora bezpieczeństwa",
-            # które mogły być już przetworzone w poprzednim cyklu.
+            # Ten warunek jest teraz mniej krytyczny dzięki deduplikacji w BQ, ale zostawiamy go jako pierwszą linię obrony.
             if record_ts_dt < last_check_ts_dt:
-                logger.info(f"[PNL_LOGGER] Pomijam stary rekord (już przetworzony) dla {symbol} [OrderID: {order_id}] z czasu {record_ts_dt.isoformat()}")
-                continue
+                logger.info(f"[PNL_LOGGER] Pomijam stary rekord (z bufora) dla {symbol} [OrderID: {order_id}] z czasu {record_ts_dt.isoformat()}")
+                # Mimo pominięcia, nadal musimy go przetworzyć, aby upewnić się, że jest w BQ
+                # Dlatego kontynuujemy, a deduplikacja w BQ załatwi resztę.
+                pass
 
-            logger.info(f"[PNL_LOGGER] Przetwarzanie NOWEGO rekordu dla {symbol} [OrderID: {order_id}]")
+            logger.info(f"[PNL_LOGGER] Przetwarzanie rekordu dla {symbol} [OrderID: {order_id}]")
             
             order_id_from_db = None
             
@@ -238,6 +240,7 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
                     logger.warning("[PNL_LOGGER] Pominięto rekord bez symbolu.", extra={"json_fields": {"pnl_record": pnl_record}})
                     continue
 
+                # Dalsza logika pozostaje bez zmian, ponieważ deduplikacja w BQ jest kluczowa
                 logger.info(f"[PNL_LOGGER] Próba znalezienia dopasowania dla symbolu '{symbol}' w active_orders...")
                 active_order_data = state_manager.get_active_order_by_symbol(symbol)
                 
@@ -260,44 +263,35 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
                     logger.info(f"[PNL_LOGGER] Usuwanie zlecenia {order_id_from_db} z kolekcji active_orders.")
                     state_manager.delete_active_order_by_id(order_id_from_db)
 
-                # --- POCZĄTEK POPRAWKI LOGIKI ---
-                # Po pomyślnym przetworzeniu, aktualizujemy ostatni rekord
                 last_processed_record_in_cycle = pnl_record
-                # --- KONIEC POPRAWKI LOGIKI ---
 
             except Exception as e:
                 logger.error(f"[PNL_LOGGER] Krytyczny błąd podczas przetwarzania rekordu dla symbolu {symbol}. Rekord zostanie pominięty. Błąd: {e}", exc_info=True, extra={"json_fields": {"pnl_record": pnl_record}})
                 continue
         
-        # --- POCZĄTEK POPRAWKI LOGIKI ---
-        # Po zakończeniu pętli, jeśli przetworzyliśmy cokolwiek, aktualizujemy timestamp
         if last_processed_record_in_cycle:
             last_ts_ms = int(last_processed_record_in_cycle.get("updatedTime", 0))
             last_ts_dt = datetime.fromtimestamp(last_ts_ms / 1000, tz=timezone.utc)
             
-            # Dodajemy 1 milisekundę, aby następne zapytanie na pewno zaczęło się PO tym rekordzie.
-            # To jest klucz do uniknięcia "utknięcia".
-            final_timestamp_to_save = last_ts_dt + timedelta(milliseconds=1)
+            # Używamy najnowszego timestampu z paczki LUB czasu startu cyklu - cokolwiek jest nowsze.
+            # To zapobiega cofaniu się w czasie.
+            final_timestamp_to_save = max(last_ts_dt, current_cycle_start_time)
             
             save_last_processed_timestamp(final_timestamp_to_save, "pnl_logger_last_fetch_state")
             logger.info(f"[PNL_LOGGER] Zakończono cykl. Przetworzono {processed_count} rekordów. Zaktualizowano znacznik czasu na {final_timestamp_to_save.isoformat()}.")
         else:
-            # Jeśli pętla się wykonała, ale żaden rekord nie był "NOWY", timestamp pozostaje bez zmian.
-            logger.info(f"[PNL_LOGGER] Zakończono cykl. Przetworzono 0 nowych rekordów. Znacznik czasu POZOSTAJE na {last_check_ts_dt.isoformat()}.")
-        # --- KONIEC POPRAWKI LOGIKI ---
+            # Jeśli pętla się wykonała, ale żaden rekord nie był "NOWY", aktualizujemy do czasu startu cyklu.
+            save_last_processed_timestamp(current_cycle_start_time, "pnl_logger_last_fetch_state")
+            logger.info(f"[PNL_LOGGER] Zakończono cykl. Przetworzono 0 nowych rekordów. Zaktualizowano znacznik czasu na czas startu cyklu: {current_cycle_start_time.isoformat()}.")
 
     else:
-        # --- POCZĄTEK POPRAWKI LOGIKI (USPRAWNIENIE) ---
-        # Jeśli nie znaleziono żadnych nowych rekordów, bezpiecznie jest przesunąć znacznik czasu
-        # do momentu rozpoczęcia tego cyklu, aby nie skanować w kółko tego samego pustego okresu.
-        logger.info("[PNL_LOGGER] Nie znaleziono nowych zamkniętych pozycji (w tym likwidacji) na Bybit od ostatniego sprawdzenia.")
+        logger.info("[PNL_LOGGER] Nie znaleziono żadnych zamkniętych pozycji (w tym likwidacji) na Bybit od ostatniego sprawdzenia.")
         save_last_processed_timestamp(current_cycle_start_time, "pnl_logger_last_fetch_state")
         logger.info(f"[PNL_LOGGER] Zakończono cykl. Przetworzono 0 rekordów. Zaktualizowano znacznik czasu na czas startu cyklu: {current_cycle_start_time.isoformat()}.")
-        # --- KONIEC POPRAWKI LOGIKI (USPRAWNIENIE) ---
     
     return processed_count
 
-    
+
 def round_price_by_tick(price: float, tick_size: str, direction: str) -> float:
     price_decimal = Decimal(str(price))
     tick_decimal = Decimal(tick_size)
