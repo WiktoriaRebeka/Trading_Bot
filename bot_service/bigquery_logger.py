@@ -23,7 +23,7 @@ def initialize_bigquery() -> bool:
     try:
         logger.info("[BQ_INIT] Próba inicjalizacji klienta BigQuery...")
         
-        DATASET_LOCATION = "EU" 
+        DATASET_LOCATION = "US" 
         client = bigquery.Client(location=DATASET_LOCATION)
         
         # --- POCZĄTEK ZMIANY ---
