@@ -1,10 +1,11 @@
 # Lokalizacja: bot_service/pnl_logger_real.py
+
 # Lokalizacja: bot_service/pnl_logger_real.py
 
 import logging
 from typing import Dict, Any, Optional
 from datetime import datetime, timezone
-from google.cloud import bigquery
+from google.cloud import bigquery, firestore
 from decimal import Decimal
 
 from bot_service import bigquery_logger, state_manager
@@ -14,50 +15,58 @@ logger = logging.getLogger(__name__)
 
 PROCESSED_IDS_COLLECTION = "processed_order_ids"
 
-def check_if_order_processed(order_id: str) -> bool:
+def acquire_lock_for_order(order_id: str) -> bool:
+    """
+    Próbuje atomowo utworzyć dokument blokady w Firestore.
+    Zwraca True, jeśli blokada została pomyślnie założona (tzn. ten proces wygrał wyścig).
+    Zwraca False, jeśli blokada już istniała.
+    """
     try:
         db = state_manager._get_db()
         doc_ref = db.collection(PROCESSED_IDS_COLLECTION).document(order_id)
-        if doc_ref.get().exists:
-            logger.warning(f"[PNL_DUPLICATE_CHECK][CACHE] Znaleziono wpis dla order_id: {order_id} w cache'u Firestore. Pomijam.")
-            return True
-    except Exception as e:
-        logger.error(f"[PNL_DUPLICATE_CHECK][CACHE] Błąd podczas sprawdzania cache'a dla order_id {order_id}: {e}", exc_info=True)
-        pass
-
-    try:
-        client = bigquery_logger.get_bigquery_client()
-        query = f"""
-            SELECT COUNT(1) as count
-            FROM `{bigquery_logger.REAL_TRADES_TABLE_REF.project}.{bigquery_logger.REAL_TRADES_TABLE_REF.dataset_id}.{bigquery_logger.REAL_TRADES_TABLE_REF.table_id}`
-            WHERE order_id = @order_id
-        """
-        query_params = [bigquery.ScalarQueryParameter("order_id", "STRING", order_id)]
-        job_config = bigquery.QueryJobConfig(query_parameters=query_params)
         
-        query_job = client.query(query, job_config=job_config)
-        results = query_job.result()
-        
-        for row in results:
-            if row.count > 0:
-                logger.warning(f"[PNL_DUPLICATE_CHECK][BQ] Znaleziono wpis dla order_id: {order_id} w BigQuery. Pomijam zapis i aktualizuję cache.")
-                mark_order_as_processed(order_id)
+        @firestore.transactional
+        def _create_if_not_exists(transaction, doc_ref):
+            snapshot = doc_ref.get(transaction=transaction)
+            if snapshot.exists:
+                return False
+            else:
+                transaction.set(doc_ref, {"processed_at": datetime.now(timezone.utc), "status": "PROCESSING"})
                 return True
-        return False
-    except Exception as e:
-        logger.error(f"[PNL_DUPLICATE_CHECK][BQ] Błąd podczas sprawdzania istnienia order_id {order_id} w BQ: {e}", exc_info=True)
-        return True
 
-def mark_order_as_processed(order_id: str):
+        transaction = db.transaction()
+        lock_acquired = _create_if_not_exists(transaction, doc_ref)
+
+        if lock_acquired:
+            logger.info(f"[PNL_LOCK] Pomyślnie założono blokadę dla order_id: {order_id}")
+            return True
+        else:
+            logger.warning(f"[PNL_DUPLICATE_CHECK][CACHE] Blokada dla order_id: {order_id} już istnieje. Pomijam.")
+            return False
+            
+    except Exception as e:
+        logger.error(f"[PNL_LOCK] Błąd podczas próby założenia blokady dla order_id {order_id}: {e}", exc_info=True)
+        return False
+
+def mark_lock_as_done(order_id: str):
+    """Aktualizuje status blokady na 'DONE' po pomyślnym zapisie do BigQuery."""
     try:
         db = state_manager._get_db()
         doc_ref = db.collection(PROCESSED_IDS_COLLECTION).document(order_id)
-        doc_ref.set({"processed_at": datetime.now(timezone.utc)})
-        logger.info(f"[PNL_CACHE_UPDATE] Pomyślnie oznaczono order_id {order_id} jako przetworzony w cache'u.")
+        doc_ref.update({"status": "DONE"})
+        logger.info(f"[PNL_LOCK_UPDATE] Pomyślnie zaktualizowano status blokady dla order_id {order_id}.")
     except Exception as e:
-        logger.error(f"[PNL_CACHE_UPDATE] Błąd podczas oznaczania order_id {order_id} jako przetworzony: {e}", exc_info=True)
+        logger.error(f"[PNL_LOCK_UPDATE] Błąd podczas aktualizacji statusu blokady dla order_id {order_id}: {e}", exc_info=True)
 
 def log_real_trade_result(enriched_pnl_data: Dict[str, Any], active_order_data: Optional[Dict[str, Any]]) -> bool:
+    """
+    Przetwarza, transformuje i zapisuje wynik transakcji do BigQuery.
+    Implementuje logikę blokowania, aby zapobiec duplikatom.
+
+    Returns:
+        bool: True, jeśli rekord został pomyślnie zapisany.
+              False, jeśli rekord był duplikatem lub wystąpił błąd.
+    """
     if active_order_data is None:
         active_order_data = {}
         
@@ -69,7 +78,7 @@ def log_real_trade_result(enriched_pnl_data: Dict[str, Any], active_order_data: 
         logger.error(f"{log_prefix} BigQuery nie zostało zainicjalizowane – pomijam zapis.")
         return False
 
-    if check_if_order_processed(order_id):
+    if not acquire_lock_for_order(order_id):
         return False
 
     alert_id = active_order_data.get('alert_id', 'UNMATCHED_OR_MANUAL')
@@ -163,7 +172,7 @@ def log_real_trade_result(enriched_pnl_data: Dict[str, Any], active_order_data: 
 
         if not errors:
             logger.info(f"{log_prefix} SUKCES! Pomyślnie zapisano realny wynik transakcji do BigQuery.")
-            mark_order_as_processed(order_id)
+            mark_lock_as_done(order_id)
             return True
         else:
             logger.error(f"{log_prefix} Błąd podczas wstawiania wierszy do BigQuery: {errors}")
