@@ -122,6 +122,11 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
                 f"TP={final_tp}, Qty={final_qty}."
             )
             
+# ... (od order_params = { ... )
+
+            # Generujemy unikalny orderLinkId, ale nie używamy go jako klucza
+            custom_order_link_id = f"bot_{alert_id.replace('-', '')[:16]}_{int(datetime.now().timestamp())}"
+
             order_params = {
                 "symbol": symbol, "side": "Buy" if alert_model.direction == "LONG" else "Sell",
                 "orderType": "Limit", "qty": final_qty, "price": final_entry,
@@ -129,7 +134,7 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
                 "stopLoss": final_sl,
                 "tpTriggerBy": "MarkPrice",
                 "slTriggerBy": "MarkPrice",
-                "orderLinkId": f"bot_{alert_id.replace('-', '')[:12]}_{int(datetime.now().timestamp())}",
+                "orderLinkId": custom_order_link_id,
                 "timeInForce": "GTC"
             }
 
@@ -141,6 +146,7 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
                 order_data_to_save = {
                     "symbol": symbol,
                     "orderId": order_id,
+                    "orderLinkId": custom_order_link_id, # Zapisujemy go dla celów diagnostycznych
                     "status": "NEW_BRACKET",
                     "alert_id": alert_id,
                     "direction": alert_model.direction,
@@ -149,22 +155,10 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
                     "final_tp_price": final_tp,
                     "tp_price_chart": alert_model.tp_3_0
                 }
-                # Używamy orderId jako klucza - to jest najprostsze i najbardziej niezawodne
+                # Używamy orderId jako głównego klucza
                 state_manager.save_active_order(order_id, order_data_to_save)
             else:
                 raise Exception("Nie udało się złożyć zlecenia zintegrowanego (brak odpowiedzi od Bybit).")
-
-            processed_symbols_in_cycle.add(symbol)
-
-        except BybitAPIError as e:
-            if e.ret_code == 110093:
-                logger.warning(f"[{symbol}] Zlecenie odrzucone (110093) z powodu ustawień margin. Pomijam.")
-            else:
-                logger.error(f"Błąd API Bybit dla alertu {alert_id}: {e}", exc_info=False)
-            processed_symbols_in_cycle.add(symbol)
-        except Exception as e:
-            logger.error(f"Krytyczny błąd podczas atomowego przetwarzania alertu {alert_id}: {e}", exc_info=True)
-            processed_symbols_in_cycle.add(symbol)
 
 def _transform_liquidation_record(liq_record: Dict[str, Any]) -> Dict[str, Any]:
     """Tłumaczy rekord likwidacji na format zgodny z rekordem PnL."""
@@ -218,61 +212,34 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
 
     for pnl_record in pnl_records_sorted:
         order_id = pnl_record.get("orderId")
-        order_link_id = pnl_record.get("orderLinkId")
         symbol = pnl_record.get("symbol")
         
         try:
-            if not symbol:
-                logger.warning("[PNL_LOGGER] Pominięto rekord bez symbolu.", extra={"json_fields": {"pnl_record": pnl_record}})
+            # --- POCZĄTEK POPRAWIONEJ LOGIKI ---
+            if not order_id or not symbol:
+                logger.warning("[PNL_LOGGER] Pominięto rekord bez orderId lub symbolu.", extra={"json_fields": {"pnl_record": pnl_record}})
                 continue
 
-            logger.info(f"[PNL_LOGGER] Przetwarzanie rekordu dla {symbol} [OrderID: {order_id}, OrderLinkID: {order_link_id}]")
+            logger.info(f"[PNL_LOGGER] Przetwarzanie rekordu dla {symbol} [OrderID: {order_id}]")
             
-            # --- POCZĄTEK NOWEJ, 3-ETAPOWEJ LOGIKI DOPASOWANIA ---
-            active_order_data = None
-            document_id_to_delete = None
-
-            # Próba 1: Dopasowanie po orderLinkId (najlepsza metoda)
-            if order_link_id and order_link_id.startswith("bot_"):
-                active_order_data = state_manager.get_active_order_by_id(order_link_id)
-                if active_order_data:
-                    document_id_to_delete = order_link_id
-                    logger.info(f"[PNL_LOGGER] SUKCES (Metoda 1): Znaleziono dopasowanie po orderLinkId: '{order_link_id}'.")
-
-            # Próba 2: Dopasowanie po orderId (fallback)
-            if not active_order_data and order_id:
-                active_order_data = state_manager.get_active_order_by_id(order_id)
-                if active_order_data:
-                    document_id_to_delete = order_id
-                    logger.info(f"[PNL_LOGGER] SUKCES (Metoda 2): Znaleziono dopasowanie po orderId: '{order_id}'.")
-
-            # Próba 3: Dopasowanie po symbolu (ostateczność)
-            if not active_order_data:
-                logger.warning(f"[PNL_LOGGER] Nie udało się dopasować po ID. Próbuję po symbolu: '{symbol}'.")
-                matching_orders = state_manager.get_active_orders_by_symbol(symbol)
-                if len(matching_orders) == 1:
-                    active_order_data = matching_orders[0]
-                    document_id_to_delete = active_order_data.get("orderLinkId") or active_order_data.get("orderId")
-                    logger.info(f"[PNL_LOGGER] SUKCES (Metoda 3): Znaleziono JEDNO aktywne zlecenie dla symbolu. ID dokumentu: '{document_id_to_delete}'.")
-                elif len(matching_orders) > 1:
-                    logger.error(f"[PNL_LOGGER] Znaleziono {len(matching_orders)} aktywnych zleceń dla {symbol}. Nie można bezpiecznie dopasować.")
+            active_order_data = state_manager.get_active_order_by_id(order_id)
             
-            # Jeśli nie znaleziono dopasowania, użyj pustego słownika
             if not active_order_data:
-                logger.warning(f"[PNL_LOGGER] Nie znaleziono dopasowania dla transakcji. Zostanie zapisana jako UNMATCHED.")
-                active_order_data = {}
+                logger.warning(f"[PNL_LOGGER] Nie znaleziono dopasowania dla orderId '{order_id}'. Transakcja zostanie zapisana jako UNMATCHED.")
+                active_order_data = {} # Użyj pustego słownika, aby zapisać transakcję
 
-            # ZAWSZE wywołujemy zapis do BigQuery
+            # Zawsze wywołujemy zapis do BigQuery
             if log_real_trade_result(pnl_record, active_order_data):
                 processed_count += 1
             
             # Sprzątamy, tylko jeśli było dopasowanie
-            if document_id_to_delete:
-                logger.info(f"[PNL_LOGGER] Sprzątanie: Usuwanie dokumentu '{document_id_to_delete}' z kolekcji active_orders.")
-                state_manager.delete_active_order_by_id(document_id_to_delete)
-            # --- KONIEC NOWEJ LOGIKI ---
+            if active_order_data:
+                logger.info(f"[PNL_LOGGER] Sprzątanie: Usuwanie dokumentu '{order_id}' z kolekcji active_orders.")
+                state_manager.delete_active_order_by_id(order_id)
+            
+            # --- KONIEC POPRAWIONEJ LOGIKI ---
 
-            # Aktualizujemy postęp w pętli, aby nie utknąć
+            # NIEZALEŻNIE OD WYNIKU, aktualizujemy nasz postęp w pętli
             updated_time_ms = int(pnl_record.get("updatedTime", 0))
             if updated_time_ms > 0:
                 record_ts_dt = datetime.fromtimestamp(updated_time_ms / 1000, tz=timezone.utc)
