@@ -44,6 +44,10 @@ def run_combined_cycle(executor: BybitExecutor):
     _run_analysis_of_existing_cases()
     logger.info("Zakończono połączony cykl analityczno-transakcyjny.")
 
+# W pliku bot_service/bot_logic.py
+
+# Zastąp CAŁĄ funkcję process_alerts_atomically poniższą wersją:
+
 def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecutor):
     instrument_rules = get_instrument_rules()
     if not instrument_rules:
@@ -122,9 +126,6 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
                 f"TP={final_tp}, Qty={final_qty}."
             )
             
-# ... (od order_params = { ... )
-
-            # Generujemy unikalny orderLinkId, ale nie używamy go jako klucza
             custom_order_link_id = f"bot_{alert_id.replace('-', '')[:16]}_{int(datetime.now().timestamp())}"
 
             order_params = {
@@ -146,7 +147,7 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
                 order_data_to_save = {
                     "symbol": symbol,
                     "orderId": order_id,
-                    "orderLinkId": custom_order_link_id, # Zapisujemy go dla celów diagnostycznych
+                    "orderLinkId": custom_order_link_id,
                     "status": "NEW_BRACKET",
                     "alert_id": alert_id,
                     "direction": alert_model.direction,
@@ -155,10 +156,23 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
                     "final_tp_price": final_tp,
                     "tp_price_chart": alert_model.tp_3_0
                 }
-                # Używamy orderId jako głównego klucza
                 state_manager.save_active_order(order_id, order_data_to_save)
             else:
                 raise Exception("Nie udało się złożyć zlecenia zintegrowanego (brak odpowiedzi od Bybit).")
+
+            processed_symbols_in_cycle.add(symbol)
+
+        # --- POCZĄTEK POPRAWKI: Dodanie brakującego bloku 'except' ---
+        except BybitAPIError as e:
+            if e.ret_code == 110093:
+                logger.warning(f"[{symbol}] Zlecenie odrzucone (110093) z powodu ustawień margin. Pomijam.")
+            else:
+                logger.error(f"Błąd API Bybit dla alertu {alert_id}: {e}", exc_info=False)
+            processed_symbols_in_cycle.add(symbol)
+        except Exception as e:
+            logger.error(f"Krytyczny błąd podczas atomowego przetwarzania alertu {alert_id}: {e}", exc_info=True)
+            processed_symbols_in_cycle.add(symbol)
+        # --- KONIEC POPRAWKI ---
 
 def _transform_liquidation_record(liq_record: Dict[str, Any]) -> Dict[str, Any]:
     """Tłumaczy rekord likwidacji na format zgodny z rekordem PnL."""
