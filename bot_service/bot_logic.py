@@ -129,21 +129,28 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
                 "stopLoss": final_sl,
                 "tpTriggerBy": "MarkPrice",
                 "slTriggerBy": "MarkPrice",
-                "orderLinkId": f"bracket_{alert_id.replace('-', '')[:12]}_{int(datetime.now().timestamp())}",
+                "orderLinkId": f"bot_{alert_id.replace('-', '')[:12]}_{int(datetime.now().timestamp())}",
                 "timeInForce": "GTC"
             }
 
             response = executor.place_order(order_params)
             
-            if response:
-                logger.info(f"[{symbol}] Zlecenie zintegrowane pomyślnie złożone. Order ID: {response.get('orderId')}")
+            if response and response.get('orderId'):
+                order_id = response.get('orderId')
+                logger.info(f"[{symbol}] Zlecenie zintegrowane pomyślnie złożone. Order ID: {order_id}")
                 order_data_to_save = {
-                    "symbol": symbol, "orderId": response.get("orderId"), "status": "NEW_BRACKET",
-                    "alert_id": alert_id, "direction": alert_model.direction,
-                    "final_entry_price": final_entry, "final_sl_price": final_sl, 
-                    "final_tp_price": final_tp, "tp_price_chart": alert_model.tp_3_0
+                    "symbol": symbol,
+                    "orderId": order_id,
+                    "status": "NEW_BRACKET",
+                    "alert_id": alert_id,
+                    "direction": alert_model.direction,
+                    "final_entry_price": final_entry,
+                    "final_sl_price": final_sl, 
+                    "final_tp_price": final_tp,
+                    "tp_price_chart": alert_model.tp_3_0
                 }
-                state_manager.save_active_order(response.get("orderId"), order_data_to_save)
+                # Używamy orderId jako klucza - to jest najprostsze i najbardziej niezawodne
+                state_manager.save_active_order(order_id, order_data_to_save)
             else:
                 raise Exception("Nie udało się złożyć zlecenia zintegrowanego (brak odpowiedzi od Bybit).")
 
@@ -176,8 +183,6 @@ def _transform_liquidation_record(liq_record: Dict[str, Any]) -> Dict[str, Any]:
         "exitType": "Liquidation"
     }
 
-# Zastąp CAŁĄ funkcję log_closed_positions_pnl poniższą wersją:
-
 def log_closed_positions_pnl(executor: BybitExecutor) -> int:
     logger.info("[PNL_LOGGER] Rozpoczynam cykl logowania PnL (w tym likwidacji).")
     
@@ -207,59 +212,28 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
     last_processed_record_in_cycle = None
     for pnl_record in pnl_records_sorted:
         order_id = pnl_record.get("orderId")
-        order_link_id = pnl_record.get("orderLinkId")
         symbol = pnl_record.get("symbol")
         
         try:
-            if not symbol:
-                logger.warning("[PNL_LOGGER] Pominięto rekord bez symbolu.", extra={"json_fields": {"pnl_record": pnl_record}})
+            if not order_id or not symbol:
+                logger.warning("[PNL_LOGGER] Pominięto rekord bez orderId lub symbolu.", extra={"json_fields": {"pnl_record": pnl_record}})
                 continue
 
-            logger.info(f"[PNL_LOGGER] Przetwarzanie rekordu dla {symbol} [OrderID: {order_id}, OrderLinkID: {order_link_id}]")
+            logger.info(f"[PNL_LOGGER] Przetwarzanie rekordu dla {symbol} [OrderID: {order_id}]")
             
-            # --- POCZĄTEK NOWEJ, 3-ETAPOWEJ LOGIKI DOPASOWANIA ---
-            active_order_data = None
-            document_id_to_delete = None
-
-            # Próba 1: Dopasowanie po orderLinkId (najlepsza metoda)
-            if order_link_id and order_link_id.startswith("bot_"):
-                active_order_data = state_manager.get_active_order_by_id(order_link_id)
-                if active_order_data:
-                    document_id_to_delete = order_link_id
-                    logger.info(f"[PNL_LOGGER] SUKCES (Metoda 1): Znaleziono dopasowanie po orderLinkId: '{order_link_id}'.")
-
-            # Próba 2: Dopasowanie po orderId (fallback)
-            if not active_order_data and order_id:
-                active_order_data = state_manager.get_active_order_by_id(order_id)
-                if active_order_data:
-                    document_id_to_delete = order_id
-                    logger.info(f"[PNL_LOGGER] SUKCES (Metoda 2): Znaleziono dopasowanie po orderId: '{order_id}'.")
-
-            # Próba 3: Dopasowanie po symbolu (ostateczność, inspirowane starym kodem)
-            if not active_order_data:
-                logger.warning(f"[PNL_LOGGER] Nie udało się dopasować po ID. Próbuję po symbolu: '{symbol}'.")
-                matching_orders = state_manager.get_active_orders_by_symbol(symbol)
-                if len(matching_orders) == 1:
-                    active_order_data = matching_orders[0]
-                    # Musimy ustalić, co jest kluczem tego dokumentu, aby go później usunąć
-                    document_id_to_delete = active_order_data.get("orderLinkId") or active_order_data.get("orderId")
-                    logger.info(f"[PNL_LOGGER] SUKCES (Metoda 3): Znaleziono JEDNO aktywne zlecenie dla symbolu. ID dokumentu: '{document_id_to_delete}'.")
-                elif len(matching_orders) > 1:
-                    logger.error(f"[PNL_LOGGER] Znaleziono {len(matching_orders)} aktywnych zleceń dla {symbol}. Nie można bezpiecznie dopasować.")
+            active_order_data = state_manager.get_active_order_by_id(order_id)
             
-            # --- KONIEC NOWEJ LOGIKI ---
-
             if active_order_data:
+                logger.info(f"[PNL_LOGGER] SUKCES: Znaleziono dopasowanie dla orderId '{order_id}'.")
                 if log_real_trade_result(pnl_record, active_order_data):
                     processed_count += 1
                 
-                if document_id_to_delete:
-                    logger.info(f"[PNL_LOGGER] Sprzątanie: Usuwanie dokumentu '{document_id_to_delete}' z kolekcji active_orders.")
-                    state_manager.delete_active_order_by_id(document_id_to_delete)
+                logger.info(f"[PNL_LOGGER] Sprzątanie: Usuwanie dokumentu '{order_id}' z kolekcji active_orders.")
+                state_manager.delete_active_order_by_id(order_id)
             else:
                 logger.warning(
-                    f"[PNL_LOGGER][IGNOROWANO] Nie udało się znaleźć dopasowania dla transakcji dla symbolu {symbol} żadną z metod. "
-                    f"Transakcja nie zostanie zapisana w BigQuery."
+                    f"[PNL_LOGGER][IGNOROWANO] Nie znaleziono dopasowania dla orderId '{order_id}'. "
+                    f"Transakcja nie zostanie zapisana (prawdopodobnie manualna lub historyczna)."
                 )
 
             last_processed_record_in_cycle = pnl_record

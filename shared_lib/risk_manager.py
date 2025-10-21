@@ -30,6 +30,8 @@ def round_quantity_by_step(quantity: float, qty_step: str) -> float:
         return 0.0
 
 
+# W pliku shared_lib/risk_manager.py
+
 def calculate_position_size(
     risk_per_trade_usdt: float,
     entry_price: float,
@@ -37,7 +39,8 @@ def calculate_position_size(
     qty_step: str
 ) -> Optional[float]:
     """
-    Oblicza finalną, zaokrągloną ilość (Qty), uwzględniając opłaty ORAZ bufor na poślizg.
+    Oblicza finalną, zaokrągloną ilość (Qty), uwzględniając bufor na poślizg.
+    Nie uwzględnia już opłat, ponieważ PnL z Bybit jest wartością netto.
     """
     if entry_price <= 0 or sl_price <= 0:
         logger.warning("Cena wejścia i SL muszą być dodatnie.")
@@ -46,8 +49,9 @@ def calculate_position_size(
     # 1. Oblicz nominalne ryzyko z ruchu ceny w procentach
     nominal_risk_perc = abs(entry_price - sl_price) / entry_price
     
-    # 2. Dodaj opłaty ORAZ bufor na poślizg, aby uzyskać całkowite, konserwatywne ryzyko
-    total_risk_perc = nominal_risk_perc + TOTAL_FEE_PERCENT + SLIPPAGE_BUFFER_PERCENT
+    # 2. Dodaj TYLKO bufor na poślizg
+    SLIPPAGE_BUFFER_PERCENT = 0.0005 # 0.05%
+    total_risk_perc = nominal_risk_perc + SLIPPAGE_BUFFER_PERCENT
     
     if total_risk_perc == 0:
         logger.warning("Całkowite ryzyko procentowe wynosi zero, nie można obliczyć wielkości pozycji.")
@@ -63,9 +67,9 @@ def calculate_position_size(
     final_qty = round_quantity_by_step(ideal_qty, qty_step)
     
     logger.info(
-        f"Obliczanie wielkości pozycji (z buforem na poślizg): Ryzyko={risk_per_trade_usdt} USDT, "
+        f"Obliczanie wielkości pozycji: Ryzyko={risk_per_trade_usdt} USDT, "
         f"Entry={entry_price}, SL={sl_price}, "
-        f"Całkowite ryzyko % (cena+opłaty+poślizg)={total_risk_perc:.4f}, "
+        f"Całkowite ryzyko % (cena+poślizg)={total_risk_perc:.4f}, "
         f"Wartość pozycji={position_value_usdt:.2f} USDT, "
         f"Finalna ilość (Qty)={final_qty}"
     )
