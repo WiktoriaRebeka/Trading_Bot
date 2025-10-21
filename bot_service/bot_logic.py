@@ -23,91 +23,85 @@ from bot_service.fetch_from_firestore import fetch_new_alerts_since, save_last_p
 logger = logging.getLogger(__name__)
 
 
-def run_combined_cycle(executor: BybitExecutor):
-    """Główna, połączona pętla logiki z zapewnioną atomowością."""
-    logger.info("Uruchamiam połączony cykl analityczno-transakcyjny.")
-    
-    try:
-        log_closed_positions_pnl(executor)
-    except Exception as e:
-        logger.error(f"Błąd podczas logowania PnL w cyklu połączonym: {e}", exc_info=True)
-
-    last_ts = load_last_processed_timestamp("main_cycle_last_fetch_state")
+# --- POCZĄTEK ZMIANY: Dodanie brakującej funkcji-łącznika ---
+def process_new_alerts(executor: BybitExecutor):
+    """
+    Pobiera i przetwarza nowe alerty w trybie transakcyjnym.
+    Jest to główna funkcja wywoływana przez endpoint /process-alerts.
+    """
+    logger.info("Uruchamiam cykl przetwarzania nowych alertów.")
+    last_ts = load_last_processed_timestamp("alerts_last_fetch_state")
     new_alerts, new_ts = fetch_new_alerts_since(last_ts)
 
     if new_alerts:
-        process_alerts_atomically(new_alerts, executor)
+        _process_alerts_transactionally(new_alerts, executor)
         
         if new_ts and (not last_ts or new_ts > last_ts):
-            save_last_processed_timestamp(new_ts, "main_cycle_last_fetch_state")
-    
-    _run_analysis_of_existing_cases()
-    logger.info("Zakończono połączony cykl analityczno-transakcyjny.")
+            save_last_processed_timestamp(new_ts, "alerts_last_fetch_state")
+    else:
+        logger.info("Brak nowych alertów do przetworzenia.")
+# --- KONIEC ZMIANY ---
 
-# W pliku bot_service/bot_logic.py
-
-# Zastąp CAŁĄ funkcję process_alerts_atomically poniższą wersją:
-
-def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecutor):
+def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: BybitExecutor):
+    """
+    Przetwarza listę alertów, stosując nową, transakcyjną logikę.
+    Gwarantuje, że dla danego symbolu przetwarzany jest tylko najnowszy alert w cyklu.
+    """
     instrument_rules = get_instrument_rules()
     if not instrument_rules:
         logger.error("Nie udało się wczytać zasad instrumentów z Firestore. Przerywam przetwarzanie alertów.")
         return
 
+    alerts.sort(key=lambda a: a.get('received_at', datetime.min.replace(tzinfo=timezone.utc)))
+    
     processed_symbols_in_cycle = set()
 
     for alert_dict in alerts:
-        alert_id = alert_dict.get('id', 'unknown')
-        alert_model = None
-        symbol = alert_dict.get("symbol", "UNKNOWN")
-
+        alert_id = alert_dict.get('id', 'unknown_id')
         try:
             alert_model = AlertData.model_validate(alert_dict)
             symbol = alert_model.symbol
             logger.info(f"--- Rozpoczynam przetwarzanie alertu [{symbol}] ID: {alert_id} ---")
 
-            if symbol in processed_symbols_in_cycle:
-                logger.info(f"[{symbol}] Pomijam (symbol już przetworzony w tym cyklu).")
-                continue
-
-            open_position_side = executor.get_open_position_side(symbol)
-            
-            if open_position_side and open_position_side != "ERROR":
-                logger.info(f"[{symbol}] Wykryto otwartą pozycję: {open_position_side}.")
-                if alert_model.direction != open_position_side:
-                    logger.warning(f"[{symbol}] ODRZUCONO (Strażnik Pozycji): Nowy alert ({alert_model.direction}) jest przeciwny do otwartej pozycji.")
-                    processed_symbols_in_cycle.add(symbol)
-                    continue
-                else:
-                    logger.info(f"[{symbol}] Nowy alert jest zgodny z otwartą pozycją. Kontynuuję przetwarzanie bez anulowania zleceń.")
-            else:
-                logger.info(f"[{symbol}] Brak otwartej pozycji. Anuluję wszystkie oczekujące zlecenia limit dla tego symbolu.")
-                executor.cancel_all_open_orders_for_symbol(symbol)
-
+            # Krok a: Walidacja Wstępna
             if not _correct_and_validate_alert(alert_model):
                 logger.warning(f"[{symbol}] ODRZUCONO (Walidacja Logiczna).")
                 processed_symbols_in_cycle.add(symbol)
                 continue
-            
-            logger.info(f"[{symbol}] Alert przeszedł wszystkie filtry transakcyjne.")
 
-            rule = instrument_rules.get(symbol)
-            if not rule or "tickSize" not in rule or "qtyStep" not in rule:
-                logger.warning(f"[{symbol}] ODRZUCONO (Brak Zasad): Nie znaleziono reguł instrumentu w Firestore.")
+            # Krok b: Sprawdzenie Bezpieczeństwa (istniejąca pozycja)
+            open_position_side = executor.get_open_position_side(symbol)
+            if open_position_side and open_position_side != "ERROR":
+                logger.warning(f"[{symbol}] ODRZUCONO (Strażnik Pozycji): Wykryto już otwartą pozycję ({open_position_side}).")
                 processed_symbols_in_cycle.add(symbol)
                 continue
             
+            # Krok c: Zasada Zastępowania (anulowanie starych zleceń)
+            logger.info(f"[{symbol}] Brak otwartej pozycji. Anuluję wszystkie oczekujące zlecenia limit dla tego symbolu.")
+            if not executor.cancel_all_open_orders_for_symbol(symbol):
+                 logger.error(f"[{symbol}] Nie udało się anulować poprzednich zleceń. Przerywam, aby uniknąć ryzyka.")
+                 processed_symbols_in_cycle.add(symbol)
+                 continue
+
+            # Krok d: Pobranie Zasad Handlu (z cache'u Firestore)
+            rule = instrument_rules.get(symbol)
+            if not rule or "tickSize" not in rule or "qtyStep" not in rule:
+                logger.warning(f"[{symbol}] ODRZUCONO (Brak Zasad): Nie znaleziono reguł dla instrumentu.")
+                processed_symbols_in_cycle.add(symbol)
+                continue
             tick_size, qty_step = rule["tickSize"], rule["qtyStep"]
 
+            # Krok e: Pesymistyczne Zaokrąglenie Cen
             if alert_model.direction == 'LONG':
-                final_entry = round_price_by_tick(alert_model.entry, tick_size, 'up')
-                final_sl = round_price_by_tick(alert_model.sl, tick_size, 'down')
-                final_tp = round_price_by_tick(alert_model.tp_3_0, tick_size, 'up')
-            else: # SHORT
                 final_entry = round_price_by_tick(alert_model.entry, tick_size, 'down')
                 final_sl = round_price_by_tick(alert_model.sl, tick_size, 'up')
-                final_tp = round_price_by_tick(alert_model.tp_3_0, tick_size, 'down')
+                final_tp = round_price_by_tick(alert_model.tp_2_0, tick_size, 'down')
+            else: # SHORT
+                final_entry = round_price_by_tick(alert_model.entry, tick_size, 'up')
+                final_sl = round_price_by_tick(alert_model.sl, tick_size, 'down')
+                final_tp = round_price_by_tick(alert_model.tp_2_0, tick_size, 'up')
 
+            # Krok f: Obliczenie Wielkości Pozycji
             risk_usdt = float(os.getenv("RISK_PER_TRADE_USDT", "2.5"))
             final_qty = calculate_position_size(
                 risk_per_trade_usdt=risk_usdt, entry_price=final_entry,
@@ -115,64 +109,56 @@ def process_alerts_atomically(alerts: List[Dict[str, Any]], executor: BybitExecu
             )
 
             if not final_qty or final_qty <= 0:
-                logger.warning(f"[{symbol}] ODRZUCONO (Qty=0): Obliczona wielkość pozycji wynosi zero.")
+                logger.warning(f"[{symbol}] ODRZUCONO (Qty=0): Obliczona wielkość pozycji wynosi zero lub jest ujemna.")
                 processed_symbols_in_cycle.add(symbol)
                 continue
 
-            logger.info(f"[{symbol}] Tworzenie teczek analitycznych jest obecnie wyłączone. Przechodzę do trybu transakcyjnego.")
-
-            logger.info(
-                f"[{symbol}] Przygotowano zlecenie: Entry={final_entry}, SL={final_sl}, "
-                f"TP={final_tp}, Qty={final_qty}."
-            )
-            
-            custom_order_link_id = f"bot_{alert_id.replace('-', '')[:16]}_{int(datetime.now().timestamp())}"
-
+            # Krok g: Złożenie Zlecenia Zintegrowanego
+            custom_order_link_id = f"bot_{alert_id.replace('-', '')[:16]}"
             order_params = {
                 "symbol": symbol, "side": "Buy" if alert_model.direction == "LONG" else "Sell",
                 "orderType": "Limit", "qty": final_qty, "price": final_entry,
-                "takeProfit": final_tp,
-                "stopLoss": final_sl,
-                "tpTriggerBy": "MarkPrice",
-                "slTriggerBy": "MarkPrice",
-                "orderLinkId": custom_order_link_id,
-                "timeInForce": "GTC"
+                "takeProfit": final_tp, "stopLoss": final_sl,
+                "tpTriggerBy": "MarkPrice", "slTriggerBy": "MarkPrice",
+                "orderLinkId": custom_order_link_id, "timeInForce": "GTC"
             }
-
+            
+            logger.info(f"[{symbol}] Przygotowano finalne zlecenie: {order_params}")
             response = executor.place_order(order_params)
             
+            # Krok h: Zapis Stanu (Złoty Rekord)
             if response and response.get('orderId'):
                 order_id = response.get('orderId')
-                logger.info(f"[{symbol}] Zlecenie zintegrowane pomyślnie złożone. Order ID: {order_id}")
+                logger.info(f"[{symbol}] SUKCES! Zlecenie zintegrowane pomyślnie złożone. Order ID: {order_id}")
+                
                 order_data_to_save = {
                     "symbol": symbol,
                     "orderId": order_id,
                     "orderLinkId": custom_order_link_id,
-                    "status": "NEW_BRACKET",
                     "alert_id": alert_id,
                     "direction": alert_model.direction,
-                    "final_entry_price": final_entry,
-                    "final_sl_price": final_sl, 
-                    "final_tp_price": final_tp,
-                    "tp_price_chart": alert_model.tp_3_0
+                    "planned_entry_price": final_entry,
+                    "planned_sl_price": final_sl, 
+                    "planned_tp_price": final_tp,
+                    "planned_qty": final_qty,
+                    "alert_entry_price": alert_model.entry,
+                    "alert_sl_price": alert_model.sl,
+                    "alert_tp_price": alert_model.tp_2_0
                 }
                 state_manager.save_active_order(order_id, order_data_to_save)
             else:
-                raise Exception("Nie udało się złożyć zlecenia zintegrowanego (brak odpowiedzi od Bybit).")
+                logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się złożyć zlecenia (brak orderId w odpowiedzi).")
 
             processed_symbols_in_cycle.add(symbol)
 
-        # --- POCZĄTEK POPRAWKI: Dodanie brakującego bloku 'except' ---
         except BybitAPIError as e:
-            if e.ret_code == 110093:
-                logger.warning(f"[{symbol}] Zlecenie odrzucone (110093) z powodu ustawień margin. Pomijam.")
-            else:
-                logger.error(f"Błąd API Bybit dla alertu {alert_id}: {e}", exc_info=False)
-            processed_symbols_in_cycle.add(symbol)
+            logger.error(f"Błąd API Bybit podczas przetwarzania alertu {alert_id}: {e}", exc_info=False)
+            processed_symbols_in_cycle.add(alert_dict.get("symbol", "UNKNOWN"))
         except Exception as e:
-            logger.error(f"Krytyczny błąd podczas atomowego przetwarzania alertu {alert_id}: {e}", exc_info=True)
-            processed_symbols_in_cycle.add(symbol)
-        # --- KONIEC POPRAWKI ---
+            logger.error(f"Krytyczny błąd podczas transakcyjnego przetwarzania alertu {alert_id}: {e}", exc_info=True)
+            processed_symbols_in_cycle.add(alert_dict.get("symbol", "UNKNOWN"))
+
+# --- USUNIĘTO STARĄ FUNKCJĘ process_alerts_atomically ---
 
 def _transform_liquidation_record(liq_record: Dict[str, Any]) -> Dict[str, Any]:
     """Tłumaczy rekord likwidacji na format zgodny z rekordem PnL."""
@@ -191,14 +177,17 @@ def _transform_liquidation_record(liq_record: Dict[str, Any]) -> Dict[str, Any]:
         "exitType": "Liquidation"
     }
 
-
 def log_closed_positions_pnl(executor: BybitExecutor) -> int:
-    logger.info("[PNL_LOGGER] Rozpoczynam cykl logowania PnL (w tym likwidacji).")
+    """
+    Pobiera zamknięte pozycje, znajduje dla nich dopasowanie w `active_orders`
+    i loguje wzbogacony rekord do BigQuery.
+    """
+    logger.info("[PNL_LOGGER] Rozpoczynam cykl logowania zamkniętych pozycji.")
     
     last_check_ts_dt = load_last_processed_timestamp("pnl_logger_last_fetch_state")
     current_cycle_start_time = datetime.now(timezone.utc)
     
-    LOOKBACK_BUFFER_HOURS = 24
+    LOOKBACK_BUFFER_HOURS = 12
     start_time_with_buffer = last_check_ts_dt - timedelta(hours=LOOKBACK_BUFFER_HOURS)
     logger.info(f"[PNL_LOGGER] Sprawdzam zamknięte pozycje od: {start_time_with_buffer.isoformat()} (z {LOOKBACK_BUFFER_HOURS}h buforem).")
     start_time_ms = int(start_time_with_buffer.timestamp() * 1000)
@@ -207,14 +196,12 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
     try:
         pnl_records = executor.get_closed_pnl_history(start_time_ms=start_time_ms)
         all_records.extend(pnl_records)
-        liq_records_raw = executor.get_liquidation_history(start_time_ms=start_time_ms)
-        all_records.extend([_transform_liquidation_record(rec) for rec in liq_records_raw])
     except Exception as e:
         logger.critical(f"[PNL_LOGGER] Krytyczny błąd podczas pobierania historii z Bybit: {e}", exc_info=True)
         return 0
 
     if not all_records:
-        logger.info("[PNL_LOGGER] Nie znaleziono żadnych zamkniętych pozycji od ostatniego sprawdzenia.")
+        logger.info("[PNL_LOGGER] Nie znaleziono żadnych nowych zamkniętych pozycji.")
         save_last_processed_timestamp(current_cycle_start_time, "pnl_logger_last_fetch_state")
         return 0
 
@@ -229,7 +216,6 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
         symbol = pnl_record.get("symbol")
         
         try:
-            # --- POCZĄTEK POPRAWIONEJ LOGIKI ---
             if not order_id or not symbol:
                 logger.warning("[PNL_LOGGER] Pominięto rekord bez orderId lub symbolu.", extra={"json_fields": {"pnl_record": pnl_record}})
                 continue
@@ -240,20 +226,15 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
             
             if not active_order_data:
                 logger.warning(f"[PNL_LOGGER] Nie znaleziono dopasowania dla orderId '{order_id}'. Transakcja zostanie zapisana jako UNMATCHED.")
-                active_order_data = {} # Użyj pustego słownika, aby zapisać transakcję
+                active_order_data = {}
 
-            # Zawsze wywołujemy zapis do BigQuery
             if log_real_trade_result(pnl_record, active_order_data):
                 processed_count += 1
             
-            # Sprzątamy, tylko jeśli było dopasowanie
             if active_order_data:
                 logger.info(f"[PNL_LOGGER] Sprzątanie: Usuwanie dokumentu '{order_id}' z kolekcji active_orders.")
                 state_manager.delete_active_order_by_id(order_id)
             
-            # --- KONIEC POPRAWIONEJ LOGIKI ---
-
-            # NIEZALEŻNIE OD WYNIKU, aktualizujemy nasz postęp w pętli
             updated_time_ms = int(pnl_record.get("updatedTime", 0))
             if updated_time_ms > 0:
                 record_ts_dt = datetime.fromtimestamp(updated_time_ms / 1000, tz=timezone.utc)
@@ -261,10 +242,9 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
                     new_max_ts_dt = record_ts_dt
 
         except Exception as e:
-            logger.error(f"[PNL_LOGGER] Krytyczny błąd podczas przetwarzania rekordu dla symbolu {symbol}. Błąd: {e}", exc_info=True)
+            logger.error(f"[PNL_LOGGER] Krytyczny błąd podczas przetwarzania rekordu dla {symbol} [OrderID: {order_id}]. Błąd: {e}", exc_info=True)
             continue
     
-    # Po zakończeniu pętli, zapisujemy NAJNOWSZY timestamp, jaki widzieliśmy
     final_timestamp_to_save = max(new_max_ts_dt, current_cycle_start_time)
     save_last_processed_timestamp(final_timestamp_to_save, "pnl_logger_last_fetch_state")
     logger.info(f"[PNL_LOGGER] Zakończono cykl. Przetworzono {processed_count} rekordów. Zaktualizowano znacznik czasu na {final_timestamp_to_save.isoformat()}.")
@@ -301,6 +281,8 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
         return False
     logger.info(f"Alert [{alert.symbol}] przeszedł walidację. Kierunek: {alert.direction}, Ryzyko: {risk_perc}%.")
     return True
+
+
 
 def _run_analysis_of_existing_cases():
     logger.info("Rozpoczynam główną pętlę cyklu analitycznego.")

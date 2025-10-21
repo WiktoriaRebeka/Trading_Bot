@@ -94,6 +94,7 @@ def save_active_order(order_id: str, order_data: Dict[str, Any]):
             return
         
         doc_ref = _get_db().collection(constants.ACTIVE_ORDERS_COLLECTION).document(order_id)
+        order_data['created_at'] = datetime.now(timezone.utc) # Dodajemy timestamp
         doc_ref.set(order_data)
         logger.info(f"Zapisano aktywne zlecenie {order_id} dla symbolu {order_data.get('symbol')}.")
     except Exception as e:
@@ -112,7 +113,7 @@ def get_active_order_by_id(order_id: str) -> Optional[Dict[str, Any]]:
         return None
 
 def delete_active_order_by_id(order_id: str):
-    """Usuwa dokument aktywnego zlecenia na podstawie jego ID."""
+    """Usuwa dokument aktywnego zlecenia na podstawie jego ID po przetworzeniu."""
     try:
         _get_db().collection(constants.ACTIVE_ORDERS_COLLECTION).document(order_id).delete()
         logger.info(f"[{order_id}] Pomyślnie usunięto przetworzone zlecenie z kolekcji active_orders.")

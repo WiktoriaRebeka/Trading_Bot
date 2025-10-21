@@ -1,4 +1,5 @@
 # Lokalizacja: bot_service/app_setup.py
+
 import logging
 import os
 import uuid
@@ -7,15 +8,13 @@ from flask import Flask, jsonify, request
 from shared_lib.secret_manager import get_secret
 from shared_lib.firebase_client import initialize_firebase
 from bot_service.bigquery_logger import initialize_bigquery
-# Zmieniamy import, aby odzwierciedlić nową, połączoną logikę
-from bot_service.bot_logic import run_combined_cycle, log_closed_positions_pnl
 from bot_service.bybit_executor import BybitExecutor
+from bot_service.bot_logic import process_new_alerts, log_closed_positions_pnl
 
 logger = logging.getLogger(__name__)
 
 # --- Konfiguracja Aplikacji ---
 GCP_PROJECT_ID = os.getenv("GCP_PROJECT")
-# Zmienna USE_TESTNET jest nadal przydatna, aby kontrolować, z którym API się łączymy
 USE_TESTNET = os.getenv("USE_TESTNET", "true").lower() == "true"
 
 def register_endpoints(app: Flask):
@@ -39,10 +38,11 @@ def register_endpoints(app: Flask):
             reason = app.config.get('INITIALIZATION_FAILURE_REASON', 'Unknown initialization error.')
             return jsonify({"status": "unhealthy", "reason": reason}), 503
 
-    @app.route('/run-bot-cycle', methods=['POST'])
-    def run_bot_cycle_endpoint():
+    # --- NOWY, DEDYKOWANY ENDPOINT DO PRZETWARZANIA ALERTÓW ---
+    @app.route('/process-alerts', methods=['POST'])
+    def process_alerts_endpoint():
         cycle_id = str(uuid.uuid4())
-        logger.info(f"--- Rozpoczynam połączony cykl bota [ID: {cycle_id}] ---")
+        logger.info(f"--- Rozpoczynam cykl przetwarzania alertów [ID: {cycle_id}] ---")
 
         if not app.config.get('INITIALIZATION_SUCCESS', False):
              reason = app.config.get('INITIALIZATION_FAILURE_REASON', 'Aplikacja niezainicjalizowana.')
@@ -54,21 +54,21 @@ def register_endpoints(app: Flask):
             if not bybit_executor:
                 raise RuntimeError("BybitExecutor nie został poprawnie zainicjalizowany.")
             
-            # Wywołujemy jedną, połączoną funkcję, która robi wszystko
-            run_combined_cycle(bybit_executor)
+            process_new_alerts(bybit_executor)
 
-            logger.info(f"--- Cykl zakończony pomyślnie [ID: {cycle_id}] ---")
+            logger.info(f"--- Cykl przetwarzania alertów zakończony pomyślnie [ID: {cycle_id}] ---")
             return jsonify({"status": "success", "cycle_id": cycle_id}), 200
         except Exception as e:
-            logger.error(f"KRYTYCZNY BŁĄD w głównym cyklu bota: {e}", exc_info=True, extra={"json_fields": {"cycle_id": cycle_id}})
+            logger.error(f"KRYTYCZNY BŁĄD w cyklu przetwarzania alertów: {e}", exc_info=True, extra={"json_fields": {"cycle_id": cycle_id}})
             return jsonify({"status": "error", "message": str(e), "cycle_id": cycle_id}), 500
+
+    # --- USUNIĘTO STARY ENDPOINT /run-bot-cycle ---
 
     @app.route('/log-pnl', methods=['POST'])
     def log_pnl_endpoint():
         cycle_id = str(uuid.uuid4())
         logger.info(f"--- Rozpoczynam cykl logowania PnL [ID: {cycle_id}] ---")
 
-        # Usunięto warunek TRADING_MODE, ten endpoint jest teraz zawsze dostępny
         if not app.config.get('INITIALIZATION_SUCCESS', False):
              reason = app.config.get('INITIALIZATION_FAILURE_REASON', 'Aplikacja niezainicjalizowana.')
              logger.error(f"Zatrzymano cykl PnL, ponieważ aplikacja nie jest 'healthy'. Powód: {reason}", extra={"json_fields": {"cycle_id": cycle_id}})
@@ -96,7 +96,6 @@ def initialize_app_services(app: Flask):
         if not initialize_firebase(): failure_reasons.append("Failed to initialize Firebase/Firestore")
         if not initialize_bigquery(): failure_reasons.append("Failed to initialize BigQuery")
         
-        # Inicjalizacja BybitExecutor jest teraz ZAWSZE wymagana
         if not GCP_PROJECT_ID:
             failure_reasons.append("Zmienna środowiskowa GCP_PROJECT nie jest ustawiona.")
         else:
@@ -105,7 +104,6 @@ def initialize_app_services(app: Flask):
 
             if api_key and api_secret:
                 try:
-                    # Używamy USE_TESTNET, ale można to usunąć, jeśli URL jest na stałe w executorze
                     executor = BybitExecutor(api_key=api_key, api_secret=api_secret, testnet=USE_TESTNET)
                     app.config['BYBIT_EXECUTOR'] = executor
                     logger.info(f"BybitExecutor pomyślnie zainicjalizowany. Tryb Testnet: {USE_TESTNET}")

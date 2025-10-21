@@ -8,7 +8,10 @@ FIRESTORE_COLLECTION_ALERTS = "alerts"
 BOT_CONFIG_COLLECTION = "bot_config"
 LATEST_KLINES_COLLECTION = "latest_klines"
 ANALYTICAL_CASES_COLLECTION = "analytical_cases"
-ACTIVE_ORDERS_COLLECTION = "active_orders"  # <-- TA LINIA MUSI ISTNIEĆ
+# --- POCZĄTEK ZMIANY ---
+ACTIVE_ORDERS_COLLECTION = "active_orders"
+PROCESSED_ORDER_IDS_COLLECTION = "processed_order_ids" # Dla zapewnienia idempotentności
+# --- KONIEC ZMIANY ---
 
 # Nazwy dokumentów i pól
 SYMBOLS_CONFIG_DOC_ID = "symbols_config"
@@ -18,7 +21,9 @@ LAST_PROCESSED_TS_FIELD = "last_processed_timestamp"
 BIGQUERY_PROJECT_ID = os.getenv("GCP_PROJECT", "trading-bot-463318")
 BIGQUERY_DATASET_ID = "trading_analytics"
 BIGQUERY_ANALYTICAL_TABLE_ID = "new_trades_history"
+# --- POCZĄTEK ZMIANY ---
 BIGQUERY_REAL_TRADES_TABLE_ID = "real_trades_history"
+# --- KONIEC ZMIANY ---
 
 # === Konfiguracja API ===
 BYBIT_API_URL_V5_KLINE = "https://api.bybit.com/v5/market/kline"

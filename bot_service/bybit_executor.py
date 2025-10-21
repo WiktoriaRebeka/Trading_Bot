@@ -72,7 +72,8 @@ class BybitExecutor:
                 return {}
             
             data = response.json()
-            logger.info(f"Pełna surowa odpowiedź z Bybit dla {endpoint}: {data}")
+            # Usunięto zbyt szczegółowe logowanie pełnej odpowiedzi, aby nie zaśmiecać logów
+            # logger.info(f"Pełna surowa odpowiedź z Bybit dla {endpoint}: {data}")
 
             if data.get("retCode") != 0:
                 raise BybitAPIError(ret_code=data.get("retCode"), ret_msg=data.get("retMsg"))
@@ -86,7 +87,8 @@ class BybitExecutor:
             logger.error(f"Błąd sieciowy podczas komunikacji z Bybit. Endpoint: {endpoint}, Błąd: {e}")
             raise
         except BybitAPIError as e:
-            logger.error(f"Błąd API Bybit. Endpoint: {endpoint}, Code: {e.ret_code}, Msg: '{e.ret_msg}'")
+            # Logujemy jako warning, bo wiele błędów API jest spodziewanych (np. brak zleceń do anulowania)
+            logger.warning(f"Błąd API Bybit. Endpoint: {endpoint}, Code: {e.ret_code}, Msg: '{e.ret_msg}'")
             raise
         except Exception as e:
             logger.error(f"Nieoczekiwany błąd w _send_request: {e}", exc_info=True)
@@ -108,10 +110,9 @@ class BybitExecutor:
             "qty": str(params['qty']),
         }
 
+        # Lista wszystkich możliwych parametrów, które chcemy przekazać
         optional_params = [
-            "price", "triggerPrice", "triggerDirection", "triggerBy", "orderFilter",
-            "reduceOnly", "closeOnTrigger", "timeInForce", "orderLinkId",
-            "takeProfit", "stopLoss", "tpTriggerBy", "slTriggerBy"
+            "price", "takeProfit", "stopLoss", "tpTriggerBy", "slTriggerBy", "orderLinkId", "timeInForce"
         ]
 
         for param in optional_params:
@@ -129,11 +130,14 @@ class BybitExecutor:
             
             logger.error(f"[{symbol}] API Bybit nie zwróciło orderId. Pełna odpowiedź 'result': {result}")
             return None
-        except (RequestException, BybitAPIError) as e:
+        except BybitAPIError as e:
+            # Przekazujemy wyjątek dalej, aby logika biznesowa mogła na niego zareagować
             raise
         except Exception as e:
             logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD podczas składania zlecenia. Błąd: {e}", exc_info=True)
             raise
+
+ 
 
     def get_closed_pnl_history(self, start_time_ms: int, limit: int = 50) -> List[Dict[str, Any]]:
         endpoint = "/v5/position/closed-pnl"
