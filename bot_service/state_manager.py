@@ -1,7 +1,7 @@
 # Lokalizacja: bot_service/state_manager.py
 
 import logging
-from typing import Iterable, Dict, Any, List, Optional, Tuple
+from typing import Iterable, Dict, Any, List, Optional
 from datetime import datetime
 from google.cloud import firestore
 from google.cloud.firestore_v1.document import DocumentSnapshot
@@ -39,7 +39,6 @@ def delete_case_by_id(case_id: str):
 def create_analytical_case(case_data: AnalyticalCase):
     """Tworzy nowy dokument teczki analitycznej w Firestore."""
     try:
-
         doc_ref = _get_db().collection(constants.ANALYTICAL_CASES_COLLECTION).document(case_data.alert_id)
         data_to_set = case_data.model_dump(mode='json')
         
@@ -70,7 +69,6 @@ def get_latest_klines_from_cache(symbols: Iterable[str]) -> Dict[str, Dict[str, 
     if not unique_symbols:
         return {}
     
-    # Firestore 'in' query supports max 30 elements
     for i in range(0, len(unique_symbols), 30):
         chunk = unique_symbols[i:i + 30]
         if not chunk: continue
@@ -113,7 +111,6 @@ def get_active_order_by_id(order_id: str) -> Optional[Dict[str, Any]]:
         logger.error(f"Błąd podczas pobierania aktywnego zlecenia {order_id}: {e}", exc_info=True)
         return None
 
-
 def delete_active_order_by_id(order_id: str):
     """Usuwa dokument aktywnego zlecenia na podstawie jego ID."""
     try:
@@ -122,39 +119,6 @@ def delete_active_order_by_id(order_id: str):
     except Exception as e:
         logger.error(f"Błąd podczas usuwania aktywnego zlecenia {order_id}: {e}", exc_info=True)
 
-# Należy dodać tę nową funkcję w pliku bot_service/state_manager.py
-
-def get_active_order_by_symbol(symbol: str) -> Optional[Dict[str, Any]]:
-    """
-    Pobiera dane aktywnego zlecenia na podstawie jego symbolu.
-    Gwarantuje, że zawsze szukamy symbolu w naszym wewnętrznym formacie (.P).
-    Zakłada, że może istnieć tylko jedno aktywne zlecenie na dany symbol.
-    """
-    try:
-        # Krok 1: Ujednolicenie formatu symbolu do naszego wewnętrznego standardu (.P)
-        symbol_with_p = symbol if symbol.endswith('.P') else f"{symbol}.P"
-        logger.info(f"Próba znalezienia aktywnego zlecenia dla symbolu: '{symbol_with_p}' (oryginalny: '{symbol}')")
-
-        # Krok 2: Zapytanie do Firestore
-        docs_stream = _get_db().collection(constants.ACTIVE_ORDERS_COLLECTION) \
-            .where('symbol', '==', symbol_with_p) \
-            .limit(1) \
-            .stream()
-        
-        doc = next(docs_stream, None)
-        
-        # Krok 3: Przetworzenie wyniku
-        if doc and doc.exists:
-            logger.info(f"SUKCES: Znaleziono dopasowanie w active_orders dla symbolu {symbol_with_p} (ID dokumentu: {doc.id})")
-            return doc.to_dict()
-        
-        logger.warning(f"Nie znaleziono dokumentu w active_orders dla symbolu {symbol_with_p}")
-        return None
-    except Exception as e:
-        logger.error(f"Błąd podczas pobierania aktywnego zlecenia dla symbolu {symbol}: {e}", exc_info=True)
-        return None
-
-# === NOWA, KLUCZOWA FUNKCJA, KTÓREJ BRAKOWAŁO ===
 def get_alert_data_by_id(alert_id: str) -> Optional[Dict[str, Any]]:
     """Pobiera surowe dane alertu na podstawie jego ID z kolekcji 'alerts'."""
     try:
@@ -181,14 +145,14 @@ def update_active_order(order_id: str, updates: Dict[str, Any]):
     except Exception as e:
         logger.error(f"Błąd podczas aktualizacji zlecenia {order_id}: {e}", exc_info=True)
 
-
-
+# --- NOWA, POPRAWIONA FUNKCJA ---
 def get_active_orders_by_symbol(symbol: str) -> List[Dict[str, Any]]:
     """
     Pobiera WSZYSTKIE aktywne zlecenia dla danego symbolu.
     Zwraca listę słowników.
     """
     try:
+        # Ujednolicamy symbol do formatu z .P, jeśli go nie ma
         symbol_with_p = symbol if symbol.endswith('.P') else f"{symbol}.P"
         
         docs_stream = _get_db().collection(constants.ACTIVE_ORDERS_COLLECTION) \

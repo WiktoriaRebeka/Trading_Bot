@@ -183,13 +183,6 @@ def _transform_liquidation_record(liq_record: Dict[str, Any]) -> Dict[str, Any]:
         "exitType": "Liquidation"
     }
 
-# W pliku bot_service/bot_logic.py
-
-# Zastąp CAŁĄ funkcję log_closed_positions_pnl poniższą wersją:
-
-# W pliku bot_service/bot_logic.py
-
-# Zastąp CAŁĄ funkcję log_closed_positions_pnl poniższą wersją:
 
 def log_closed_positions_pnl(executor: BybitExecutor) -> int:
     logger.info("[PNL_LOGGER] Rozpoczynam cykl logowania PnL (w tym likwidacji).")
@@ -235,25 +228,25 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
 
             logger.info(f"[PNL_LOGGER] Przetwarzanie rekordu dla {symbol} [OrderID: {order_id}, OrderLinkID: {order_link_id}]")
             
-            # --- POCZĄTEK NOWEJ LOGIKI: "ZAPISZ WSZYSTKO" ---
+            # --- POCZĄTEK NOWEJ, 3-ETAPOWEJ LOGIKI DOPASOWANIA ---
             active_order_data = None
             document_id_to_delete = None
 
-            # Próba 1: Dopasowanie po orderLinkId
+            # Próba 1: Dopasowanie po orderLinkId (najlepsza metoda)
             if order_link_id and order_link_id.startswith("bot_"):
                 active_order_data = state_manager.get_active_order_by_id(order_link_id)
                 if active_order_data:
                     document_id_to_delete = order_link_id
                     logger.info(f"[PNL_LOGGER] SUKCES (Metoda 1): Znaleziono dopasowanie po orderLinkId: '{order_link_id}'.")
 
-            # Próba 2: Dopasowanie po orderId
+            # Próba 2: Dopasowanie po orderId (fallback)
             if not active_order_data and order_id:
                 active_order_data = state_manager.get_active_order_by_id(order_id)
                 if active_order_data:
                     document_id_to_delete = order_id
                     logger.info(f"[PNL_LOGGER] SUKCES (Metoda 2): Znaleziono dopasowanie po orderId: '{order_id}'.")
 
-            # Próba 3: Dopasowanie po symbolu
+            # Próba 3: Dopasowanie po symbolu (ostateczność)
             if not active_order_data:
                 logger.warning(f"[PNL_LOGGER] Nie udało się dopasować po ID. Próbuję po symbolu: '{symbol}'.")
                 matching_orders = state_manager.get_active_orders_by_symbol(symbol)
@@ -264,7 +257,7 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
                 elif len(matching_orders) > 1:
                     logger.error(f"[PNL_LOGGER] Znaleziono {len(matching_orders)} aktywnych zleceń dla {symbol}. Nie można bezpiecznie dopasować.")
             
-            # Jeśli nie znaleziono dopasowania, użyj pustego słownika, aby uniknąć błędów
+            # Jeśli nie znaleziono dopasowania, użyj pustego słownika
             if not active_order_data:
                 logger.warning(f"[PNL_LOGGER] Nie znaleziono dopasowania dla transakcji. Zostanie zapisana jako UNMATCHED.")
                 active_order_data = {}
@@ -279,7 +272,7 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
                 state_manager.delete_active_order_by_id(document_id_to_delete)
             # --- KONIEC NOWEJ LOGIKI ---
 
-            # Aktualizujemy postęp w pętli
+            # Aktualizujemy postęp w pętli, aby nie utknąć
             updated_time_ms = int(pnl_record.get("updatedTime", 0))
             if updated_time_ms > 0:
                 record_ts_dt = datetime.fromtimestamp(updated_time_ms / 1000, tz=timezone.utc)
@@ -290,6 +283,7 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
             logger.error(f"[PNL_LOGGER] Krytyczny błąd podczas przetwarzania rekordu dla symbolu {symbol}. Błąd: {e}", exc_info=True)
             continue
     
+    # Po zakończeniu pętli, zapisujemy NAJNOWSZY timestamp, jaki widzieliśmy
     final_timestamp_to_save = max(new_max_ts_dt, current_cycle_start_time)
     save_last_processed_timestamp(final_timestamp_to_save, "pnl_logger_last_fetch_state")
     logger.info(f"[PNL_LOGGER] Zakończono cykl. Przetworzono {processed_count} rekordów. Zaktualizowano znacznik czasu na {final_timestamp_to_save.isoformat()}.")
