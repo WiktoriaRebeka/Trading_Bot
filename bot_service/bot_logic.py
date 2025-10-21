@@ -176,86 +176,104 @@ def _transform_liquidation_record(liq_record: Dict[str, Any]) -> Dict[str, Any]:
         "exitType": "Liquidation"
     }
 
+# Zastąp CAŁĄ funkcję log_closed_positions_pnl poniższą wersją:
+
 def log_closed_positions_pnl(executor: BybitExecutor) -> int:
     logger.info("[PNL_LOGGER] Rozpoczynam cykl logowania PnL (w tym likwidacji).")
     
     last_check_ts_dt = load_last_processed_timestamp("pnl_logger_last_fetch_state")
-    if not last_check_ts_dt:
-        logger.warning("[PNL_LOGGER] Nie udało się załadować ostatniego znacznika czasu. Używam domyślnego (24h w przeszłość).")
-        last_check_ts_dt = datetime.now(timezone.utc) - timedelta(hours=24)
-
     current_cycle_start_time = datetime.now(timezone.utc)
-    
-    LOOKBACK_BUFFER_HOURS = 24
-    start_time_with_buffer = last_check_ts_dt - timedelta(hours=LOOKBACK_BUFFER_HOURS)
-    logger.info(f"[PNL_LOGGER] Sprawdzam zamknięte pozycje od: {start_time_with_buffer.isoformat()} (z {LOOKBACK_BUFFER_HOURS}h buforem).")
-    
-    start_time_ms = int(start_time_with_buffer.timestamp() * 1000)
+    start_time_ms = int((last_check_ts_dt - timedelta(hours=24)).timestamp() * 1000)
     
     all_records = []
     try:
         pnl_records = executor.get_closed_pnl_history(start_time_ms=start_time_ms)
         all_records.extend(pnl_records)
-
         liq_records_raw = executor.get_liquidation_history(start_time_ms=start_time_ms)
-        liq_records_transformed = [_transform_liquidation_record(rec) for rec in liq_records_raw]
-        all_records.extend(liq_records_transformed)
-
+        all_records.extend([_transform_liquidation_record(rec) for rec in liq_records_raw])
     except Exception as e:
         logger.critical(f"[PNL_LOGGER] Krytyczny błąd podczas pobierania historii z Bybit: {e}", exc_info=True)
         return 0
 
-    processed_count = 0
+    if not all_records:
+        logger.info("[PNL_LOGGER] Nie znaleziono żadnych zamkniętych pozycji od ostatniego sprawdzenia.")
+        save_last_processed_timestamp(current_cycle_start_time, "pnl_logger_last_fetch_state")
+        return 0
+
+    logger.info(f"[PNL_LOGGER] Znaleziono łącznie {len(all_records)} zamkniętych pozycji. Rozpoczynam przetwarzanie.")
+    pnl_records_sorted = sorted(all_records, key=lambda r: int(r.get("updatedTime", 0)))
     
-    if all_records:
-        logger.info(f"[PNL_LOGGER] Znaleziono łącznie {len(all_records)} zamkniętych pozycji (w tym likwidacje). Rozpoczynam przetwarzanie.")
+    processed_count = 0
+    last_processed_record_in_cycle = None
+    for pnl_record in pnl_records_sorted:
+        order_id = pnl_record.get("orderId")
+        order_link_id = pnl_record.get("orderLinkId")
+        symbol = pnl_record.get("symbol")
         
-        pnl_records_sorted = sorted(all_records, key=lambda r: int(r.get("updatedTime", 0)))
-        
-        last_processed_record_in_cycle = None
+        try:
+            if not symbol:
+                logger.warning("[PNL_LOGGER] Pominięto rekord bez symbolu.", extra={"json_fields": {"pnl_record": pnl_record}})
+                continue
 
-        for pnl_record in pnl_records_sorted:
-            order_id = pnl_record.get("orderId", "N/A")
-            symbol = pnl_record.get("symbol", "N/A")
+            logger.info(f"[PNL_LOGGER] Przetwarzanie rekordu dla {symbol} [OrderID: {order_id}, OrderLinkID: {order_link_id}]")
             
-            try:
-                if not symbol or symbol == "N/A" or order_id == "N/A":
-                    logger.warning("[PNL_LOGGER] Pominięto rekord bez symbolu lub orderId.", extra={"json_fields": {"pnl_record": pnl_record}})
-                    continue
+            # --- POCZĄTEK NOWEJ, 3-ETAPOWEJ LOGIKI DOPASOWANIA ---
+            active_order_data = None
+            document_id_to_delete = None
 
-                logger.info(f"[PNL_LOGGER] Przetwarzanie rekordu dla {symbol} [OrderID: {order_id}]")
-                
-                logger.info(f"[PNL_LOGGER] Próba znalezienia dopasowania dla orderId '{order_id}' w active_orders...")
+            # Próba 1: Dopasowanie po orderLinkId (najlepsza metoda)
+            if order_link_id and order_link_id.startswith("bot_"):
+                active_order_data = state_manager.get_active_order_by_id(order_link_id)
+                if active_order_data:
+                    document_id_to_delete = order_link_id
+                    logger.info(f"[PNL_LOGGER] SUKCES (Metoda 1): Znaleziono dopasowanie po orderLinkId: '{order_link_id}'.")
+
+            # Próba 2: Dopasowanie po orderId (fallback)
+            if not active_order_data and order_id:
                 active_order_data = state_manager.get_active_order_by_id(order_id)
-                
+                if active_order_data:
+                    document_id_to_delete = order_id
+                    logger.info(f"[PNL_LOGGER] SUKCES (Metoda 2): Znaleziono dopasowanie po orderId: '{order_id}'.")
+
+            # Próba 3: Dopasowanie po symbolu (ostateczność, inspirowane starym kodem)
+            if not active_order_data:
+                logger.warning(f"[PNL_LOGGER] Nie udało się dopasować po ID. Próbuję po symbolu: '{symbol}'.")
+                matching_orders = state_manager.get_active_orders_by_symbol(symbol)
+                if len(matching_orders) == 1:
+                    active_order_data = matching_orders[0]
+                    # Musimy ustalić, co jest kluczem tego dokumentu, aby go później usunąć
+                    document_id_to_delete = active_order_data.get("orderLinkId") or active_order_data.get("orderId")
+                    logger.info(f"[PNL_LOGGER] SUKCES (Metoda 3): Znaleziono JEDNO aktywne zlecenie dla symbolu. ID dokumentu: '{document_id_to_delete}'.")
+                elif len(matching_orders) > 1:
+                    logger.error(f"[PNL_LOGGER] Znaleziono {len(matching_orders)} aktywnych zleceń dla {symbol}. Nie można bezpiecznie dopasować.")
+            
+            # --- KONIEC NOWEJ LOGIKI ---
+
+            if active_order_data:
                 if log_real_trade_result(pnl_record, active_order_data):
                     processed_count += 1
                 
-                if active_order_data:
-                    logger.info(f"[PNL_LOGGER] Sprzątanie: Usuwanie zlecenia {order_id} z kolekcji active_orders.")
-                    state_manager.delete_active_order_by_id(order_id)
+                if document_id_to_delete:
+                    logger.info(f"[PNL_LOGGER] Sprzątanie: Usuwanie dokumentu '{document_id_to_delete}' z kolekcji active_orders.")
+                    state_manager.delete_active_order_by_id(document_id_to_delete)
+            else:
+                logger.warning(
+                    f"[PNL_LOGGER][IGNOROWANO] Nie udało się znaleźć dopasowania dla transakcji dla symbolu {symbol} żadną z metod. "
+                    f"Transakcja nie zostanie zapisana w BigQuery."
+                )
 
-                last_processed_record_in_cycle = pnl_record
-
-            except Exception as e:
-                logger.error(f"[PNL_LOGGER] Krytyczny błąd podczas przetwarzania rekordu dla symbolu {symbol}. Rekord zostanie pominięty. Błąd: {e}", exc_info=True, extra={"json_fields": {"pnl_record": pnl_record}})
-                continue
-        
-        if last_processed_record_in_cycle:
-            last_ts_ms = int(last_processed_record_in_cycle.get("updatedTime", 0))
-            last_ts_dt = datetime.fromtimestamp(last_ts_ms / 1000, tz=timezone.utc)
-            final_timestamp_to_save = max(last_ts_dt, current_cycle_start_time)
-            save_last_processed_timestamp(final_timestamp_to_save, "pnl_logger_last_fetch_state")
-            logger.info(f"[PNL_LOGGER] Zakończono cykl. Przetworzono {processed_count} nowych rekordów. Zaktualizowano znacznik czasu na {final_timestamp_to_save.isoformat()}.")
-        else:
-            save_last_processed_timestamp(current_cycle_start_time, "pnl_logger_last_fetch_state")
-            logger.info(f"[PNL_LOGGER] Zakończono cykl. Przetworzono 0 nowych rekordów. Zaktualizowano znacznik czasu na czas startu cyklu: {current_cycle_start_time.isoformat()}.")
-
-    else:
-        logger.info("[PNL_LOGGER] Nie znaleziono żadnych zamkniętych pozycji (w tym likwidacji) na Bybit od ostatniego sprawdzenia.")
-        save_last_processed_timestamp(current_cycle_start_time, "pnl_logger_last_fetch_state")
-        logger.info(f"[PNL_LOGGER] Zakończono cykl. Przetworzono 0 rekordów. Zaktualizowano znacznik czasu na czas startu cyklu: {current_cycle_start_time.isoformat()}.")
+            last_processed_record_in_cycle = pnl_record
+        except Exception as e:
+            logger.error(f"[PNL_LOGGER] Krytyczny błąd podczas przetwarzania rekordu dla symbolu {symbol}. Błąd: {e}", exc_info=True)
+            continue
     
+    final_ts_to_save = current_cycle_start_time
+    if last_processed_record_in_cycle:
+        last_ts_dt = datetime.fromtimestamp(int(last_processed_record_in_cycle.get("updatedTime", 0)) / 1000, tz=timezone.utc)
+        final_ts_to_save = max(last_ts_dt, current_cycle_start_time)
+
+    save_last_processed_timestamp(final_ts_to_save, "pnl_logger_last_fetch_state")
+    logger.info(f"[PNL_LOGGER] Zakończono cykl. Przetworzono {processed_count} nowych rekordów. Zaktualizowano znacznik czasu na {final_ts_to_save.isoformat()}.")
     return processed_count
 
 def round_price_by_tick(price: float, tick_size: str, direction: str) -> float:

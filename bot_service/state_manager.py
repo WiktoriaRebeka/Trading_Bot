@@ -180,3 +180,22 @@ def update_active_order(order_id: str, updates: Dict[str, Any]):
         logger.info(f"Zaktualizowano aktywne zlecenie {order_id} z danymi: {updates}")
     except Exception as e:
         logger.error(f"Błąd podczas aktualizacji zlecenia {order_id}: {e}", exc_info=True)
+
+
+
+def get_active_orders_by_symbol(symbol: str) -> List[Dict[str, Any]]:
+    """
+    Pobiera WSZYSTKIE aktywne zlecenia dla danego symbolu.
+    Zwraca listę słowników.
+    """
+    try:
+        symbol_with_p = symbol if symbol.endswith('.P') else f"{symbol}.P"
+        
+        docs_stream = _get_db().collection(constants.ACTIVE_ORDERS_COLLECTION) \
+            .where('symbol', '==', symbol_with_p) \
+            .stream()
+        
+        return [doc.to_dict() for doc in docs_stream]
+    except Exception as e:
+        logger.error(f"Błąd podczas pobierania aktywnych zleceń dla symbolu {symbol}: {e}", exc_info=True)
+        return []
