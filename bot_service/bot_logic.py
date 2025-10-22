@@ -230,10 +230,8 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
             
             active_order_data = None
             
-            # Krok 1: Spróbuj znaleźć po orderId zlecenia otwierającego
             active_order_data = state_manager.get_active_order_by_limit_order_id(order_id_from_pnl)
 
-            # Krok 2: Jeśli nie znaleziono, spróbuj znaleźć po orderLinkId
             if not active_order_data:
                 logger.info(f"[{symbol}] Nie znaleziono dopasowania po limitOrderId. Próbuję znaleźć orderLinkId...")
                 order_history = executor.get_order_history_by_id(order_id_from_pnl)
@@ -249,8 +247,7 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
             else:
                 logger.info(f"[PNL_LOGGER] SUKCES! Znaleziono dopasowanie dla transakcji.")
 
-            # Przekazujemy pnl_record i active_order_data do jednej, niezawodnej funkcji.
-            # Ta funkcja sama zajmie się zapisem i sprzątaniem.
+            # Przekazujemy odpowiedzialność do `log_real_trade_result`, która sama posprząta po udanym zapisie.
             if log_real_trade_result(pnl_record, active_order_data):
                 processed_count += 1
             
