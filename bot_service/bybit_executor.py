@@ -319,3 +319,32 @@ class BybitExecutor:
             self._send_request("POST", "/v5/order/create", params=payload)
         except Exception as e:
             logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD podczas awaryjnego zamykania pozycji: {e}", exc_info=True)
+
+
+    def get_order_history_by_id(self, order_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Pobiera szczegóły historycznego zlecenia na podstawie jego ID.
+        To jest kluczowe do znalezienia orderLinkId dla zleceń TP/SL.
+        """
+        endpoint = "/v5/order/history"
+        params = {
+            "category": "linear",
+            "orderId": order_id,
+        }
+        try:
+            result = self._send_request("GET", endpoint, params=params)
+            if result and result.get('list'):
+                # Zazwyczaj zwróci listę z jednym elementem
+                return result['list'][0]
+            logger.warning(f"Nie znaleziono historii dla orderId: {order_id}")
+            return None
+        except BybitAPIError as e:
+            # Błąd 110001 ("order not exists") jest oczekiwany, jeśli to nie jest zlecenie TP/SL
+            if e.ret_code == 110001:
+                logger.info(f"API Bybit: Zlecenie {order_id} nie istnieje w historii (prawdopodobnie zlecenie otwierające).")
+            else:
+                logger.error(f"Błąd API podczas pobierania historii dla orderId {order_id}: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Nieoczekiwany błąd podczas pobierania historii dla orderId {order_id}: {e}", exc_info=True)
+            return None

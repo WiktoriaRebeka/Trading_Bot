@@ -2,7 +2,6 @@
 
 import logging
 from typing import Iterable, Dict, Any, List, Optional
-# --- OSTATECZNA POPRAWKA: Dodajemy 'timezone' do importu ---
 from datetime import datetime, timezone
 from google.cloud import firestore
 from google.cloud.firestore_v1.document import DocumentSnapshot
@@ -16,21 +15,16 @@ logger = logging.getLogger(__name__)
 def _get_db() -> firestore.Client:
     return get_db()
 
+# --- FUNKCJE DOTYCZĄCE ANALYTICAL CASES (BEZ ZMIAN) ---
 def get_pending_case_for_symbol(symbol: str) -> Optional[DocumentSnapshot]:
-    """Pobiera teczkę w stanie PENDING dla danego symbolu, jeśli istnieje."""
     try:
-        docs = _get_db().collection(constants.ANALYTICAL_CASES_COLLECTION) \
-            .where('symbol', '==', symbol) \
-            .where('status', '==', 'PENDING') \
-            .limit(1) \
-            .stream()
+        docs = _get_db().collection(constants.ANALYTICAL_CASES_COLLECTION).where('symbol', '==', symbol).where('status', '==', 'PENDING').limit(1).stream()
         return next(docs, None)
     except Exception as e:
         logger.error(f"Błąd podczas pobierania teczki PENDING dla {symbol}: {e}", exc_info=True)
         return None
 
 def delete_case_by_id(case_id: str):
-    """Usuwa dokument teczki analitycznej na podstawie jej ID."""
     try:
         _get_db().collection(constants.ANALYTICAL_CASES_COLLECTION).document(case_id).delete()
         logger.info(f"[{case_id}] Pomyślnie usunięto teczkę z Firestore.")
@@ -38,22 +32,18 @@ def delete_case_by_id(case_id: str):
         logger.error(f"Błąd podczas usuwania teczki {case_id}: {e}", exc_info=True)
 
 def create_analytical_case(case_data: AnalyticalCase):
-    """Tworzy nowy dokument teczki analitycznej w Firestore."""
     try:
         doc_ref = _get_db().collection(constants.ANALYTICAL_CASES_COLLECTION).document(case_data.alert_id)
         data_to_set = case_data.model_dump(mode='json')
-        
         doc_ref.set(data_to_set)
         logger.info(f"[{case_data.alert_id}] Utworzono nową teczkę analityczną dla {case_data.symbol}.")
     except Exception as e:
         logger.error(f"Błąd podczas tworzenia teczki {case_data.alert_id}: {e}", exc_info=True)
 
 def get_all_analytical_cases() -> Iterable[DocumentSnapshot]:
-    """Pobiera wszystkie aktywne teczki analityczne."""
     return _get_db().collection(constants.ANALYTICAL_CASES_COLLECTION).stream()
 
 def update_case_status_and_results(case_id: str, updates: Dict[str, Any]):
-    """Aktualizuje status i/lub wyniki w dokumencie teczki."""
     try:
         doc_ref = _get_db().collection(constants.ANALYTICAL_CASES_COLLECTION).document(case_id)
         doc_ref.update(updates)
@@ -62,14 +52,11 @@ def update_case_status_and_results(case_id: str, updates: Dict[str, Any]):
         logger.error(f"Błąd podczas aktualizacji teczki {case_id}: {e}", exc_info=True)
 
 def get_latest_klines_from_cache(symbols: Iterable[str]) -> Dict[str, Dict[str, Any]]:
-    if not symbols:
-        return {}
+    if not symbols: return {}
     db = _get_db()
     klines_cache = {}
     unique_symbols = list(set(s for s in symbols if isinstance(s, str) and s))
-    if not unique_symbols:
-        return {}
-    
+    if not unique_symbols: return {}
     for i in range(0, len(unique_symbols), 30):
         chunk = unique_symbols[i:i + 30]
         if not chunk: continue
@@ -80,49 +67,65 @@ def get_latest_klines_from_cache(symbols: Iterable[str]) -> Dict[str, Dict[str, 
         except Exception as e:
             logger.error(f"[KLINE_CACHE] Błąd podczas pobierania danych dla części {chunk}: {e}", exc_info=True)
             continue
-            
     if klines_cache:
         logger.info(f"[KLINE_CACHE] Pomyślnie pobrano {len(klines_cache)} rekordów kline z cache'u.")
     else:
         logger.warning(f"[KLINE_CACHE] Nie udało się pobrać rekordów kline z cache'u dla {unique_symbols}.")
     return klines_cache
 
-def save_active_order(order_id: str, order_data: Dict[str, Any]):
-    """Zapisuje informacje o aktywnym zleceniu do Firestore, używając orderId jako ID dokumentu."""
+# --- NOWA, POPRAWIONA SEKCJA OBSŁUGI ACTIVE ORDERS ---
+def save_active_order(order_link_id: str, order_data: Dict[str, Any]):
+    """Zapisuje informacje o aktywnym zleceniu, używając orderLinkId jako ID dokumentu."""
     try:
-        if not order_id:
-            logger.error("Próba zapisu aktywnego zlecenia bez orderId.")
+        if not order_link_id:
+            logger.error("Próba zapisu aktywnego zlecenia bez orderLinkId.")
             return
         
-        doc_ref = _get_db().collection(constants.ACTIVE_ORDERS_COLLECTION).document(order_id)
-        order_data['created_at'] = datetime.now(timezone.utc) 
+        doc_ref = _get_db().collection(constants.ACTIVE_ORDERS_COLLECTION).document(order_link_id)
+        order_data['created_at'] = datetime.now(timezone.utc)
         doc_ref.set(order_data)
-        logger.info(f"Zapisano aktywne zlecenie {order_id} dla symbolu {order_data.get('symbol')}.")
+        logger.info(f"Zapisano aktywne zlecenie {order_link_id} dla symbolu {order_data.get('symbol')}.")
     except Exception as e:
-        logger.error(f"Błąd podczas zapisu aktywnego zlecenia {order_id}: {e}", exc_info=True)
-
-def get_active_order_by_id(order_id: str) -> Optional[Dict[str, Any]]:
-    """Pobiera dane aktywnego zlecenia na podstawie jego ID."""
+        logger.error(f"Błąd podczas zapisu aktywnego zlecenia {order_link_id}: {e}", exc_info=True)
+        
+def get_active_order_by_id(order_link_id: str) -> Optional[Dict[str, Any]]:
+    """Pobiera dane aktywnego zlecenia na podstawie jego orderLinkId (który jest ID dokumentu)."""
     try:
-        doc_ref = _get_db().collection(constants.ACTIVE_ORDERS_COLLECTION).document(order_id)
+        doc_ref = _get_db().collection(constants.ACTIVE_ORDERS_COLLECTION).document(order_link_id)
         doc = doc_ref.get()
         if doc.exists:
-            return doc.to_dict()
+            data = doc.to_dict()
+            data['id'] = doc.id # Dodajemy ID dokumentu (czyli orderLinkId) do zwracanych danych
+            return data
         return None
     except Exception as e:
-        logger.error(f"Błąd podczas pobierania aktywnego zlecenia {order_id}: {e}", exc_info=True)
+        logger.error(f"Błąd podczas pobierania aktywnego zlecenia {order_link_id}: {e}", exc_info=True)
         return None
 
-def delete_active_order_by_id(order_id: str):
-    """Usuwa dokument aktywnego zlecenia na podstawie jego ID po przetworzeniu."""
+def get_active_order_by_limit_order_id(limit_order_id: str) -> Optional[Dict[str, Any]]:
+    """Wyszukuje aktywny dokument zlecenia na podstawie pola limitOrderId."""
     try:
-        _get_db().collection(constants.ACTIVE_ORDERS_COLLECTION).document(order_id).delete()
-        logger.info(f"[{order_id}] Pomyślnie usunięto przetworzone zlecenie z kolekcji active_orders.")
+        docs = _get_db().collection(constants.ACTIVE_ORDERS_COLLECTION).where('limitOrderId', '==', limit_order_id).limit(1).stream()
+        doc_snapshot = next(docs, None)
+        if doc_snapshot:
+            data = doc_snapshot.to_dict()
+            data['id'] = doc_snapshot.id # Dodajemy ID dokumentu (czyli orderLinkId) do zwracanych danych
+            return data
+        return None
     except Exception as e:
-        logger.error(f"Błąd podczas usuwania aktywnego zlecenia {order_id}: {e}", exc_info=True)
+        logger.error(f"Błąd podczas wyszukiwania zlecenia po limitOrderId {limit_order_id}: {e}", exc_info=True)
+        return None
 
+def delete_active_order_by_id(order_link_id: str):
+    """Usuwa dokument aktywnego zlecenia na podstawie jego orderLinkId."""
+    try:
+        _get_db().collection(constants.ACTIVE_ORDERS_COLLECTION).document(order_link_id).delete()
+        logger.info(f"[{order_link_id}] Pomyślnie usunięto przetworzone zlecenie z kolekcji active_orders.")
+    except Exception as e:
+        logger.error(f"Błąd podczas usuwania aktywnego zlecenia {order_link_id}: {e}", exc_info=True)
+
+# --- POZOSTAŁE FUNKCJE POMOCNICZE (BEZ ZMIAN) ---
 def get_alert_data_by_id(alert_id: str) -> Optional[Dict[str, Any]]:
-    """Pobiera surowe dane alertu na podstawie jego ID z kolekcji 'alerts'."""
     try:
         doc_ref = _get_db().collection(constants.FIRESTORE_COLLECTION_ALERTS).document(alert_id)
         doc = doc_ref.get()
@@ -135,11 +138,9 @@ def get_alert_data_by_id(alert_id: str) -> Optional[Dict[str, Any]]:
         return None
 
 def get_orders_by_status(status: str) -> Iterable[DocumentSnapshot]:
-    """Pobiera wszystkie zlecenia o danym statusie."""
     return _get_db().collection(constants.ACTIVE_ORDERS_COLLECTION).where('status', '==', status).stream()
 
 def update_active_order(order_id: str, updates: Dict[str, Any]):
-    """Aktualizuje dokument aktywnego zlecenia."""
     try:
         doc_ref = _get_db().collection(constants.ACTIVE_ORDERS_COLLECTION).document(order_id)
         doc_ref.update(updates)

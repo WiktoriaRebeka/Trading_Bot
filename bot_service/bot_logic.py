@@ -114,7 +114,7 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
                 continue
 
             # Krok g: Złożenie Zlecenia Zintegrowanego
-            custom_order_link_id = f"bot_{alert_id.replace('-', '')[:16]}"
+            custom_order_link_id = f"bot_{alert_id.replace('-', '')[:20]}" # Używamy dłuższego, bardziej unikalnego ID
             order_params = {
                 "symbol": symbol, "side": "Buy" if alert_model.direction == "LONG" else "Sell",
                 "orderType": "Limit", "qty": final_qty, "price": final_entry,
@@ -126,6 +126,7 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
             logger.info(f"[{symbol}] Przygotowano finalne zlecenie: {order_params}")
             response = executor.place_order(order_params)
             
+            # --- POCZĄTEK ZMIANY: Zapisujemy po orderLinkId ---
             # Krok h: Zapis Stanu (Złoty Rekord)
             if response and response.get('orderId'):
                 order_id = response.get('orderId')
@@ -133,7 +134,7 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
                 
                 order_data_to_save = {
                     "symbol": symbol,
-                    "orderId": order_id,
+                    "limitOrderId": order_id, # Zapisujemy ID zlecenia otwierającego dla referencji
                     "orderLinkId": custom_order_link_id,
                     "alert_id": alert_id,
                     "direction": alert_model.direction,
@@ -145,11 +146,15 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
                     "alert_sl_price": alert_model.sl,
                     "alert_tp_price": alert_model.tp_2_0
                 }
-                state_manager.save_active_order(order_id, order_data_to_save)
+                # Zapisujemy dokument pod naszym własnym ID, a nie tym z giełdy!
+                state_manager.save_active_order(custom_order_link_id, order_data_to_save)
             else:
                 logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się złożyć zlecenia (brak orderId w odpowiedzi).")
+            # --- KONIEC ZMIANY ---
 
             processed_symbols_in_cycle.add(symbol)
+            
+
 
         except BybitAPIError as e:
             logger.error(f"Błąd API Bybit podczas przetwarzania alertu {alert_id}: {e}", exc_info=False)
@@ -158,7 +163,7 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
             logger.error(f"Krytyczny błąd podczas transakcyjnego przetwarzania alertu {alert_id}: {e}", exc_info=True)
             processed_symbols_in_cycle.add(alert_dict.get("symbol", "UNKNOWN"))
 
-# --- USUNIĘTO STARĄ FUNKCJĘ process_alerts_atomically ---
+
 
 def _transform_liquidation_record(liq_record: Dict[str, Any]) -> Dict[str, Any]:
     """Tłumaczy rekord likwidacji na format zgodny z rekordem PnL."""
@@ -176,6 +181,8 @@ def _transform_liquidation_record(liq_record: Dict[str, Any]) -> Dict[str, Any]:
         "updatedTime": liq_record.get("updatedTime"),
         "exitType": "Liquidation"
     }
+
+# Lokalizacja: bot_service/bot_logic.py
 
 def log_closed_positions_pnl(executor: BybitExecutor) -> int:
     """
@@ -212,28 +219,40 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
     new_max_ts_dt = last_check_ts_dt
 
     for pnl_record in pnl_records_sorted:
-        order_id = pnl_record.get("orderId")
+        order_id_from_pnl = pnl_record.get("orderId")
         symbol = pnl_record.get("symbol")
         
         try:
-            if not order_id or not symbol:
-                logger.warning("[PNL_LOGGER] Pominięto rekord bez orderId lub symbolu.", extra={"json_fields": {"pnl_record": pnl_record}})
+            if not order_id_from_pnl or not symbol:
                 continue
 
-            logger.info(f"[PNL_LOGGER] Przetwarzanie rekordu dla {symbol} [OrderID: {order_id}]")
+            logger.info(f"[PNL_LOGGER] Przetwarzanie rekordu dla {symbol} [OrderID z PnL: {order_id_from_pnl}]")
             
-            active_order_data = state_manager.get_active_order_by_id(order_id)
+            active_order_data = None
             
-            if not active_order_data:
-                logger.warning(f"[PNL_LOGGER] Nie znaleziono dopasowania dla orderId '{order_id}'. Transakcja zostanie zapisana jako UNMATCHED.")
-                active_order_data = {}
+            # Krok 1: Spróbuj znaleźć po orderId zlecenia otwierającego
+            active_order_data = state_manager.get_active_order_by_limit_order_id(order_id_from_pnl)
 
+            # Krok 2: Jeśli nie znaleziono, spróbuj znaleźć po orderLinkId
+            if not active_order_data:
+                logger.info(f"[{symbol}] Nie znaleziono dopasowania po limitOrderId. Próbuję znaleźć orderLinkId...")
+                order_history = executor.get_order_history_by_id(order_id_from_pnl)
+                
+                if order_history and order_history.get("orderLinkId"):
+                    order_link_id = order_history.get("orderLinkId")
+                    logger.info(f"[{symbol}] Znaleziono orderLinkId: {order_link_id}. Szukam w active_orders...")
+                    active_order_data = state_manager.get_active_order_by_id(order_link_id)
+
+            if not active_order_data:
+                logger.warning(f"[PNL_LOGGER] OSTATECZNIE nie znaleziono dopasowania dla orderId '{order_id_from_pnl}'. Transakcja zostanie zapisana jako UNMATCHED.")
+                active_order_data = {}
+            else:
+                logger.info(f"[PNL_LOGGER] SUKCES! Znaleziono dopasowanie dla transakcji.")
+
+            # Przekazujemy pnl_record i active_order_data do jednej, niezawodnej funkcji.
+            # Ta funkcja sama zajmie się zapisem i sprzątaniem.
             if log_real_trade_result(pnl_record, active_order_data):
                 processed_count += 1
-            
-            if active_order_data:
-                logger.info(f"[PNL_LOGGER] Sprzątanie: Usuwanie dokumentu '{order_id}' z kolekcji active_orders.")
-                state_manager.delete_active_order_by_id(order_id)
             
             updated_time_ms = int(pnl_record.get("updatedTime", 0))
             if updated_time_ms > 0:
@@ -242,7 +261,7 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
                     new_max_ts_dt = record_ts_dt
 
         except Exception as e:
-            logger.error(f"[PNL_LOGGER] Krytyczny błąd podczas przetwarzania rekordu dla {symbol} [OrderID: {order_id}]. Błąd: {e}", exc_info=True)
+            logger.error(f"[PNL_LOGGER] Krytyczny błąd podczas przetwarzania rekordu dla {symbol} [OrderID: {order_id_from_pnl}]. Błąd: {e}", exc_info=True)
             continue
     
     final_timestamp_to_save = max(new_max_ts_dt, current_cycle_start_time)
