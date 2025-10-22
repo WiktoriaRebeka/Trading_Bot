@@ -2,7 +2,8 @@
 
 import logging
 from typing import Iterable, Dict, Any, List, Optional
-from datetime import datetime
+# --- OSTATECZNA POPRAWKA: Dodajemy 'timezone' do importu ---
+from datetime import datetime, timezone
 from google.cloud import firestore
 from google.cloud.firestore_v1.document import DocumentSnapshot
 
@@ -94,14 +95,12 @@ def save_active_order(order_id: str, order_data: Dict[str, Any]):
             return
         
         doc_ref = _get_db().collection(constants.ACTIVE_ORDERS_COLLECTION).document(order_id)
-        # Ta linia teraz zadziała poprawnie dzięki importowi 'timezone'
         order_data['created_at'] = datetime.now(timezone.utc) 
         doc_ref.set(order_data)
         logger.info(f"Zapisano aktywne zlecenie {order_id} dla symbolu {order_data.get('symbol')}.")
     except Exception as e:
         logger.error(f"Błąd podczas zapisu aktywnego zlecenia {order_id}: {e}", exc_info=True)
 
-        
 def get_active_order_by_id(order_id: str) -> Optional[Dict[str, Any]]:
     """Pobiera dane aktywnego zlecenia na podstawie jego ID."""
     try:
@@ -147,4 +146,3 @@ def update_active_order(order_id: str, updates: Dict[str, Any]):
         logger.info(f"Zaktualizowano aktywne zlecenie {order_id} z danymi: {updates}")
     except Exception as e:
         logger.error(f"Błąd podczas aktualizacji zlecenia {order_id}: {e}", exc_info=True)
-
