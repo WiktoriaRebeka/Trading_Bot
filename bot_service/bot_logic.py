@@ -182,8 +182,6 @@ def _transform_liquidation_record(liq_record: Dict[str, Any]) -> Dict[str, Any]:
         "exitType": "Liquidation"
     }
 
-# Lokalizacja: bot_service/bot_logic.py
-
 def log_closed_positions_pnl(executor: BybitExecutor) -> int:
     """
     Pobiera zamknięte pozycje, znajduje dla nich dopasowanie w `active_orders`
@@ -230,13 +228,16 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
             
             active_order_data = None
             
-            # --- OSTATECZNA POPRAWKA: Dwuetapowe wyszukiwanie ---
-            # Krok 1: Spróbuj znaleźć po orderId zlecenia otwierającego (najszybszy)
-            active_order_data = state_manager.get_active_order_by_limit_order_id(order_id_from_pnl)
-
-            # Krok 2: Jeśli nie znaleziono, użyj nowej, uniwersalnej funkcji do znalezienia orderLinkId
+            # --- ETAP 1: Wyszukiwanie po openOrderId ---
+            active_order_data = state_manager.get_active_order_by_open_order_id(order_id_from_pnl)
+            
+            # --- ETAP 2: Jeśli nie znaleziono, próbujemy po limitOrderId ---
             if not active_order_data:
-                logger.info(f"[{symbol}] Nie znaleziono dopasowania po limitOrderId. Próbuję znaleźć orderLinkId w historii...")
+                active_order_data = state_manager.get_active_order_by_limit_order_id(order_id_from_pnl)
+            
+            # --- ETAP 3: Jeśli dalej nic, spróbuj znaleźć orderLinkId przez historię ---
+            if not active_order_data:
+                logger.info(f"[{symbol}] Nie znaleziono dopasowania po open/limitOrderId. Szukam orderLinkId w historii...")
                 order_history = executor.get_order_history_by_id(order_id_from_pnl)
                 
                 if order_history and order_history.get("orderLinkId"):
@@ -244,15 +245,18 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
                     logger.info(f"[{symbol}] Znaleziono orderLinkId: {order_link_id}. Szukam w active_orders...")
                     active_order_data = state_manager.get_active_order_by_id(order_link_id)
 
+            # --- Ostateczne sprawdzenie ---
             if not active_order_data:
                 logger.warning(f"[PNL_LOGGER] OSTATECZNIE nie znaleziono dopasowania dla orderId '{order_id_from_pnl}'. Transakcja zostanie zapisana jako UNMATCHED.")
                 active_order_data = {}
             else:
-                logger.info(f"[PNL_LOGGER] SUKCES! Znaleziono dopasowanie dla transakcji.")
+                logger.info(f"[PNL_LOGGER] SUKCES! Znaleziono dopasowanie dla transakcji {symbol}.")
 
+            # --- Zapis do BigQuery ---
             if log_real_trade_result(pnl_record, active_order_data):
                 processed_count += 1
             
+            # --- Aktualizacja timestampu ---
             updated_time_ms = int(pnl_record.get("updatedTime", 0))
             if updated_time_ms > 0:
                 record_ts_dt = datetime.fromtimestamp(updated_time_ms / 1000, tz=timezone.utc)
@@ -260,13 +264,14 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
                     new_max_ts_dt = record_ts_dt
 
         except Exception as e:
-            logger.error(f"[PNL_LOGGER] Krytyczny błąd podczas przetwarzania rekordu dla {symbol} [OrderID: {order_id_from_pnl}]. Błąd: {e}", exc_info=True)
+            logger.error(f"[PNL_LOGGER] Błąd podczas przetwarzania rekordu dla {symbol} [OrderID: {order_id_from_pnl}]. Błąd: {e}", exc_info=True)
             continue
     
     final_timestamp_to_save = max(new_max_ts_dt, current_cycle_start_time)
     save_last_processed_timestamp(final_timestamp_to_save, "pnl_logger_last_fetch_state")
     logger.info(f"[PNL_LOGGER] Zakończono cykl. Przetworzono {processed_count} rekordów. Zaktualizowano znacznik czasu na {final_timestamp_to_save.isoformat()}.")
     return processed_count
+
 
 def round_price_by_tick(price: float, tick_size: str, direction: str) -> float:
     price_decimal = Decimal(str(price))
