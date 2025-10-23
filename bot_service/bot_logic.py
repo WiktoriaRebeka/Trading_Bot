@@ -15,15 +15,12 @@ from shared_lib.firebase_client import get_instrument_rules
 from shared_lib.risk_manager import calculate_position_size
 from bot_service import state_manager
 from bot_service.bigquery_logger import log_analysis_result
-# Ten import musi wskazywać na plik pnl_logger_real.py
 from bot_service.pnl_logger_real import log_real_trade_result
 from bot_service.bybit_executor import BybitExecutor, BybitAPIError
 from bot_service.fetch_from_firestore import fetch_new_alerts_since, save_last_processed_timestamp, load_last_processed_timestamp
 
 logger = logging.getLogger(__name__)
 
-
-# --- POCZĄTEK ZMIANY: Dodanie brakującej funkcji-łącznika ---
 def process_new_alerts(executor: BybitExecutor):
     """
     Pobiera i przetwarza nowe alerty w trybie transakcyjnym.
@@ -40,7 +37,6 @@ def process_new_alerts(executor: BybitExecutor):
             save_last_processed_timestamp(new_ts, "alerts_last_fetch_state")
     else:
         logger.info("Brak nowych alertów do przetworzenia.")
-# --- KONIEC ZMIANY ---
 
 def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: BybitExecutor):
     """
@@ -63,27 +59,23 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
             symbol = alert_model.symbol
             logger.info(f"--- Rozpoczynam przetwarzanie alertu [{symbol}] ID: {alert_id} ---")
 
-            # Krok a: Walidacja Wstępna
             if not _correct_and_validate_alert(alert_model):
                 logger.warning(f"[{symbol}] ODRZUCONO (Walidacja Logiczna).")
                 processed_symbols_in_cycle.add(symbol)
                 continue
 
-            # Krok b: Sprawdzenie Bezpieczeństwa (istniejąca pozycja)
             open_position_side = executor.get_open_position_side(symbol)
             if open_position_side and open_position_side != "ERROR":
                 logger.warning(f"[{symbol}] ODRZUCONO (Strażnik Pozycji): Wykryto już otwartą pozycję ({open_position_side}).")
                 processed_symbols_in_cycle.add(symbol)
                 continue
             
-            # Krok c: Zasada Zastępowania (anulowanie starych zleceń)
             logger.info(f"[{symbol}] Brak otwartej pozycji. Anuluję wszystkie oczekujące zlecenia limit dla tego symbolu.")
             if not executor.cancel_all_open_orders_for_symbol(symbol):
                  logger.error(f"[{symbol}] Nie udało się anulować poprzednich zleceń. Przerywam, aby uniknąć ryzyka.")
                  processed_symbols_in_cycle.add(symbol)
                  continue
 
-            # Krok d: Pobranie Zasad Handlu (z cache'u Firestore)
             rule = instrument_rules.get(symbol)
             if not rule or "tickSize" not in rule or "qtyStep" not in rule:
                 logger.warning(f"[{symbol}] ODRZUCONO (Brak Zasad): Nie znaleziono reguł dla instrumentu.")
@@ -91,17 +83,23 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
                 continue
             tick_size, qty_step = rule["tickSize"], rule["qtyStep"]
 
-            # Krok e: Pesymistyczne Zaokrąglenie Cen
+            tp_level_key = os.getenv("TAKE_PROFIT_LEVEL", "tp_3_0")
+            if not hasattr(alert_model, tp_level_key):
+                logger.warning(f"[{symbol}] ODRZUCONO: Alert nie zawiera zdefiniowanego poziomu TP: {tp_level_key}. Używam domyślnego tp_3_0.")
+                tp_level_key = "tp_3_0"
+            
+            target_tp_price = getattr(alert_model, tp_level_key)
+            alert_tp_price_to_save = getattr(alert_model, "tp_3_0")
+
             if alert_model.direction == 'LONG':
                 final_entry = round_price_by_tick(alert_model.entry, tick_size, 'down')
                 final_sl = round_price_by_tick(alert_model.sl, tick_size, 'up')
-                final_tp = round_price_by_tick(alert_model.tp_3_0, tick_size, 'down')
+                final_tp = round_price_by_tick(target_tp_price, tick_size, 'down')
             else: # SHORT
                 final_entry = round_price_by_tick(alert_model.entry, tick_size, 'up')
                 final_sl = round_price_by_tick(alert_model.sl, tick_size, 'down')
-                final_tp = round_price_by_tick(alert_model.tp_3_0, tick_size, 'up')
+                final_tp = round_price_by_tick(target_tp_price, tick_size, 'up')
 
-            # Krok f: Obliczenie Wielkości Pozycji
             risk_usdt = float(os.getenv("RISK_PER_TRADE_USDT", "2.5"))
             final_qty = calculate_position_size(
                 risk_per_trade_usdt=risk_usdt, entry_price=final_entry,
@@ -113,8 +111,7 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
                 processed_symbols_in_cycle.add(symbol)
                 continue
 
-            # Krok g: Złożenie Zlecenia Zintegrowanego
-            custom_order_link_id = f"bot_{alert_id.replace('-', '')[:20]}" # Używamy dłuższego, bardziej unikalnego ID
+            custom_order_link_id = f"bot_{alert_id.replace('-', '')[:20]}"
             order_params = {
                 "symbol": symbol, "side": "Buy" if alert_model.direction == "LONG" else "Sell",
                 "orderType": "Limit", "qty": final_qty, "price": final_entry,
@@ -126,15 +123,13 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
             logger.info(f"[{symbol}] Przygotowano finalne zlecenie: {order_params}")
             response = executor.place_order(order_params)
             
-            # --- POCZĄTEK ZMIANY: Zapisujemy po orderLinkId ---
-            # Krok h: Zapis Stanu (Złoty Rekord)
             if response and response.get('orderId'):
                 order_id = response.get('orderId')
                 logger.info(f"[{symbol}] SUKCES! Zlecenie zintegrowane pomyślnie złożone. Order ID: {order_id}")
                 
                 order_data_to_save = {
                     "symbol": symbol,
-                    "limitOrderId": order_id, # Zapisujemy ID zlecenia otwierającego dla referencji
+                    "limitOrderId": order_id,
                     "orderLinkId": custom_order_link_id,
                     "alert_id": alert_id,
                     "direction": alert_model.direction,
@@ -144,17 +139,13 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
                     "planned_qty": final_qty,
                     "alert_entry_price": alert_model.entry,
                     "alert_sl_price": alert_model.sl,
-                    "alert_tp_price": alert_model.tp_3_0
+                    "alert_tp_price": alert_tp_price_to_save
                 }
-                # Zapisujemy dokument pod naszym własnym ID, a nie tym z giełdy!
                 state_manager.save_active_order(custom_order_link_id, order_data_to_save)
             else:
                 logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się złożyć zlecenia (brak orderId w odpowiedzi).")
-            # --- KONIEC ZMIANY ---
 
             processed_symbols_in_cycle.add(symbol)
-            
-
 
         except BybitAPIError as e:
             logger.error(f"Błąd API Bybit podczas przetwarzania alertu {alert_id}: {e}", exc_info=False)
@@ -163,23 +154,13 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
             logger.error(f"Krytyczny błąd podczas transakcyjnego przetwarzania alertu {alert_id}: {e}", exc_info=True)
             processed_symbols_in_cycle.add(alert_dict.get("symbol", "UNKNOWN"))
 
-
-
 def _transform_liquidation_record(liq_record: Dict[str, Any]) -> Dict[str, Any]:
-    """Tłumaczy rekord likwidacji na format zgodny z rekordem PnL."""
     return {
-        "symbol": liq_record.get("symbol"),
-        "orderId": f"liq_{liq_record.get('symbol')}_{liq_record.get('updatedTime')}",
-        "side": "Buy" if liq_record.get("side") == "Sell" else "Sell",
-        "qty": liq_record.get("size"),
-        "avgEntryPrice": None,
-        "avgExitPrice": liq_record.get("deliveryPrice"),
-        "closedPnl": liq_record.get("realisedPnl"),
-        "cumCommission": "0",
-        "leverage": None,
-        "createdTime": liq_record.get("updatedTime"),
-        "updatedTime": liq_record.get("updatedTime"),
-        "exitType": "Liquidation"
+        "symbol": liq_record.get("symbol"), "orderId": f"liq_{liq_record.get('symbol')}_{liq_record.get('updatedTime')}",
+        "side": "Buy" if liq_record.get("side") == "Sell" else "Sell", "qty": liq_record.get("size"),
+        "avgEntryPrice": None, "avgExitPrice": liq_record.get("deliveryPrice"), "closedPnl": liq_record.get("realisedPnl"),
+        "cumCommission": "0", "leverage": None, "createdTime": liq_record.get("updatedTime"),
+        "updatedTime": liq_record.get("updatedTime"), "exitType": "Liquidation"
     }
 
 def log_closed_positions_pnl(executor: BybitExecutor) -> int:
@@ -228,16 +209,10 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
             
             active_order_data = None
             
-            # --- ETAP 1: Wyszukiwanie po openOrderId ---
-            active_order_data = state_manager.get_active_order_by_open_order_id(order_id_from_pnl)
-            
-            # --- ETAP 2: Jeśli nie znaleziono, próbujemy po limitOrderId ---
+            active_order_data = state_manager.get_active_order_by_limit_order_id(order_id_from_pnl)
+
             if not active_order_data:
-                active_order_data = state_manager.get_active_order_by_limit_order_id(order_id_from_pnl)
-            
-            # --- ETAP 3: Jeśli dalej nic, spróbuj znaleźć orderLinkId przez historię ---
-            if not active_order_data:
-                logger.info(f"[{symbol}] Nie znaleziono dopasowania po open/limitOrderId. Szukam orderLinkId w historii...")
+                logger.info(f"[{symbol}] Nie znaleziono dopasowania po limitOrderId. Próbuję znaleźć orderLinkId w historii...")
                 order_history = executor.get_order_history_by_id(order_id_from_pnl)
                 
                 if order_history and order_history.get("orderLinkId"):
@@ -245,18 +220,15 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
                     logger.info(f"[{symbol}] Znaleziono orderLinkId: {order_link_id}. Szukam w active_orders...")
                     active_order_data = state_manager.get_active_order_by_id(order_link_id)
 
-            # --- Ostateczne sprawdzenie ---
             if not active_order_data:
                 logger.warning(f"[PNL_LOGGER] OSTATECZNIE nie znaleziono dopasowania dla orderId '{order_id_from_pnl}'. Transakcja zostanie zapisana jako UNMATCHED.")
                 active_order_data = {}
             else:
-                logger.info(f"[PNL_LOGGER] SUKCES! Znaleziono dopasowanie dla transakcji {symbol}.")
+                logger.info(f"[PNL_LOGGER] SUKCES! Znaleziono dopasowanie dla transakcji.")
 
-            # --- Zapis do BigQuery ---
             if log_real_trade_result(pnl_record, active_order_data):
                 processed_count += 1
             
-            # --- Aktualizacja timestampu ---
             updated_time_ms = int(pnl_record.get("updatedTime", 0))
             if updated_time_ms > 0:
                 record_ts_dt = datetime.fromtimestamp(updated_time_ms / 1000, tz=timezone.utc)
@@ -264,14 +236,13 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
                     new_max_ts_dt = record_ts_dt
 
         except Exception as e:
-            logger.error(f"[PNL_LOGGER] Błąd podczas przetwarzania rekordu dla {symbol} [OrderID: {order_id_from_pnl}]. Błąd: {e}", exc_info=True)
+            logger.error(f"[PNL_LOGGER] Krytyczny błąd podczas przetwarzania rekordu dla {symbol} [OrderID: {order_id_from_pnl}]. Błąd: {e}", exc_info=True)
             continue
     
     final_timestamp_to_save = max(new_max_ts_dt, current_cycle_start_time)
     save_last_processed_timestamp(final_timestamp_to_save, "pnl_logger_last_fetch_state")
     logger.info(f"[PNL_LOGGER] Zakończono cykl. Przetworzono {processed_count} rekordów. Zaktualizowano znacznik czasu na {final_timestamp_to_save.isoformat()}.")
     return processed_count
-
 
 def round_price_by_tick(price: float, tick_size: str, direction: str) -> float:
     price_decimal = Decimal(str(price))
@@ -304,8 +275,6 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
         return False
     logger.info(f"Alert [{alert.symbol}] przeszedł walidację. Kierunek: {alert.direction}, Ryzyko: {risk_perc}%.")
     return True
-
-
 
 def _run_analysis_of_existing_cases():
     logger.info("Rozpoczynam główną pętlę cyklu analitycznego.")
