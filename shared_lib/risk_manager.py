@@ -11,9 +11,6 @@ FEE_MAKER = 0.00020  # 0.02%
 FEE_TAKER = 0.00055  # 0.055%
 TOTAL_FEE_PERCENT = FEE_MAKER + FEE_TAKER # 0.075%
 
-# === NOWY BUFOR BEZPIECZEŃSTWA ===
-# Dodatkowy bufor procentowy na pokrycie potencjalnego poślizgu cenowego (slippage)
-# przy zleceniach Stop Loss Market. Wartość 0.05% jest bezpiecznym punktem wyjścia.
 SLIPPAGE_BUFFER_PERCENT = 0.0005 # 0.05%
 
 def round_quantity_by_step(quantity: float, qty_step: str) -> float:

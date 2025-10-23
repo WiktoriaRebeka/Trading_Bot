@@ -19,7 +19,6 @@ class BybitAPIError(Exception):
         super().__init__(f"Bybit API Error: [Code: {ret_code}] {ret_msg}")
 
 class BybitExecutor:
-    # ... (funkcje __init__, _send_request, place_order, get_closed_pnl_history itd. BEZ ZMIAN) ...
     def __init__(self, api_key: str, api_secret: str, testnet: bool = True):
         if not api_key or not api_secret:
             raise ValueError("Klucze API Bybit nie mogą być puste.")
@@ -165,12 +164,10 @@ class BybitExecutor:
             logger.critical(f"[{symbol}] Nieoczekiwany błąd podczas czyszczenia otwartych zleceń: {e}", exc_info=True)
             return False
 
-    # --- OSTATECZNA POPRAWKA: Jedna funkcja do sprawdzania historii ---
     def get_order_history_by_id(self, order_id: str) -> Optional[Dict[str, Any]]:
         """
         Pobiera szczegóły historycznego zlecenia (ZWYKŁEGO lub WARUNKOWEGO) na podstawie jego ID.
         """
-        # Najpierw sprawdzamy historię zleceń warunkowych (TP/SL)
         endpoint = "/v5/order/history"
         params = {"category": "linear", "orderId": order_id, "orderFilter": "StopOrder"}
         try:
@@ -181,7 +178,6 @@ class BybitExecutor:
         except Exception:
             logger.warning(f"Nie udało się sprawdzić historii zleceń warunkowych dla {order_id}. Próbuję dalej.")
 
-        # Jeśli nie znaleziono, sprawdzamy historię zwykłych zleceń
         params = {"category": "linear", "orderId": order_id}
         try:
             result = self._send_request("GET", endpoint, params=params)

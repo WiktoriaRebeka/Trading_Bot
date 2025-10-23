@@ -10,10 +10,9 @@ from shared_lib import constants
 logger = logging.getLogger(__name__)
 
 bigquery_client: Optional[bigquery.Client] = None
-# --- POCZĄTEK ZMIANY ---
+
 ANALYTICAL_TABLE_REF: Optional[bigquery.TableReference] = None
 REAL_TRADES_TABLE_REF: Optional[bigquery.TableReference] = None
-# --- KONIEC ZMIANY ---
 
 def initialize_bigquery() -> bool:
     global bigquery_client, ANALYTICAL_TABLE_REF, REAL_TRADES_TABLE_REF
@@ -26,8 +25,7 @@ def initialize_bigquery() -> bool:
         DATASET_LOCATION = "US" 
         client = bigquery.Client(location=DATASET_LOCATION)
         
-        # --- POCZĄTEK ZMIANY ---
-        # Inicjalizujemy referencje do obu tabel
+
         dataset_ref = client.dataset(constants.BIGQUERY_DATASET_ID)
         
         analytical_table_id = constants.BIGQUERY_ANALYTICAL_TABLE_ID
@@ -42,7 +40,6 @@ def initialize_bigquery() -> bool:
         
         bigquery_client = client
         logger.info(f"[BQ_INIT] Klient BigQuery pomyślnie zainicjalizowany. Lokalizacja: {DATASET_LOCATION}")
-        # --- KONIEC ZMIANY ---
         return True
     except Exception as e:
         logger.critical(f"[BQ_INIT] KRYTYCZNY BŁĄD: Inicjalizacja klienta BigQuery nie powiodła się: {e}", exc_info=True)
@@ -66,9 +63,7 @@ def log_analysis_result(result_data: Dict[str, Any]):
 
     try:
         rows_to_insert = [result_data]
-        # --- POCZĄTEK ZMIANY ---
         errors = client.insert_rows_json(ANALYTICAL_TABLE_REF, rows_to_insert)
-        # --- KONIEC ZMIANY ---
         if not errors:
             logger.info(f"[BQ_LOGGER][{analysis_id}] SUKCES! Pomyślnie wstawiono wiersz dla targetu {result_data.get('target_level')}.")
         else:

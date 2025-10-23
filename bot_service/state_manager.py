@@ -15,7 +15,6 @@ logger = logging.getLogger(__name__)
 def _get_db() -> firestore.Client:
     return get_db()
 
-# --- FUNKCJE DOTYCZĄCE ANALYTICAL CASES (BEZ ZMIAN) ---
 def get_pending_case_for_symbol(symbol: str) -> Optional[DocumentSnapshot]:
     try:
         docs = _get_db().collection(constants.ANALYTICAL_CASES_COLLECTION).where('symbol', '==', symbol).where('status', '==', 'PENDING').limit(1).stream()
@@ -52,7 +51,6 @@ def update_case_status_and_results(case_id: str, updates: Dict[str, Any]):
         logger.error(f"Błąd podczas aktualizacji teczki {case_id}: {e}", exc_info=True)
 
 def get_latest_klines_from_cache(symbols: Iterable[str]) -> Dict[str, Dict[str, Any]]:
-    # ... (bez zmian) ...
     if not symbols: return {}
     db = _get_db()
     klines_cache = {}
@@ -74,7 +72,6 @@ def get_latest_klines_from_cache(symbols: Iterable[str]) -> Dict[str, Dict[str, 
         logger.warning(f"[KLINE_CACHE] Nie udało się pobrać rekordów kline z cache'u dla {unique_symbols}.")
     return klines_cache
 
-# --- POCZĄTEK POPRAWIONEJ SEKCJI ACTIVE ORDERS ---
 def save_active_order(order_link_id: str, order_data: Dict[str, Any]):
     """Zapisuje informacje o aktywnym zleceniu, używając orderLinkId jako ID dokumentu."""
     try:
@@ -125,10 +122,8 @@ def delete_active_order_by_id(order_link_id: str):
     except Exception as e:
         logger.error(f"Błąd podczas usuwania aktywnego zlecenia {order_link_id}: {e}", exc_info=True)
 
-# --- USUNIĘTO ZDUPLIKOWANE, STARE FUNKCJE ---
 
 def get_alert_data_by_id(alert_id: str) -> Optional[Dict[str, Any]]:
-    # ... (bez zmian) ...
     try:
         doc_ref = _get_db().collection(constants.FIRESTORE_COLLECTION_ALERTS).document(alert_id)
         doc = doc_ref.get()
@@ -141,11 +136,9 @@ def get_alert_data_by_id(alert_id: str) -> Optional[Dict[str, Any]]:
         return None
 
 def get_orders_by_status(status: str) -> Iterable[DocumentSnapshot]:
-    # ... (bez zmian) ...
     return _get_db().collection(constants.ACTIVE_ORDERS_COLLECTION).where('status', '==', status).stream()
 
 def update_active_order(order_id: str, updates: Dict[str, Any]):
-    # ... (bez zmian) ...
     try:
         doc_ref = _get_db().collection(constants.ACTIVE_ORDERS_COLLECTION).document(order_id)
         doc_ref.update(updates)

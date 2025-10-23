@@ -42,6 +42,12 @@ def acquire_lock_for_order(order_id: str) -> bool:
         return False
 
 def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Dict[str, Any]) -> bool:
+    """
+    Przetwarza, zapisuje do BigQuery i sprząta dane o zamkniętej transakcji.
+    WERSJA POPRAWIONA:
+    1. Zapisuje do BigQuery ZARÓWNO transakcje dopasowane, jak i niedopasowane.
+    2. Używa POPRAWNEGO identyfikatora (orderLinkId) do usuwania dokumentu z 'active_orders'.
+    """
     order_id = pnl_data.get("orderId", f"unknown_{int(datetime.now().timestamp())}")
     symbol = pnl_data.get("symbol", "unknown")
     log_prefix = f"[PNL_SAVE][{symbol}|{order_id}]"
@@ -53,15 +59,20 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Dict[str,
     if not acquire_lock_for_order(order_id):
         return False
 
+    # --- POPRAWKA 1: Logika zapisu transakcji UNMATCHED ---
+    # Sprawdzamy, czy transakcja została dopasowana, ale nie przerywamy już wykonania.
+    # Proces będzie kontynuowany, aby zapisać rekord do BigQuery, nawet jeśli jest niedopasowany.
+    is_matched = bool(active_order_data and 'alert_id' in active_order_data)
     alert_id = active_order_data.get('alert_id', 'UNMATCHED_OR_MANUAL')
     
-    if alert_id == 'UNMATCHED_OR_MANUAL':
+    if not is_matched:
         logger.warning(f"{log_prefix} Nie znaleziono dopasowania. Transakcja zostanie zapisana jako UNMATCHED.")
-        return True
-
-    logger.info(f"{log_prefix} Rozpoczynam transakcyjny zapis (alert_id: {alert_id}).")
+    else:
+        logger.info(f"{log_prefix} Rozpoczynam transakcyjny zapis (alert_id: {alert_id}).")
 
     try:
+        # Transformacja danych - użycie .get() z wartościami domyślnymi sprawia,
+        # że kod działa poprawnie zarówno dla transakcji dopasowanych, jak i niedopasowanych.
         qty = Decimal(pnl_data.get("qty", "0.0"))
         avg_entry_price = Decimal(pnl_data.get("avgEntryPrice", "0.0"))
         avg_exit_price = Decimal(pnl_data.get("avgExitPrice", "0.0"))
@@ -74,7 +85,7 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Dict[str,
         planned_risk_usdt = None
         realized_rrr = None
 
-        if planned_sl_price_dec > 0 and avg_entry_price > 0:
+        if is_matched and planned_sl_price_dec > 0 and avg_entry_price > 0:
             risk_per_unit = abs(avg_entry_price - planned_sl_price_dec)
             planned_risk_usdt_dec = risk_per_unit * qty
             
@@ -83,7 +94,6 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Dict[str,
                 planned_risk_usdt = float(planned_risk_usdt_dec)
                 realized_rrr = float(realized_rrr_dec)
 
-        # --- OSTATECZNA POPRAWKA: Konwersja datetime na string ISO ---
         transformed_data = {
             "alert_id": alert_id, "order_id": order_id, "symbol": symbol,
             "direction": active_order_data.get("direction", pnl_data.get("side")),
@@ -111,8 +121,21 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Dict[str,
 
         if not errors:
             logger.info(f"{log_prefix} SUKCES! Pomyślnie zapisano wynik transakcji do BigQuery.")
-            logger.info(f"{log_prefix} Sprzątanie: Usuwanie dokumentu '{order_id}' z kolekcji active_orders.")
-            state_manager.delete_active_order_by_id(order_id)
+            
+            # --- POPRAWKA 2: Logika sprzątania ---
+            # Usuwamy dokument z 'active_orders' tylko i wyłącznie, jeśli transakcja była dopasowana.
+            if is_matched:
+                # ID dokumentu w Firestore to nasz 'orderLinkId'. Funkcje state_manager dodają go
+                # do słownika pod kluczem 'id'. Używamy go do usunięcia właściwego dokumentu.
+                order_link_id_to_delete = active_order_data.get('id')
+                
+                if order_link_id_to_delete:
+                    logger.info(f"{log_prefix} Sprzątanie: Usuwanie dokumentu '{order_link_id_to_delete}' z kolekcji active_orders.")
+                    state_manager.delete_active_order_by_id(order_link_id_to_delete)
+                else:
+                    # Ten log jest zabezpieczeniem na wypadek błędu w logice state_managera.
+                    logger.error(f"{log_prefix} BŁĄD KRYTYCZNY: Nie można usunąć rekordu, ponieważ 'id' (orderLinkId) nie zostało znalezione w dopasowanych danych.")
+            
             return True
         else:
             logger.error(f"{log_prefix} Błąd podczas wstawiania wierszy do BigQuery: {errors}. Dokument w active_orders NIE został usunięty.")

@@ -4,7 +4,6 @@ from datetime import datetime, timezone, timedelta
 import logging
 
 from shared_lib.firebase_client import get_db 
-# Zaktualizowane importy - usuwamy LAST_FETCH_STATE_DOC_ID
 from shared_lib.constants import (
     FIRESTORE_COLLECTION_ALERTS,
     BOT_CONFIG_COLLECTION,

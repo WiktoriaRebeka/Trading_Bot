@@ -38,7 +38,6 @@ def register_endpoints(app: Flask):
             reason = app.config.get('INITIALIZATION_FAILURE_REASON', 'Unknown initialization error.')
             return jsonify({"status": "unhealthy", "reason": reason}), 503
 
-    # --- NOWY, DEDYKOWANY ENDPOINT DO PRZETWARZANIA ALERTÓW ---
     @app.route('/process-alerts', methods=['POST'])
     def process_alerts_endpoint():
         cycle_id = str(uuid.uuid4())
@@ -62,7 +61,6 @@ def register_endpoints(app: Flask):
             logger.error(f"KRYTYCZNY BŁĄD w cyklu przetwarzania alertów: {e}", exc_info=True, extra={"json_fields": {"cycle_id": cycle_id}})
             return jsonify({"status": "error", "message": str(e), "cycle_id": cycle_id}), 500
 
-    # --- USUNIĘTO STARY ENDPOINT /run-bot-cycle ---
 
     @app.route('/log-pnl', methods=['POST'])
     def log_pnl_endpoint():

@@ -18,7 +18,7 @@ class AppConfig:
         self.BYBIT_API_KEY = os.getenv("BYBIT_API_KEY")
         self.BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET")
 
-        # OSTATECZNE LOGOWANIE DIAGNOSTYCZNE
+
         if self.BYBIT_API_KEY:
             logger.info(f"Odczytano BYBIT_API_KEY. Długość: {len(self.BYBIT_API_KEY)}.")
         else:
