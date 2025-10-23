@@ -95,11 +95,11 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
             if alert_model.direction == 'LONG':
                 final_entry = round_price_by_tick(alert_model.entry, tick_size, 'down')
                 final_sl = round_price_by_tick(alert_model.sl, tick_size, 'up')
-                final_tp = round_price_by_tick(alert_model.tp_2_0, tick_size, 'down')
+                final_tp = round_price_by_tick(alert_model.tp_3_0, tick_size, 'down')
             else: # SHORT
                 final_entry = round_price_by_tick(alert_model.entry, tick_size, 'up')
                 final_sl = round_price_by_tick(alert_model.sl, tick_size, 'down')
-                final_tp = round_price_by_tick(alert_model.tp_2_0, tick_size, 'up')
+                final_tp = round_price_by_tick(alert_model.tp_3_0, tick_size, 'up')
 
             # Krok f: Obliczenie Wielkości Pozycji
             risk_usdt = float(os.getenv("RISK_PER_TRADE_USDT", "2.5"))
@@ -144,7 +144,7 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
                     "planned_qty": final_qty,
                     "alert_entry_price": alert_model.entry,
                     "alert_sl_price": alert_model.sl,
-                    "alert_tp_price": alert_model.tp_2_0
+                    "alert_tp_price": alert_model.tp_3_0
                 }
                 # Zapisujemy dokument pod naszym własnym ID, a nie tym z giełdy!
                 state_manager.save_active_order(custom_order_link_id, order_data_to_save)
