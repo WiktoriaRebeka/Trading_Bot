@@ -290,18 +290,36 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
     logger.info(f"Alert [{alert.symbol}] przeszedł walidację. Kierunek: {alert.direction}, Ryzyko: {risk_perc}%.")
     return True
 
+# Lokalizacja: bot_service/bot_logic.py
+
+# ZASTĄP CAŁĄ FUNKCJĘ 'update_filled_orders' PONIŻSZĄ WERSJĄ
 
 def update_filled_orders(executor: BybitExecutor):
     """
-    Cykl monitorujący zlecenia ze statusem 'PLACED'.
-    Jeśli zlecenie zostało zrealizowane ('Filled'), aktualizuje rekord w Firestore
-    o identyfikatory zleceň TP i SL.
+    Cykl monitorujący zlecenia. Działa jako skrypt naprawczy dla starych zleceň
+    bez statusu oraz jako normalny proces dla nowych zleceň ze statusem 'PLACED'.
     """
     logger.info("[ORDER_UPDATER] Rozpoczynam cykl aktualizacji aktywnych zleceň.")
     
-    placed_orders_docs = state_manager.get_orders_by_status('PLACED')
+    # 1. Pobierz nowe zlecenia (z poprawnym statusem)
+    placed_orders_docs = list(state_manager.get_orders_by_status('PLACED'))
+    logger.info(f"[ORDER_UPDATER] Znaleziono {len(placed_orders_docs)} zleceń ze statusem 'PLACED'.")
+
+    # 2. Pobierz stare zlecenia (bez pola status) - to jest nasz mechanizm naprawczy
+    legacy_orders_docs = list(state_manager.get_orders_without_status())
+    logger.info(f"[ORDER_UPDATER] Znaleziono {len(legacy_orders_docs)} starych zleceń bez statusu do naprawy.")
+
+    # Połącz obie listy w jedną, unikając duplikatów
+    all_orders_to_process = {doc.id: doc for doc in placed_orders_docs}
+    all_orders_to_process.update({doc.id: doc for doc in legacy_orders_docs})
     
-    for order_doc in placed_orders_docs:
+    if not all_orders_to_process:
+        logger.info("[ORDER_UPDATER] Brak zleceň do przetworzenia w tym cyklu.")
+        return
+
+    logger.info(f"[ORDER_UPDATER] Łącznie do przetworzenia: {len(all_orders_to_process)} zleceń.")
+
+    for order_doc in all_orders_to_process.values():
         order_data = order_doc.to_dict()
         order_link_id = order_doc.id
         symbol = order_data.get('symbol')
@@ -314,20 +332,17 @@ def update_filled_orders(executor: BybitExecutor):
         logger.info(f"{log_prefix} Sprawdzam status zlecenia limit {limit_order_id}...")
 
         try:
-            # --- KRYTYCZNA ZMIANA: Sprawdzamy najpierw aktywne zlecenia ---
             order_status_data = executor.get_open_order_by_id(limit_order_id)
             
-            # Jeśli nie ma go w aktywnych, to znaczy, że już się zakończyło (Filled, Cancelled, etc.)
-            # i dopiero teraz szukamy go w historii.
             if not order_status_data:
                 logger.info(f"{log_prefix} Zlecenie nie jest już aktywne. Sprawdzam historię...")
                 order_status_data = executor.get_order_history_by_id(limit_order_id)
 
             if not order_status_data:
-                logger.warning(f"{log_prefix} Nie można odnaleźć zlecenia ani w aktywnych, ani w historii. Pomijam.")
+                logger.warning(f"{log_prefix} Nie można odnaleźć zlecenia ani w aktywnych, ani w historii. Oznaczam jako 'UNKNOWN'.")
+                state_manager.update_active_order(order_link_id, {'status': 'UNKNOWN'})
                 continue
 
-            # Teraz, gdy mamy dane zlecenia, sprawdzamy jego status
             if order_status_data.get('orderStatus') == 'Filled':
                 logger.info(f"{log_prefix} Zlecenie otwierające zrealizowane! Szukam powiązanych zleceň TP/SL.")
                 
@@ -338,7 +353,6 @@ def update_filled_orders(executor: BybitExecutor):
 
                 for stop_order in active_stop_orders:
                     trigger_price = float(stop_order.get('triggerPrice', 0))
-                    # Używamy math.isclose do bezpiecznego porównywania liczb zmiennoprzecinkowych
                     if math.isclose(trigger_price, order_data.get('planned_tp_price')):
                         tp_order_id = stop_order.get('orderId')
                     elif math.isclose(trigger_price, order_data.get('planned_sl_price')):
@@ -352,7 +366,7 @@ def update_filled_orders(executor: BybitExecutor):
                         'position_opened_at': datetime.now(timezone.utc)
                     }
                     state_manager.update_active_order(order_link_id, updates)
-                    logger.info(f"{log_prefix} SUKCES! Zaktualizowano rekord o ID zleceń TP: {tp_order_id} i SL: {sl_order_id}.")
+                    logger.info(f"{log_prefix} SUKCES! Zaktualizowano rekord o ID zleceň TP: {tp_order_id} i SL: {sl_order_id}.")
                 else:
                     logger.warning(f"{log_prefix} Zlecenie zrealizowane, ale nie znaleziono pasujących zleceň TP/SL na giełdzie. Spróbuję ponownie w następnym cyklu.")
 
@@ -361,7 +375,10 @@ def update_filled_orders(executor: BybitExecutor):
                  state_manager.update_active_order(order_link_id, {'status': 'CANCELLED'})
             
             elif order_status_data.get('orderStatus') in ['New', 'PartiallyFilled']:
-                logger.info(f"{log_prefix} Zlecenie jest wciąż aktywne (status: {order_status_data.get('orderStatus')}). Sprawdzę ponownie w następnym cyklu.")
+                logger.info(f"{log_prefix} Zlecenie jest wciąż aktywne (status: {order_status_data.get('orderStatus')}). Dodaję status 'PLACED' i sprawdzę ponownie.")
+                # Jeśli stary dokument nie miał statusu, dodajemy go teraz
+                if 'status' not in order_data:
+                    state_manager.update_active_order(order_link_id, {'status': 'PLACED'})
 
         except Exception as e:
             logger.error(f"{log_prefix} Błąd podczas aktualizacji zlecenia: {e}", exc_info=True)

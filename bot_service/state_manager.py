@@ -72,7 +72,6 @@ def get_latest_klines_from_cache(symbols: Iterable[str]) -> Dict[str, Dict[str, 
         logger.warning(f"[KLINE_CACHE] Nie udało się pobrać rekordów kline z cache'u dla {unique_symbols}.")
     return klines_cache
 
-# --- POPRAWIONA FUNKCJA ---
 def save_active_order(order_link_id: str, order_data: Dict[str, Any]):
     """Zapisuje informacje o aktywnym zleceniu, używając orderLinkId jako ID dokumentu."""
     try:
@@ -82,7 +81,7 @@ def save_active_order(order_link_id: str, order_data: Dict[str, Any]):
         
         doc_ref = _get_db().collection(constants.ACTIVE_ORDERS_COLLECTION).document(order_link_id)
         order_data['created_at'] = datetime.now(timezone.utc)
-        order_data['status'] = 'PLACED'  # <-- KRYTYCZNA POPRAWKA: Ustawienie statusu początkowego
+        order_data['status'] = 'PLACED'
         doc_ref.set(order_data)
         logger.info(f"Zapisano aktywne zlecenie {order_link_id} dla symbolu {order_data.get('symbol')} ze statusem 'PLACED'.")
     except Exception as e:
@@ -139,6 +138,11 @@ def get_alert_data_by_id(alert_id: str) -> Optional[Dict[str, Any]]:
 def get_orders_by_status(status: str) -> Iterable[DocumentSnapshot]:
     return _get_db().collection(constants.ACTIVE_ORDERS_COLLECTION).where('status', '==', status).stream()
 
+# --- NOWA FUNKCJA NAPRAWCZA ---
+def get_orders_without_status() -> Iterable[DocumentSnapshot]:
+    """Pobiera dokumenty, które nie mają pola 'status' (dla kompatybilności wstecznej)."""
+    return _get_db().collection(constants.ACTIVE_ORDERS_COLLECTION).where('status', '==', None).stream()
+
 def update_active_order(order_id: str, updates: Dict[str, Any]):
     try:
         doc_ref = _get_db().collection(constants.ACTIVE_ORDERS_COLLECTION).document(order_id)
@@ -147,12 +151,10 @@ def update_active_order(order_id: str, updates: Dict[str, Any]):
     except Exception as e:
         logger.error(f"Błąd podczas aktualizacji zlecenia {order_id}: {e}", exc_info=True)
 
-# --- NOWA FUNKCJA ---
 def get_active_order_by_tpsl_order_id(tpsl_order_id: str) -> Optional[Dict[str, Any]]:
     """Wyszukuje aktywny dokument zlecenia na podstawie pola tpOrderId LUB slOrderId."""
     try:
         db = _get_db()
-        # Zapytanie 1: Szukaj po tpOrderId
         query_tp = db.collection(constants.ACTIVE_ORDERS_COLLECTION).where('tpOrderId', '==', tpsl_order_id).limit(1)
         docs_tp = list(query_tp.stream())
         if docs_tp:
@@ -161,7 +163,6 @@ def get_active_order_by_tpsl_order_id(tpsl_order_id: str) -> Optional[Dict[str, 
             data['id'] = doc_snapshot.id
             return data
 
-        # Zapytanie 2: Szukaj po slOrderId
         query_sl = db.collection(constants.ACTIVE_ORDERS_COLLECTION).where('slOrderId', '==', tpsl_order_id).limit(1)
         docs_sl = list(query_sl.stream())
         if docs_sl:
