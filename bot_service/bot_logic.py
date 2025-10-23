@@ -163,6 +163,7 @@ def _transform_liquidation_record(liq_record: Dict[str, Any]) -> Dict[str, Any]:
         "updatedTime": liq_record.get("updatedTime"), "exitType": "Liquidation"
     }
 
+# ZNAJDŹ TĘ FUNKCJĘ I ZASTĄP JĄ PONIŻSZĄ WERSJĄ
 def log_closed_positions_pnl(executor: BybitExecutor) -> int:
     """
     Pobiera zamknięte pozycje, znajduje dla nich dopasowanie w `active_orders`
@@ -211,13 +212,11 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
 
             logger.info(f"[PNL_LOGGER] Przetwarzanie rekordu dla {symbol} [OrderID z PnL: {order_id_from_pnl}]")
             
-            # --- NOWA, GŁÓWNA METODA DOPASOWANIA ---
             active_order_data = state_manager.get_active_order_by_tpsl_order_id(order_id_from_pnl)
 
-            # Stara metoda jako fallback (zabezpieczenie)
             if not active_order_data:
                 logger.warning(f"[{symbol}] Nie znaleziono dopasowania po tp/sl OrderId. Próbuję starej metody (fallback)...")
-                order_history = executor.get_order_history_by_id(order_id_from_pnl)
+                order_history = executor.get_order_history_by_id(order_id=order_id_from_pnl)
                 
                 if order_history and order_history.get("orderLinkId"):
                     order_link_id = order_history.get("orderLinkId")
@@ -290,9 +289,6 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
     logger.info(f"Alert [{alert.symbol}] przeszedł walidację. Kierunek: {alert.direction}, Ryzyko: {risk_perc}%.")
     return True
 
-# Lokalizacja: bot_service/bot_logic.py
-
-# ZASTĄP CAŁĄ FUNKCJĘ 'update_filled_orders' PONIŻSZĄ WERSJĄ
 
 def update_filled_orders(executor: BybitExecutor):
     """
@@ -301,15 +297,12 @@ def update_filled_orders(executor: BybitExecutor):
     """
     logger.info("[ORDER_UPDATER] Rozpoczynam cykl aktualizacji aktywnych zleceň.")
     
-    # 1. Pobierz nowe zlecenia (z poprawnym statusem)
     placed_orders_docs = list(state_manager.get_orders_by_status('PLACED'))
     logger.info(f"[ORDER_UPDATER] Znaleziono {len(placed_orders_docs)} zleceń ze statusem 'PLACED'.")
 
-    # 2. Pobierz stare zlecenia (bez pola status) - to jest nasz mechanizm naprawczy
     legacy_orders_docs = list(state_manager.get_orders_without_status())
     logger.info(f"[ORDER_UPDATER] Znaleziono {len(legacy_orders_docs)} starych zleceń bez statusu do naprawy.")
 
-    # Połącz obie listy w jedną, unikając duplikatów
     all_orders_to_process = {doc.id: doc for doc in placed_orders_docs}
     all_orders_to_process.update({doc.id: doc for doc in legacy_orders_docs})
     
@@ -323,20 +316,19 @@ def update_filled_orders(executor: BybitExecutor):
         order_data = order_doc.to_dict()
         order_link_id = order_doc.id
         symbol = order_data.get('symbol')
-        limit_order_id = order_data.get('limitOrderId')
 
-        if not symbol or not limit_order_id:
+        if not symbol or not order_link_id:
             continue
 
         log_prefix = f"[{symbol}|{order_link_id}]"
-        logger.info(f"{log_prefix} Sprawdzam status zlecenia limit {limit_order_id}...")
+        logger.info(f"{log_prefix} Sprawdzam status zlecenia...")
 
         try:
-            order_status_data = executor.get_open_order_by_id(limit_order_id)
+            order_status_data = executor.get_open_order_by_id(order_link_id=order_link_id)
             
             if not order_status_data:
                 logger.info(f"{log_prefix} Zlecenie nie jest już aktywne. Sprawdzam historię...")
-                order_status_data = executor.get_order_history_by_id(limit_order_id)
+                order_status_data = executor.get_order_history_by_id(order_link_id=order_link_id)
 
             if not order_status_data:
                 logger.warning(f"{log_prefix} Nie można odnaleźć zlecenia ani w aktywnych, ani w historii. Oznaczam jako 'UNKNOWN'.")
@@ -376,7 +368,6 @@ def update_filled_orders(executor: BybitExecutor):
             
             elif order_status_data.get('orderStatus') in ['New', 'PartiallyFilled']:
                 logger.info(f"{log_prefix} Zlecenie jest wciąż aktywne (status: {order_status_data.get('orderStatus')}). Dodaję status 'PLACED' i sprawdzę ponownie.")
-                # Jeśli stary dokument nie miał statusu, dodajemy go teraz
                 if 'status' not in order_data:
                     state_manager.update_active_order(order_link_id, {'status': 'PLACED'})
 

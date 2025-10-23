@@ -85,7 +85,7 @@ def register_endpoints(app: Flask):
             logger.error(f"KRYTYCZNY BŁĄD w cyklu logowania PnL: {e}", exc_info=True, extra={"json_fields": {"cycle_id": cycle_id}})
             return jsonify({"status": "error", "message": str(e), "cycle_id": cycle_id}), 500
     
-    # --- NOWY ENDPOINT ---
+
     @app.route('/update-orders', methods=['POST'])
     def update_orders_endpoint():
         cycle_id = str(uuid.uuid4())
@@ -107,7 +107,7 @@ def register_endpoints(app: Flask):
             return jsonify({"status": "success", "cycle_id": cycle_id}), 200
         except Exception as e:
             logger.error(f"KRYTYCZNY BŁĄD w cyklu aktualizacji zleceň: {e}", exc_info=True, extra={"json_fields": {"cycle_id": cycle_id}})
-            return jsonify({"status": "error", "message": str(e), "cycle_id": cycle_id}), 500
+            return jsonify({"status": "error", "message": str(e), "cycle_id": cycle_id}), 500id}), 500
 
 def initialize_app_services(app: Flask):
     with app.app_context():

@@ -164,41 +164,81 @@ class BybitExecutor:
             logger.critical(f"[{symbol}] Nieoczekiwany błąd podczas czyszczenia otwartych zleceń: {e}", exc_info=True)
             return False
 
-    def get_order_history_by_id(self, order_id: str) -> Optional[Dict[str, Any]]:
+    def get_order_history_by_id(self, order_id: str = None, order_link_id: str = None) -> Optional[Dict[str, Any]]:
         """
-        Pobiera szczegóły historycznego zlecenia (ZWYKŁEGO lub WARUNKOWEGO) na podstawie jego ID.
+        Pobiera szczegóły historycznego zlecenia na podstawie jego orderId LUB orderLinkId.
         """
+        if not order_id and not order_link_id:
+            return None
+            
         endpoint = "/v5/order/history"
-        params = {"category": "linear", "orderId": order_id, "orderFilter": "StopOrder"}
-        try:
-            result = self._send_request("GET", endpoint, params=params)
-            if result and result.get('list'):
-                logger.info(f"Znaleziono orderId {order_id} w historii zleceń warunkowych.")
-                return result['list'][0]
-        except Exception:
-            logger.warning(f"Nie udało się sprawdzić historii zleceń warunkowych dla {order_id}. Próbuję dalej.")
+        
+        # Wyszukiwanie po orderLinkId jest bardziej niezawodne
+        if order_link_id:
+            params = {"category": "linear", "orderLinkId": order_link_id}
+            try:
+                result = self._send_request("GET", endpoint, params=params)
+                if result and result.get('list'):
+                    logger.info(f"Znaleziono historię zlecenia po orderLinkId {order_link_id}.")
+                    return result['list'][0]
+            except Exception:
+                logger.warning(f"Nie udało się sprawdzić historii po orderLinkId {order_link_id}.")
 
-        params = {"category": "linear", "orderId": order_id}
-        try:
-            result = self._send_request("GET", endpoint, params=params)
-            if result and result.get('list'):
-                logger.info(f"Znaleziono orderId {order_id} w historii zleceń zwykłych.")
-                return result['list'][0]
-        except Exception:
-            logger.warning(f"Nie udało się sprawdzić historii zleceń zwykłych dla {order_id}.")
+        if order_id:
+            params = {"category": "linear", "orderId": order_id, "orderFilter": "StopOrder"}
+            try:
+                result = self._send_request("GET", endpoint, params=params)
+                if result and result.get('list'):
+                    logger.info(f"Znaleziono orderId {order_id} w historii zleceň warunkowych.")
+                    return result['list'][0]
+            except Exception:
+                logger.warning(f"Nie udało się sprawdzić historii zleceň warunkowych dla {order_id}.")
 
-        logger.warning(f"Ostatecznie nie znaleziono historii dla orderId: {order_id} w żadnym z endpointów.")
+            params = {"category": "linear", "orderId": order_id}
+            try:
+                result = self._send_request("GET", endpoint, params=params)
+                if result and result.get('list'):
+                    logger.info(f"Znaleziono orderId {order_id} w historii zleceň zwykłych.")
+                    return result['list'][0]
+            except Exception:
+                logger.warning(f"Nie udało się sprawdzić historii zleceň zwykłych dla {order_id}.")
+
+        logger.warning(f"Ostatecznie nie znaleziono historii dla orderId: {order_id} / orderLinkId: {order_link_id}.")
         return None
 
-    # --- NOWA, BRAKUJĄCA FUNKCJA ---
+    def get_open_order_by_id(self, order_id: str = None, order_link_id: str = None) -> Optional[Dict[str, Any]]:
+        """
+        Pobiera szczegóły AKTYWNEGO, OTWARTEGO zlecenia na podstawie jego
+        orderId LUB orderLinkId.
+        """
+        if not order_id and not order_link_id:
+            return None
+
+        endpoint = "/v5/order/realtime"
+        params = {"category": "linear"}
+        if order_link_id:
+            params["orderLinkId"] = order_link_id
+        else:
+            params["orderId"] = order_id
+            
+        try:
+            result = self._send_request("GET", endpoint, params=params)
+            if result and result.get('list'):
+                logger.info(f"Znaleziono aktywne zlecenie dla orderId: {order_id} / orderLinkId: {order_link_id}.")
+                return result['list'][0]
+            return None
+        except Exception:
+            logger.warning(f"Nie udało się sprawdzić aktywnych zleceň dla orderId: {order_id} / orderLinkId: {order_link_id}.")
+            return None
+
     def get_active_tp_sl_orders(self, symbol: str) -> List[Dict[str, Any]]:
-        """Pobiera listę aktywnych zleceń warunkowych (TP/SL) dla danego symbolu."""
+        """Pobiera listę aktywnych zleceň warunkowych (TP/SL) dla danego symbolu."""
         api_symbol = symbol.replace('.P', '')
         endpoint = "/v5/order/realtime"
         params = {
             "category": "linear",
             "symbol": api_symbol,
-            "orderFilter": "StopOrder" # Kluczowe: filtrujemy tylko zlecenia warunkowe
+            "orderFilter": "StopOrder"
         }
         try:
             result = self._send_request("GET", endpoint, params=params)
@@ -206,23 +246,5 @@ class BybitExecutor:
             logger.info(f"[{symbol}] Znaleziono {len(order_list)} aktywnych zleceň TP/SL.")
             return order_list
         except (RequestException, BybitAPIError) as e:
-            logger.error(f"[{symbol}] Błąd podczas pobierania aktywnych zleceń TP/SL: {e}")
+            logger.error(f"[{symbol}] Błąd podczas pobierania aktywnych zleceň TP/SL: {e}")
             return []
-        # --- DODAJ TĘ NOWĄ FUNKCJĘ ---
-    def get_open_order_by_id(self, order_id: str) -> Optional[Dict[str, Any]]:
-        """
-        Pobiera szczegóły AKTYWNEGO, OTWARTEGO zlecenia na podstawie jego ID.
-        Szuka tylko w endpoint'cie /v5/order/realtime.
-        """
-        endpoint = "/v5/order/realtime"
-        params = {"category": "linear", "orderId": order_id}
-        try:
-            result = self._send_request("GET", endpoint, params=params)
-            if result and result.get('list'):
-                logger.info(f"Znaleziono aktywne zlecenie o ID {order_id}.")
-                return result['list'][0]
-            # Jeśli lista jest pusta, to znaczy, że zlecenie nie jest już aktywne
-            return None
-        except Exception:
-            logger.warning(f"Nie udało się sprawdzić aktywnych zleceň dla {order_id}.")
-            return None
