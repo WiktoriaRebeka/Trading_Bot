@@ -290,12 +290,12 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
     logger.info(f"Alert [{alert.symbol}] przeszedł walidację. Kierunek: {alert.direction}, Ryzyko: {risk_perc}%.")
     return True
 
-# --- NOWA FUNKCJA ---
+
 def update_filled_orders(executor: BybitExecutor):
     """
     Cykl monitorujący zlecenia ze statusem 'PLACED'.
     Jeśli zlecenie zostało zrealizowane ('Filled'), aktualizuje rekord w Firestore
-    o identyfikatory zleceń TP i SL.
+    o identyfikatory zleceň TP i SL.
     """
     logger.info("[ORDER_UPDATER] Rozpoczynam cykl aktualizacji aktywnych zleceň.")
     
@@ -314,24 +314,34 @@ def update_filled_orders(executor: BybitExecutor):
         logger.info(f"{log_prefix} Sprawdzam status zlecenia limit {limit_order_id}...")
 
         try:
-            # Sprawdź status zlecenia otwierającego
-            order_history = executor.get_order_history_by_id(limit_order_id)
+            # --- KRYTYCZNA ZMIANA: Sprawdzamy najpierw aktywne zlecenia ---
+            order_status_data = executor.get_open_order_by_id(limit_order_id)
+            
+            # Jeśli nie ma go w aktywnych, to znaczy, że już się zakończyło (Filled, Cancelled, etc.)
+            # i dopiero teraz szukamy go w historii.
+            if not order_status_data:
+                logger.info(f"{log_prefix} Zlecenie nie jest już aktywne. Sprawdzam historię...")
+                order_status_data = executor.get_order_history_by_id(limit_order_id)
 
-            if order_history and order_history.get('orderStatus') == 'Filled':
+            if not order_status_data:
+                logger.warning(f"{log_prefix} Nie można odnaleźć zlecenia ani w aktywnych, ani w historii. Pomijam.")
+                continue
+
+            # Teraz, gdy mamy dane zlecenia, sprawdzamy jego status
+            if order_status_data.get('orderStatus') == 'Filled':
                 logger.info(f"{log_prefix} Zlecenie otwierające zrealizowane! Szukam powiązanych zleceň TP/SL.")
                 
-                # Pobierz aktywne zlecenia TP/SL dla tego symbolu
                 active_stop_orders = executor.get_active_tp_sl_orders(symbol)
                 
                 tp_order_id = None
                 sl_order_id = None
 
-                # Znajdź dopasowanie po cenie
                 for stop_order in active_stop_orders:
                     trigger_price = float(stop_order.get('triggerPrice', 0))
-                    if trigger_price == order_data.get('planned_tp_price'):
+                    # Używamy math.isclose do bezpiecznego porównywania liczb zmiennoprzecinkowych
+                    if math.isclose(trigger_price, order_data.get('planned_tp_price')):
                         tp_order_id = stop_order.get('orderId')
-                    elif trigger_price == order_data.get('planned_sl_price'):
+                    elif math.isclose(trigger_price, order_data.get('planned_sl_price')):
                         sl_order_id = stop_order.get('orderId')
                 
                 if tp_order_id and sl_order_id:
@@ -344,11 +354,14 @@ def update_filled_orders(executor: BybitExecutor):
                     state_manager.update_active_order(order_link_id, updates)
                     logger.info(f"{log_prefix} SUKCES! Zaktualizowano rekord o ID zleceń TP: {tp_order_id} i SL: {sl_order_id}.")
                 else:
-                    logger.warning(f"{log_prefix} Zlecenie zrealizowane, ale nie znaleziono pasujących zleceń TP/SL na giełdzie.")
+                    logger.warning(f"{log_prefix} Zlecenie zrealizowane, ale nie znaleziono pasujących zleceň TP/SL na giełdzie. Spróbuję ponownie w następnym cyklu.")
 
-            elif order_history and order_history.get('orderStatus') in ['Cancelled', 'Rejected']:
+            elif order_status_data.get('orderStatus') in ['Cancelled', 'Rejected']:
                  logger.warning(f"{log_prefix} Zlecenie otwierające zostało anulowane/odrzucone. Oznaczam jako anulowane.")
                  state_manager.update_active_order(order_link_id, {'status': 'CANCELLED'})
+            
+            elif order_status_data.get('orderStatus') in ['New', 'PartiallyFilled']:
+                logger.info(f"{log_prefix} Zlecenie jest wciąż aktywne (status: {order_status_data.get('orderStatus')}). Sprawdzę ponownie w następnym cyklu.")
 
         except Exception as e:
             logger.error(f"{log_prefix} Błąd podczas aktualizacji zlecenia: {e}", exc_info=True)

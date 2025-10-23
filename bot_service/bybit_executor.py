@@ -208,3 +208,21 @@ class BybitExecutor:
         except (RequestException, BybitAPIError) as e:
             logger.error(f"[{symbol}] Błąd podczas pobierania aktywnych zleceń TP/SL: {e}")
             return []
+        # --- DODAJ TĘ NOWĄ FUNKCJĘ ---
+    def get_open_order_by_id(self, order_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Pobiera szczegóły AKTYWNEGO, OTWARTEGO zlecenia na podstawie jego ID.
+        Szuka tylko w endpoint'cie /v5/order/realtime.
+        """
+        endpoint = "/v5/order/realtime"
+        params = {"category": "linear", "orderId": order_id}
+        try:
+            result = self._send_request("GET", endpoint, params=params)
+            if result and result.get('list'):
+                logger.info(f"Znaleziono aktywne zlecenie o ID {order_id}.")
+                return result['list'][0]
+            # Jeśli lista jest pusta, to znaczy, że zlecenie nie jest już aktywne
+            return None
+        except Exception:
+            logger.warning(f"Nie udało się sprawdzić aktywnych zleceň dla {order_id}.")
+            return None
