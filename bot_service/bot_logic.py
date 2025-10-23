@@ -230,26 +230,18 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
             
             active_order_data = None
             
-            # --- OSTATECZNA POPRAWKA: Trójetapowe wyszukiwanie ---
+            # --- OSTATECZNA POPRAWKA: Dwuetapowe wyszukiwanie ---
             # Krok 1: Spróbuj znaleźć po orderId zlecenia otwierającego (najszybszy)
             active_order_data = state_manager.get_active_order_by_limit_order_id(order_id_from_pnl)
 
-            # Krok 2: Jeśli nie, szukaj orderLinkId w historii zleceń WARUNKOWYCH (najczęstszy przypadek dla TP/SL)
+            # Krok 2: Jeśli nie znaleziono, użyj nowej, uniwersalnej funkcji do znalezienia orderLinkId
             if not active_order_data:
-                logger.info(f"[{symbol}] Nie znaleziono po limitOrderId. Sprawdzam historię zleceń warunkowych...")
-                order_history = executor.get_stop_order_history_by_id(order_id_from_pnl)
-                if order_history and order_history.get("orderLinkId"):
-                    order_link_id = order_history.get("orderLinkId")
-                    logger.info(f"[{symbol}] Znaleziono orderLinkId w historii warunkowej: {order_link_id}. Szukam w active_orders...")
-                    active_order_data = state_manager.get_active_order_by_id(order_link_id)
-
-            # Krok 3: Ostateczna próba, szukaj w historii zleceń ZWYKŁYCH (rzadki przypadek)
-            if not active_order_data:
-                logger.info(f"[{symbol}] Nie znaleziono w historii warunkowej. Sprawdzam historię zleceń zwykłych...")
+                logger.info(f"[{symbol}] Nie znaleziono dopasowania po limitOrderId. Próbuję znaleźć orderLinkId w historii...")
                 order_history = executor.get_order_history_by_id(order_id_from_pnl)
+                
                 if order_history and order_history.get("orderLinkId"):
                     order_link_id = order_history.get("orderLinkId")
-                    logger.info(f"[{symbol}] Znaleziono orderLinkId w historii zwykłej: {order_link_id}. Szukam w active_orders...")
+                    logger.info(f"[{symbol}] Znaleziono orderLinkId: {order_link_id}. Szukam w active_orders...")
                     active_order_data = state_manager.get_active_order_by_id(order_link_id)
 
             if not active_order_data:

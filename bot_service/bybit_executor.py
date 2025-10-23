@@ -19,6 +19,7 @@ class BybitAPIError(Exception):
         super().__init__(f"Bybit API Error: [Code: {ret_code}] {ret_msg}")
 
 class BybitExecutor:
+    # ... (funkcje __init__, _send_request, place_order, get_closed_pnl_history itd. BEZ ZMIAN) ...
     def __init__(self, api_key: str, api_secret: str, testnet: bool = True):
         if not api_key or not api_secret:
             raise ValueError("Klucze API Bybit nie mogą być puste.")

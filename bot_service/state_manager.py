@@ -73,7 +73,7 @@ def get_latest_klines_from_cache(symbols: Iterable[str]) -> Dict[str, Dict[str, 
         logger.warning(f"[KLINE_CACHE] Nie udało się pobrać rekordów kline z cache'u dla {unique_symbols}.")
     return klines_cache
 
-# --- NOWA, POPRAWIONA SEKCJA OBSŁUGI ACTIVE ORDERS ---
+# --- NOWA, POPRAWIONA I JEDYNA SEKCJA OBSŁUGI ACTIVE ORDERS ---
 def save_active_order(order_link_id: str, order_data: Dict[str, Any]):
     """Zapisuje informacje o aktywnym zleceniu, używając orderLinkId jako ID dokumentu."""
     try:
