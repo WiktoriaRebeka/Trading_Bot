@@ -163,16 +163,23 @@ def _transform_liquidation_record(liq_record: Dict[str, Any]) -> Dict[str, Any]:
         "updatedTime": liq_record.get("updatedTime"), "exitType": "Liquidation"
     }
 
+
 def log_closed_positions_pnl(executor: BybitExecutor) -> int:
     """
     Pobiera zamknięte pozycje, znajduje dla nich dopasowanie w `active_orders`
     i loguje wzbogacony rekord do BigQuery.
+    WERSJA POPRAWIONA: Zawiera mechanizm odroczenia (grace period) dla bardzo
+    świeżych, niedopasowanych transakcji, aby rozwiązać problem wyścigu stanów.
     """
     logger.info("[PNL_LOGGER] Rozpoczynam cykl logowania zamkniętych pozycji.")
     
     last_check_ts_dt = load_last_processed_timestamp("pnl_logger_last_fetch_state")
     current_cycle_start_time = datetime.now(timezone.utc)
     
+    # Definicja okresu " karencji". Transakcje nowsze niż ten okres będą ignorowane, jeśli nie zostaną dopasowane.
+    GRACE_PERIOD_MINUTES = 3
+    grace_period_delta = timedelta(minutes=GRACE_PERIOD_MINUTES)
+
     LOOKBACK_BUFFER_HOURS = 12
     start_time_with_buffer = last_check_ts_dt - timedelta(hours=LOOKBACK_BUFFER_HOURS)
     logger.info(f"[PNL_LOGGER] Sprawdzam zamknięte pozycje od: {start_time_with_buffer.isoformat()} (z {LOOKBACK_BUFFER_HOURS}h buforem).")
@@ -209,8 +216,10 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
             
             active_order_data = None
             
+            # Etap 1: Próba Szybka
             active_order_data = state_manager.get_active_order_by_limit_order_id(order_id_from_pnl)
 
+            # Etap 2 i 3: Główne Śledztwo
             if not active_order_data:
                 logger.info(f"[{symbol}] Nie znaleziono dopasowania po limitOrderId. Próbuję znaleźć orderLinkId w historii...")
                 order_history = executor.get_order_history_by_id(order_id_from_pnl)
@@ -220,15 +229,29 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
                     logger.info(f"[{symbol}] Znaleziono orderLinkId: {order_link_id}. Szukam w active_orders...")
                     active_order_data = state_manager.get_active_order_by_id(order_link_id)
 
+            # --- NOWA LOGIKA ODROCZENIA (GRACE PERIOD) ---
             if not active_order_data:
-                logger.warning(f"[PNL_LOGGER] OSTATECZNIE nie znaleziono dopasowania dla orderId '{order_id_from_pnl}'. Transakcja zostanie zapisana jako UNMATCHED.")
-                active_order_data = {}
+                updated_time_ms = int(pnl_record.get("updatedTime", 0))
+                record_ts_dt = datetime.fromtimestamp(updated_time_ms / 1000, tz=timezone.utc)
+                
+                if current_cycle_start_time - record_ts_dt < grace_period_delta:
+                    logger.warning(
+                        f"[PNL_LOGGER][ODROCZENIE] Nie znaleziono dopasowania dla bardzo świeżej transakcji "
+                        f"(zamknięta {record_ts_dt.isoformat()}). "
+                        f"Pomijam ją w tym cyklu, aby dać czas na zapis 'active_order'. Zostanie przetworzona w następnym cyklu."
+                    )
+                    # Pomijamy ten rekord, ale NIE aktualizujemy new_max_ts_dt, aby na pewno został pobrany ponownie
+                    continue
+                else:
+                    logger.warning(f"[PNL_LOGGER] OSTATECZNIE nie znaleziono dopasowania dla orderId '{order_id_from_pnl}'. Transakcja zostanie zapisana jako UNMATCHED.")
+                    active_order_data = {} # Przekazujemy pusty słownik do log_real_trade_result
             else:
                 logger.info(f"[PNL_LOGGER] SUKCES! Znaleziono dopasowanie dla transakcji.")
 
             if log_real_trade_result(pnl_record, active_order_data):
                 processed_count += 1
             
+            # Aktualizujemy znacznik czasu tylko dla faktycznie przetworzonych (lub ostatecznie UNMATCHED) rekordów
             updated_time_ms = int(pnl_record.get("updatedTime", 0))
             if updated_time_ms > 0:
                 record_ts_dt = datetime.fromtimestamp(updated_time_ms / 1000, tz=timezone.utc)
