@@ -9,7 +9,7 @@ from shared_lib.secret_manager import get_secret
 from shared_lib.firebase_client import initialize_firebase
 from bot_service.bigquery_logger import initialize_bigquery
 from bot_service.bybit_executor import BybitExecutor
-from bot_service.bot_logic import process_new_alerts, log_closed_positions_pnl
+from bot_service.bot_logic import process_new_alerts, log_closed_positions_pnl, update_filled_orders
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +83,30 @@ def register_endpoints(app: Flask):
             return jsonify({"status": "success", "processed_records": processed_count, "cycle_id": cycle_id}), 200
         except Exception as e:
             logger.error(f"KRYTYCZNY BŁĄD w cyklu logowania PnL: {e}", exc_info=True, extra={"json_fields": {"cycle_id": cycle_id}})
+            return jsonify({"status": "error", "message": str(e), "cycle_id": cycle_id}), 500
+    
+    # --- NOWY ENDPOINT ---
+    @app.route('/update-orders', methods=['POST'])
+    def update_orders_endpoint():
+        cycle_id = str(uuid.uuid4())
+        logger.info(f"--- Rozpoczynam cykl aktualizacji zleceň [ID: {cycle_id}] ---")
+
+        if not app.config.get('INITIALIZATION_SUCCESS', False):
+            reason = app.config.get('INITIALIZATION_FAILURE_REASON', 'Aplikacja niezainicjalizowana.')
+            logger.error(f"Zatrzymano cykl aktualizacji, ponieważ aplikacja nie jest 'healthy'. Powód: {reason}", extra={"json_fields": {"cycle_id": cycle_id}})
+            return jsonify({"status": "error", "message": f"Service is unhealthy: {reason}"}), 503
+        
+        try:
+            bybit_executor = app.config.get('BYBIT_EXECUTOR')
+            if not bybit_executor:
+                raise RuntimeError("BybitExecutor nie został poprawnie zainicjalizowany.")
+            
+            update_filled_orders(bybit_executor)
+
+            logger.info(f"--- Cykl aktualizacji zleceň zakończony pomyślnie [ID: {cycle_id}] ---")
+            return jsonify({"status": "success", "cycle_id": cycle_id}), 200
+        except Exception as e:
+            logger.error(f"KRYTYCZNY BŁĄD w cyklu aktualizacji zleceň: {e}", exc_info=True, extra={"json_fields": {"cycle_id": cycle_id}})
             return jsonify({"status": "error", "message": str(e), "cycle_id": cycle_id}), 500
 
 def initialize_app_services(app: Flask):

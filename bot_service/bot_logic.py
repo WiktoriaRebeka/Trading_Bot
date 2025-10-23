@@ -163,20 +163,17 @@ def _transform_liquidation_record(liq_record: Dict[str, Any]) -> Dict[str, Any]:
         "updatedTime": liq_record.get("updatedTime"), "exitType": "Liquidation"
     }
 
-
 def log_closed_positions_pnl(executor: BybitExecutor) -> int:
     """
     Pobiera zamknięte pozycje, znajduje dla nich dopasowanie w `active_orders`
     i loguje wzbogacony rekord do BigQuery.
-    WERSJA POPRAWIONA: Zawiera mechanizm odroczenia (grace period) dla bardzo
-    świeżych, niedopasowanych transakcji, aby rozwiązać problem wyścigu stanów.
+    WERSJA FINALNA: Używa nowej, niezawodnej metody dopasowania po tpOrderId/slOrderId.
     """
     logger.info("[PNL_LOGGER] Rozpoczynam cykl logowania zamkniętych pozycji.")
     
     last_check_ts_dt = load_last_processed_timestamp("pnl_logger_last_fetch_state")
     current_cycle_start_time = datetime.now(timezone.utc)
     
-    # Definicja okresu " karencji". Transakcje nowsze niż ten okres będą ignorowane, jeśli nie zostaną dopasowane.
     GRACE_PERIOD_MINUTES = 3
     grace_period_delta = timedelta(minutes=GRACE_PERIOD_MINUTES)
 
@@ -214,22 +211,18 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
 
             logger.info(f"[PNL_LOGGER] Przetwarzanie rekordu dla {symbol} [OrderID z PnL: {order_id_from_pnl}]")
             
-            active_order_data = None
-            
-            # Etap 1: Próba Szybka
-            active_order_data = state_manager.get_active_order_by_limit_order_id(order_id_from_pnl)
+            # --- NOWA, GŁÓWNA METODA DOPASOWANIA ---
+            active_order_data = state_manager.get_active_order_by_tpsl_order_id(order_id_from_pnl)
 
-            # Etap 2 i 3: Główne Śledztwo
+            # Stara metoda jako fallback (zabezpieczenie)
             if not active_order_data:
-                logger.info(f"[{symbol}] Nie znaleziono dopasowania po limitOrderId. Próbuję znaleźć orderLinkId w historii...")
+                logger.warning(f"[{symbol}] Nie znaleziono dopasowania po tp/sl OrderId. Próbuję starej metody (fallback)...")
                 order_history = executor.get_order_history_by_id(order_id_from_pnl)
                 
                 if order_history and order_history.get("orderLinkId"):
                     order_link_id = order_history.get("orderLinkId")
-                    logger.info(f"[{symbol}] Znaleziono orderLinkId: {order_link_id}. Szukam w active_orders...")
                     active_order_data = state_manager.get_active_order_by_id(order_link_id)
 
-            # --- NOWA LOGIKA ODROCZENIA (GRACE PERIOD) ---
             if not active_order_data:
                 updated_time_ms = int(pnl_record.get("updatedTime", 0))
                 record_ts_dt = datetime.fromtimestamp(updated_time_ms / 1000, tz=timezone.utc)
@@ -238,20 +231,18 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
                     logger.warning(
                         f"[PNL_LOGGER][ODROCZENIE] Nie znaleziono dopasowania dla bardzo świeżej transakcji "
                         f"(zamknięta {record_ts_dt.isoformat()}). "
-                        f"Pomijam ją w tym cyklu, aby dać czas na zapis 'active_order'. Zostanie przetworzona w następnym cyklu."
+                        f"Pomijam ją w tym cyklu. Zostanie przetworzona w następnym cyklu."
                     )
-                    # Pomijamy ten rekord, ale NIE aktualizujemy new_max_ts_dt, aby na pewno został pobrany ponownie
                     continue
                 else:
                     logger.warning(f"[PNL_LOGGER] OSTATECZNIE nie znaleziono dopasowania dla orderId '{order_id_from_pnl}'. Transakcja zostanie zapisana jako UNMATCHED.")
-                    active_order_data = {} # Przekazujemy pusty słownik do log_real_trade_result
+                    active_order_data = {}
             else:
                 logger.info(f"[PNL_LOGGER] SUKCES! Znaleziono dopasowanie dla transakcji.")
 
             if log_real_trade_result(pnl_record, active_order_data):
                 processed_count += 1
             
-            # Aktualizujemy znacznik czasu tylko dla faktycznie przetworzonych (lub ostatecznie UNMATCHED) rekordów
             updated_time_ms = int(pnl_record.get("updatedTime", 0))
             if updated_time_ms > 0:
                 record_ts_dt = datetime.fromtimestamp(updated_time_ms / 1000, tz=timezone.utc)
@@ -299,119 +290,65 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
     logger.info(f"Alert [{alert.symbol}] przeszedł walidację. Kierunek: {alert.direction}, Ryzyko: {risk_perc}%.")
     return True
 
-def _run_analysis_of_existing_cases():
-    logger.info("Rozpoczynam główną pętlę cyklu analitycznego.")
-    all_cases_docs = list(state_manager.get_all_analytical_cases())
-    if not all_cases_docs:
-        logger.info("Brak aktywnych teczek analitycznych. Kończę cykl.")
-        return
-    instrument_rules = get_instrument_rules()
-    if not instrument_rules:
-        logger.error("Nie udało się wczytać zasad instrumentów dla procesu analitycznego. Pomijam cykl.")
-        return
-    logger.info(f"[DIAGNOSTYKA] Znaleziono {len(all_cases_docs)} teczek analitycznych do przetworzenia.")
-    symbols_to_watch = {doc.to_dict().get('symbol') for doc in all_cases_docs if doc.to_dict()}
-    valid_symbols = {s for s in symbols_to_watch if s}
-    if not valid_symbols:
-        logger.info("Brak symboli do monitorowania w aktywnych teczkach.")
-        return
-    klines_data_from_cache = state_manager.get_latest_klines_from_cache(list(valid_symbols))
-    if not klines_data_from_cache:
-        logger.warning("Nie udało się pobrać danych kline z cache'u. Pomijam cykl.")
-        return
-    klines_models = {symbol: Kline.model_validate(data) for symbol, data in klines_data_from_cache.items()}
-    logger.info(f"[DIAGNOSTYKA] Pomyślnie pobrano {len(klines_models)} świec z cache'u.")
-    for case_doc_snapshot in all_cases_docs:
-        case_id = case_doc_snapshot.id
+# --- NOWA FUNKCJA ---
+def update_filled_orders(executor: BybitExecutor):
+    """
+    Cykl monitorujący zlecenia ze statusem 'PLACED'.
+    Jeśli zlecenie zostało zrealizowane ('Filled'), aktualizuje rekord w Firestore
+    o identyfikatory zleceń TP i SL.
+    """
+    logger.info("[ORDER_UPDATER] Rozpoczynam cykl aktualizacji aktywnych zleceň.")
+    
+    placed_orders_docs = state_manager.get_orders_by_status('PLACED')
+    
+    for order_doc in placed_orders_docs:
+        order_data = order_doc.to_dict()
+        order_link_id = order_doc.id
+        symbol = order_data.get('symbol')
+        limit_order_id = order_data.get('limitOrderId')
+
+        if not symbol or not limit_order_id:
+            continue
+
+        log_prefix = f"[{symbol}|{order_link_id}]"
+        logger.info(f"{log_prefix} Sprawdzam status zlecenia limit {limit_order_id}...")
+
         try:
-            case_doc = case_doc_snapshot.to_dict()
-            symbol = case_doc.get('symbol')
-            status = case_doc.get('status')
-            rule = instrument_rules.get(symbol)
-            if not rule or "tickSize" not in rule:
-                logger.warning(f"Brak zasad 'tickSize' dla symbolu {symbol} (teczka {case_id}). Pomijam.")
-                continue
-            latest_kline = klines_models.get(symbol)
-            if not latest_kline:
-                logger.warning(f"Brak danych kline dla symbolu {symbol} (teczka {case_id}). Pomijam tę teczkę w cyklu.")
-                continue
-            if status == 'PENDING':
-                _handle_pending_case(case_doc_snapshot, latest_kline, rule)
-            elif status == 'TRIGGERED':
-                _handle_triggered_case(case_doc_snapshot, latest_kline, rule)
+            # Sprawdź status zlecenia otwierającego
+            order_history = executor.get_order_history_by_id(limit_order_id)
+
+            if order_history and order_history.get('orderStatus') == 'Filled':
+                logger.info(f"{log_prefix} Zlecenie otwierające zrealizowane! Szukam powiązanych zleceň TP/SL.")
+                
+                # Pobierz aktywne zlecenia TP/SL dla tego symbolu
+                active_stop_orders = executor.get_active_tp_sl_orders(symbol)
+                
+                tp_order_id = None
+                sl_order_id = None
+
+                # Znajdź dopasowanie po cenie
+                for stop_order in active_stop_orders:
+                    trigger_price = float(stop_order.get('triggerPrice', 0))
+                    if trigger_price == order_data.get('planned_tp_price'):
+                        tp_order_id = stop_order.get('orderId')
+                    elif trigger_price == order_data.get('planned_sl_price'):
+                        sl_order_id = stop_order.get('orderId')
+                
+                if tp_order_id and sl_order_id:
+                    updates = {
+                        'status': 'OPEN',
+                        'tpOrderId': tp_order_id,
+                        'slOrderId': sl_order_id,
+                        'position_opened_at': datetime.now(timezone.utc)
+                    }
+                    state_manager.update_active_order(order_link_id, updates)
+                    logger.info(f"{log_prefix} SUKCES! Zaktualizowano rekord o ID zleceń TP: {tp_order_id} i SL: {sl_order_id}.")
+                else:
+                    logger.warning(f"{log_prefix} Zlecenie zrealizowane, ale nie znaleziono pasujących zleceń TP/SL na giełdzie.")
+
+            elif order_history and order_history.get('orderStatus') in ['Cancelled', 'Rejected']:
+                 logger.warning(f"{log_prefix} Zlecenie otwierające zostało anulowane/odrzucone. Oznaczam jako anulowane.")
+                 state_manager.update_active_order(order_link_id, {'status': 'CANCELLED'})
+
         except Exception as e:
-            logger.error(f"Błąd podczas przetwarzania teczki {case_id}: {e}", exc_info=True)
-    logger.info("Zakończono główną pętlę cyklu analitycznego.")
-
-def _handle_pending_case(case_doc_snapshot: Any, kline: Kline, rule: Dict[str, Any]):
-    case_doc = case_doc_snapshot.to_dict()
-    case_id = case_doc_snapshot.id
-    alert = AlertData.model_validate(case_doc.get('alert_data'))
-    tick_size = rule['tickSize']
-    if alert.direction == 'LONG':
-        final_entry = round_price_by_tick(alert.entry, tick_size, 'up')
-    else: # SHORT
-        final_entry = round_price_by_tick(alert.entry, tick_size, 'down')
-    entry_triggered = False
-    if alert.direction == 'LONG' and kline.low <= final_entry:
-        entry_triggered = True
-    elif alert.direction == 'SHORT' and kline.high >= final_entry:
-        entry_triggered = True
-    if entry_triggered:
-        logger.info(f"--- [ANALYSIS TRIGGER] --- [{alert.symbol}] | ID: {case_id} | Cena wejścia {final_entry} dotknięta.")
-        updates = {"status": "TRIGGERED", "triggered_at": datetime.now(timezone.utc)}
-        state_manager.update_case_status_and_results(case_id, updates)
-
-def _handle_triggered_case(case_doc_snapshot: Any, kline: Kline, rule: Dict[str, Any]):
-    case_doc = case_doc_snapshot.to_dict()
-    case_id = case_doc_snapshot.id
-    symbol = case_doc.get('symbol')
-    alert = AlertData.model_validate(case_doc.get('alert_data'))
-    results = case_doc.get('results', {})
-    tick_size = rule['tickSize']
-    unresolved_targets = {k: v for k, v in results.items() if v == "UNRESOLVED"}
-    if not unresolved_targets:
-        logger.info(f"[{case_id}] Wszystkie scenariusze rozstrzygnięte. Usuwam teczkę.")
-        state_manager.delete_case_by_id(case_id)
-        return
-    direction = alert.direction
-    if direction == 'LONG':
-        final_sl = round_price_by_tick(alert.sl, tick_size, 'down')
-    else: # SHORT
-        final_sl = round_price_by_tick(alert.sl, tick_size, 'up')
-    resolved_scenarios = {}
-    close_timestamp = datetime.fromtimestamp(kline.timestamp / 1000, tz=timezone.utc)
-    base_log_data = {
-        "analysis_id": case_id, "symbol": symbol, "direction": direction,
-        "entry_price": alert.entry, "sl_price": alert.sl,
-        "timestamp_alert": alert.received_at.isoformat() if alert.received_at else None,
-        "timestamp_entry": case_doc.get('triggered_at').isoformat() if case_doc.get('triggered_at') else None,
-        "timestamp_close": close_timestamp.isoformat(),
-        "risk_percentage": _calculate_risk_percentage(alert.entry, alert.sl)
-    }
-    sl_hit = (direction == 'LONG' and kline.low <= final_sl) or (direction == 'SHORT' and kline.high >= final_sl)
-    if sl_hit:
-        logger.info(f"--- [ANALYSIS SL HIT] --- [{symbol}] | ID: {case_id} | Wszystkie nierozstrzygnięte scenariusze = LOSE.")
-        for target_level in unresolved_targets:
-            log_data = base_log_data.copy()
-            log_data.update({"target_level": target_level, "target_price": getattr(alert, target_level), "result": "LOSE"})
-            log_analysis_result(log_data)
-            resolved_scenarios[f'results.{target_level}'] = "LOSE"
-    else:
-        for target_level in unresolved_targets:
-            if direction == 'LONG':
-                final_tp = round_price_by_tick(getattr(alert, target_level), tick_size, 'up')
-            else: # SHORT
-                final_tp = round_price_by_tick(getattr(alert, target_level), tick_size, 'down')
-            tp_hit = (direction == 'LONG' and kline.high >= final_tp) or (direction == 'SHORT' and kline.low <= final_tp)
-            if tp_hit:
-                logger.info(f"--- [ANALYSIS TP HIT] --- [{symbol}] | ID: {case_id} | Scenariusz {target_level} = WIN.")
-                log_data = base_log_data.copy()
-                log_data.update({"target_level": target_level, "target_price": getattr(alert, target_level), "result": "WIN"})
-                log_analysis_result(log_data)
-                resolved_scenarios[f'results.{target_level}'] = "WIN"
-    if resolved_scenarios:
-        state_manager.update_case_status_and_results(case_id, resolved_scenarios)
-        if len(results) - len(unresolved_targets) + len(resolved_scenarios) >= 6:
-            logger.info(f"[{case_id}] Wszystkie 6 scenariuszy rozstrzygnięte. Finalne usunięcie teczki.")
-            state_manager.delete_case_by_id(case_id)
+            logger.error(f"{log_prefix} Błąd podczas aktualizacji zlecenia: {e}", exc_info=True)

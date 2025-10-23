@@ -189,3 +189,22 @@ class BybitExecutor:
 
         logger.warning(f"Ostatecznie nie znaleziono historii dla orderId: {order_id} w żadnym z endpointów.")
         return None
+
+    # --- NOWA, BRAKUJĄCA FUNKCJA ---
+    def get_active_tp_sl_orders(self, symbol: str) -> List[Dict[str, Any]]:
+        """Pobiera listę aktywnych zleceń warunkowych (TP/SL) dla danego symbolu."""
+        api_symbol = symbol.replace('.P', '')
+        endpoint = "/v5/order/realtime"
+        params = {
+            "category": "linear",
+            "symbol": api_symbol,
+            "orderFilter": "StopOrder" # Kluczowe: filtrujemy tylko zlecenia warunkowe
+        }
+        try:
+            result = self._send_request("GET", endpoint, params=params)
+            order_list = result.get('list', [])
+            logger.info(f"[{symbol}] Znaleziono {len(order_list)} aktywnych zleceň TP/SL.")
+            return order_list
+        except (RequestException, BybitAPIError) as e:
+            logger.error(f"[{symbol}] Błąd podczas pobierania aktywnych zleceń TP/SL: {e}")
+            return []
