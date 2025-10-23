@@ -206,3 +206,8 @@ def get_active_order_by_tpsl_order_id(tpsl_order_id: str) -> Optional[Dict[str, 
     except Exception as e:
         logger.error(f"Błąd podczas wyszukiwania zlecenia po tpsl_order_id {tpsl_order_id}: {e}", exc_info=True)
         return None
+
+
+def get_all_active_orders() -> Iterable[DocumentSnapshot]:
+    """Pobiera wszystkie dokumenty z kolekcji active_orders."""
+    return _get_db().collection(constants.ACTIVE_ORDERS_COLLECTION).stream()

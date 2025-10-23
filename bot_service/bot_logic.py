@@ -373,3 +373,27 @@ def update_filled_orders(executor: BybitExecutor):
 
         except Exception as e:
             logger.error(f"{log_prefix} Błąd podczas aktualizacji zlecenia: {e}", exc_info=True)
+
+
+
+def repair_old_orders():
+    """
+    JEDNORAZOWY SKRYPT NAPRAWCZY.
+    Przechodzi przez wszystkie dokumenty w 'active_orders' i dodaje
+    pole 'status: PLACED', jeśli go brakuje.
+    """
+    logger.info("[REPAIR_SCRIPT] Uruchamiam jednorazowy skrypt naprawczy dla starych zleceň.")
+    
+    all_orders = state_manager.get_all_active_orders()
+    repaired_count = 0
+
+    for order_doc in all_orders:
+        order_data = order_doc.to_dict()
+        if 'status' not in order_data:
+            order_id = order_doc.id
+            logger.info(f"[REPAIR_SCRIPT] Naprawiam zlecenie: {order_id}, dodaję status 'PLACED'.")
+            state_manager.update_active_order(order_id, {'status': 'PLACED'})
+            repaired_count += 1
+    
+    logger.info(f"[REPAIR_SCRIPT] Zakończono. Naprawiono {repaired_count} zleceń.")
+    return repaired_count
