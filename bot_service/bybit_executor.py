@@ -19,7 +19,6 @@ class BybitAPIError(Exception):
         super().__init__(f"Bybit API Error: [Code: {ret_code}] {ret_msg}")
 
 class BybitExecutor:
-    # ... (funkcje __init__, _send_request, place_order, get_closed_pnl_history itd. BEZ ZMIAN) ...
     def __init__(self, api_key: str, api_secret: str, testnet: bool = True):
         if not api_key or not api_secret:
             raise ValueError("Klucze API Bybit nie mogą być puste.")
@@ -165,27 +164,31 @@ class BybitExecutor:
             logger.critical(f"[{symbol}] Nieoczekiwany błąd podczas czyszczenia otwartych zleceń: {e}", exc_info=True)
             return False
 
-    # --- OSTATECZNA POPRAWKA: Dwie funkcje do sprawdzania historii ---
+    # --- OSTATECZNA POPRAWKA: Jedna funkcja do sprawdzania historii ---
     def get_order_history_by_id(self, order_id: str) -> Optional[Dict[str, Any]]:
-        """Pobiera szczegóły historycznego zlecenia ZWYKŁEGO na podstawie jego ID."""
+        """
+        Pobiera szczegóły historycznego zlecenia (ZWYKŁEGO lub WARUNKOWEGO) na podstawie jego ID.
+        """
+        # Najpierw sprawdzamy historię zleceń warunkowych (TP/SL)
         endpoint = "/v5/order/history"
-        params = {"category": "linear", "orderId": order_id}
+        params = {"category": "linear", "orderId": order_id, "orderFilter": "StopOrder"}
         try:
             result = self._send_request("GET", endpoint, params=params)
             if result and result.get('list'):
+                logger.info(f"Znaleziono orderId {order_id} w historii zleceń warunkowych.")
                 return result['list'][0]
-            return None
-        except BybitAPIError: return None
-        except Exception: return None
+        except Exception:
+            logger.warning(f"Nie udało się sprawdzić historii zleceń warunkowych dla {order_id}. Próbuję dalej.")
 
-    def get_stop_order_history_by_id(self, order_id: str) -> Optional[Dict[str, Any]]:
-        """Pobiera szczegóły historycznego zlecenia WARUNKOWEGO (TP/SL) na podstawie jego ID."""
-        endpoint = "/v5/stop-order/history"
+        # Jeśli nie znaleziono, sprawdzamy historię zwykłych zleceń
         params = {"category": "linear", "orderId": order_id}
         try:
             result = self._send_request("GET", endpoint, params=params)
             if result and result.get('list'):
+                logger.info(f"Znaleziono orderId {order_id} w historii zleceń zwykłych.")
                 return result['list'][0]
-            return None
-        except BybitAPIError: return None
-        except Exception: return None
+        except Exception:
+            logger.warning(f"Nie udało się sprawdzić historii zleceń zwykłych dla {order_id}.")
+
+        logger.warning(f"Ostatecznie nie znaleziono historii dla orderId: {order_id} w żadnym z endpointów.")
+        return None
