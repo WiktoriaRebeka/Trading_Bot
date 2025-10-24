@@ -163,13 +163,10 @@ def _transform_liquidation_record(liq_record: Dict[str, Any]) -> Dict[str, Any]:
         "updatedTime": liq_record.get("updatedTime"), "exitType": "Liquidation"
     }
 
+# Lokalizacja: bot_service/bot_logic.py
+# ZASTĄP FUNKCJĘ 'log_closed_positions_pnl' PONIŻSZĄ WERSJĄ
+
 def log_closed_positions_pnl(executor: BybitExecutor) -> int:
-    """
-    Pobiera zamknięte pozycje, znajduje dla nich dopasowanie w `active_orders`
-    i loguje wzbogacony rekord do BigQuery.
-    WERSJA FINALNA: Używa nowej, niezawodnej metody dopasowania po tpOrderId/slOrderId
-    oraz obsługuje likwidacje i inne przypadki brzegowe.
-    """
     logger.info("[PNL_LOGGER] Rozpoczynam cykl logowania zamkniętych pozycji.")
     
     last_check_ts_dt = load_last_processed_timestamp("pnl_logger_last_fetch_state")
@@ -177,7 +174,6 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
     
     GRACE_PERIOD_MINUTES = 3
     grace_period_delta = timedelta(minutes=GRACE_PERIOD_MINUTES)
-
     LOOKBACK_BUFFER_HOURS = 12
     start_time_with_buffer = last_check_ts_dt - timedelta(hours=LOOKBACK_BUFFER_HOURS)
     logger.info(f"[PNL_LOGGER] Sprawdzam zamknięte pozycje od: {start_time_with_buffer.isoformat()} (z {LOOKBACK_BUFFER_HOURS}h buforem).")
@@ -215,41 +211,47 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
             
             active_order_data = None
 
-            # --- ZMODYFIKOWANA LOGIKA DOPASOWANIA ---
+            # Główna metoda dopasowania
             if exit_type in ["TakeProfit", "StopLoss"]:
                 active_order_data = state_manager.get_active_order_by_tpsl_order_id(order_id_from_pnl)
             
-            # Fallback dla likwidacji lub jeśli powyższe zawiedzie
+            # --- NOWA, ULEPSZONA LOGIKA FALLBACK ---
             if not active_order_data:
-                if exit_type in ["TakeProfit", "StopLoss"]:
-                    logger.warning(f"[{symbol}] Nie znaleziono dopasowania po tp/sl OrderId. Próbuję metody fallback...")
-                else:
-                    logger.info(f"[{symbol}] Typ zamknięcia to '{exit_type}'. Próbuję dopasowania po orderLinkId...")
+                logger.warning(f"[{symbol}] Nie znaleziono dopasowania po tp/sl OrderId. Uruchamiam zaawansowany fallback...")
+                
+                # Krok 1: Znajdź orderLinkId z historii zlecenia zamykającego
+                order_history = executor.get_order_history_by_id(order_id=order_id_from_pnl)
+                if order_history and order_history.get("orderLinkId"):
+                    order_link_id = order_history.get("orderLinkId")
+                    logger.info(f"[{symbol}] Odzyskano orderLinkId: {order_link_id} ze zlecenia zamykającego.")
+                    
+                    # Krok 2: Znajdź nasz "złoty rekord" po orderLinkId
+                    potential_match = state_manager.get_active_order_by_id(order_link_id)
+                    
+                    # Krok 3: Sprawdź, czy to na pewno ten - porównaj ceny TP/SL
+                    if potential_match:
+                        logger.info(f"[{symbol}] Znaleziono potencjalne dopasowanie. Weryfikuję ceny TP/SL...")
+                        trigger_price = float(order_history.get("triggerPrice", 0))
+                        
+                        is_tp_match = math.isclose(trigger_price, potential_match.get('planned_tp_price', -1))
+                        is_sl_match = math.isclose(trigger_price, potential_match.get('planned_sl_price', -1))
 
-                # Używamy orderLinkId z rekordu PnL, jeśli jest dostępny
-                order_link_id_from_pnl = pnl_record.get("orderLinkId")
-                if order_link_id_from_pnl:
-                    active_order_data = state_manager.get_active_order_by_id(order_link_id_from_pnl)
-                else:
-                    # Ostateczny fallback, jeśli giełda nie zwróci orderLinkId w PnL
-                    order_history = executor.get_order_history_by_id(order_id=order_id_from_pnl)
-                    if order_history and order_history.get("orderLinkId"):
-                        order_link_id = order_history.get("orderLinkId")
-                        active_order_data = state_manager.get_active_order_by_id(order_link_id)
+                        if is_tp_match or is_sl_match:
+                            logger.info(f"[{symbol}] Weryfikacja pomyślna. To jest prawidłowe dopasowanie.")
+                            active_order_data = potential_match
+                        else:
+                            logger.warning(f"[{symbol}] Dopasowanie po orderLinkId nie powiodło się - ceny TP/SL się nie zgadzają.")
 
             if not active_order_data:
+                # Logika odroczenia i UNMATCHED
                 updated_time_ms = int(pnl_record.get("updatedTime", 0))
                 record_ts_dt = datetime.fromtimestamp(updated_time_ms / 1000, tz=timezone.utc)
                 
                 if current_cycle_start_time - record_ts_dt < grace_period_delta:
-                    logger.warning(
-                        f"[PNL_LOGGER][ODROCZENIE] Nie znaleziono dopasowania dla bardzo świeżej transakcji "
-                        f"(zamknięta {record_ts_dt.isoformat()}). "
-                        f"Pomijam ją w tym cyklu. Zostanie przetworzona w następnym cyklu."
-                    )
+                    logger.warning(f"[PNL_LOGGER][ODROCZENIE] Nie znaleziono dopasowania dla świeżej transakcji. Pomijam, spróbuję w następnym cyklu.")
                     continue
                 else:
-                    logger.warning(f"[PNL_LOGGER] OSTATECZNIE nie znaleziono dopasowania dla orderId '{order_id_from_pnl}'. Transakcja zostanie zapisana jako UNMATCHED.")
+                    logger.warning(f"[PNL_LOGGER] OSTATECZNIE nie znaleziono dopasowania dla orderId '{order_id_from_pnl}'.")
                     active_order_data = {}
             else:
                 logger.info(f"[PNL_LOGGER] SUKCES! Znaleziono dopasowanie dla transakcji.")
