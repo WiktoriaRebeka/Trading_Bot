@@ -307,9 +307,6 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
     return True
 
 
-# Lokalizacja: bot_service/bot_logic.py
-
-# ZASTĄP FUNKCJĘ 'update_filled_orders' PONIŻSZĄ WERSJĄ
 
 def update_filled_orders(executor: BybitExecutor):
     """
