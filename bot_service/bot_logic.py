@@ -307,6 +307,10 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
     return True
 
 
+# Lokalizacja: bot_service/bot_logic.py
+
+# ZASTĄP FUNKCJĘ 'update_filled_orders' PONIŻSZĄ WERSJĄ
+
 def update_filled_orders(executor: BybitExecutor):
     """
     Cykl monitorujący zlecenia. Działa jako skrypt naprawczy dla starych zleceň
@@ -341,6 +345,7 @@ def update_filled_orders(executor: BybitExecutor):
         logger.info(f"{log_prefix} Sprawdzam status zlecenia...")
 
         try:
+            # --- KRYTYCZNA ZMIANA: Szukamy po orderLinkId ---
             order_status_data = executor.get_open_order_by_id(order_link_id=order_link_id)
             
             if not order_status_data:
@@ -390,7 +395,6 @@ def update_filled_orders(executor: BybitExecutor):
 
         except Exception as e:
             logger.error(f"{log_prefix} Błąd podczas aktualizacji zlecenia: {e}", exc_info=True)
-
 
 
 def repair_old_orders():

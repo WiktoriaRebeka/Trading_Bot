@@ -158,10 +158,10 @@ class BybitExecutor:
             if e.ret_code == 110021:
                  logger.info(f"[{symbol}] Brak otwartych zleceń do anulowania (API zwróciło 'Order does not exist').")
                  return True
-            logger.critical(f"[{symbol}] Błąd API podczas czyszczenia otwartych zleceń: {e}", exc_info=False)
+            logger.critical(f"[{symbol}] Błąd API podczas czyszczenia otwartych zleceň: {e}", exc_info=False)
             return False
         except Exception as e:
-            logger.critical(f"[{symbol}] Nieoczekiwany błąd podczas czyszczenia otwartych zleceń: {e}", exc_info=True)
+            logger.critical(f"[{symbol}] Nieoczekiwany błąd podczas czyszczenia otwartych zleceň: {e}", exc_info=True)
             return False
 
     def get_order_history_by_id(self, order_id: str = None, order_link_id: str = None) -> Optional[Dict[str, Any]]:
