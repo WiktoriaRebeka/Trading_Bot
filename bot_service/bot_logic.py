@@ -163,12 +163,12 @@ def _transform_liquidation_record(liq_record: Dict[str, Any]) -> Dict[str, Any]:
         "updatedTime": liq_record.get("updatedTime"), "exitType": "Liquidation"
     }
 
-# ZNAJDŹ TĘ FUNKCJĘ I ZASTĄP JĄ PONIŻSZĄ WERSJĄ
 def log_closed_positions_pnl(executor: BybitExecutor) -> int:
     """
     Pobiera zamknięte pozycje, znajduje dla nich dopasowanie w `active_orders`
     i loguje wzbogacony rekord do BigQuery.
-    WERSJA FINALNA: Używa nowej, niezawodnej metody dopasowania po tpOrderId/slOrderId.
+    WERSJA FINALNA: Używa nowej, niezawodnej metody dopasowania po tpOrderId/slOrderId
+    oraz obsługuje likwidacje i inne przypadki brzegowe.
     """
     logger.info("[PNL_LOGGER] Rozpoczynam cykl logowania zamkniętych pozycji.")
     
@@ -205,22 +205,37 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
     for pnl_record in pnl_records_sorted:
         order_id_from_pnl = pnl_record.get("orderId")
         symbol = pnl_record.get("symbol")
+        exit_type = pnl_record.get("exitType")
         
         try:
             if not order_id_from_pnl or not symbol:
                 continue
 
-            logger.info(f"[PNL_LOGGER] Przetwarzanie rekordu dla {symbol} [OrderID z PnL: {order_id_from_pnl}]")
+            logger.info(f"[PNL_LOGGER] Przetwarzanie rekordu dla {symbol} [OrderID z PnL: {order_id_from_pnl}, Typ: {exit_type}]")
             
-            active_order_data = state_manager.get_active_order_by_tpsl_order_id(order_id_from_pnl)
+            active_order_data = None
 
+            # --- ZMODYFIKOWANA LOGIKA DOPASOWANIA ---
+            if exit_type in ["TakeProfit", "StopLoss"]:
+                active_order_data = state_manager.get_active_order_by_tpsl_order_id(order_id_from_pnl)
+            
+            # Fallback dla likwidacji lub jeśli powyższe zawiedzie
             if not active_order_data:
-                logger.warning(f"[{symbol}] Nie znaleziono dopasowania po tp/sl OrderId. Próbuję starej metody (fallback)...")
-                order_history = executor.get_order_history_by_id(order_id=order_id_from_pnl)
-                
-                if order_history and order_history.get("orderLinkId"):
-                    order_link_id = order_history.get("orderLinkId")
-                    active_order_data = state_manager.get_active_order_by_id(order_link_id)
+                if exit_type in ["TakeProfit", "StopLoss"]:
+                    logger.warning(f"[{symbol}] Nie znaleziono dopasowania po tp/sl OrderId. Próbuję metody fallback...")
+                else:
+                    logger.info(f"[{symbol}] Typ zamknięcia to '{exit_type}'. Próbuję dopasowania po orderLinkId...")
+
+                # Używamy orderLinkId z rekordu PnL, jeśli jest dostępny
+                order_link_id_from_pnl = pnl_record.get("orderLinkId")
+                if order_link_id_from_pnl:
+                    active_order_data = state_manager.get_active_order_by_id(order_link_id_from_pnl)
+                else:
+                    # Ostateczny fallback, jeśli giełda nie zwróci orderLinkId w PnL
+                    order_history = executor.get_order_history_by_id(order_id=order_id_from_pnl)
+                    if order_history and order_history.get("orderLinkId"):
+                        order_link_id = order_history.get("orderLinkId")
+                        active_order_data = state_manager.get_active_order_by_id(order_link_id)
 
             if not active_order_data:
                 updated_time_ms = int(pnl_record.get("updatedTime", 0))

@@ -41,13 +41,10 @@ def acquire_lock_for_order(order_id: str) -> bool:
         logger.error(f"[PNL_LOCK] Błąd podczas próby założenia blokady dla order_id {order_id}: {e}", exc_info=True)
         return False
 
+# Lokalizacja: bot_service/pnl_logger_real.py
+# ZASTĄP FUNKCJĘ 'log_real_trade_result' PONIŻSZĄ WERSJĄ
+
 def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Dict[str, Any]) -> bool:
-    """
-    Przetwarza, zapisuje do BigQuery i sprząta dane o zamkniętej transakcji.
-    WERSJA POPRAWIONA:
-    1. Zapisuje do BigQuery ZARÓWNO transakcje dopasowane, jak i niedopasowane.
-    2. Używa POPRAWNEGO identyfikatora (orderLinkId) do usuwania dokumentu z 'active_orders'.
-    """
     order_id = pnl_data.get("orderId", f"unknown_{int(datetime.now().timestamp())}")
     symbol = pnl_data.get("symbol", "unknown")
     log_prefix = f"[PNL_SAVE][{symbol}|{order_id}]"
@@ -59,9 +56,6 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Dict[str,
     if not acquire_lock_for_order(order_id):
         return False
 
-    # --- POPRAWKA 1: Logika zapisu transakcji UNMATCHED ---
-    # Sprawdzamy, czy transakcja została dopasowana, ale nie przerywamy już wykonania.
-    # Proces będzie kontynuowany, aby zapisać rekord do BigQuery, nawet jeśli jest niedopasowany.
     is_matched = bool(active_order_data and 'alert_id' in active_order_data)
     alert_id = active_order_data.get('alert_id', 'UNMATCHED_OR_MANUAL')
     
@@ -71,45 +65,67 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Dict[str,
         logger.info(f"{log_prefix} Rozpoczynam transakcyjny zapis (alert_id: {alert_id}).")
 
     try:
-        # Transformacja danych - użycie .get() z wartościami domyślnymi sprawia,
-        # że kod działa poprawnie zarówno dla transakcji dopasowanych, jak i niedopasowanych.
         qty = Decimal(pnl_data.get("qty", "0.0"))
         avg_entry_price = Decimal(pnl_data.get("avgEntryPrice", "0.0"))
         avg_exit_price = Decimal(pnl_data.get("avgExitPrice", "0.0"))
         net_pnl = Decimal(pnl_data.get("closedPnl") or "0.0")
         commission = Decimal(pnl_data.get("cumCommission") or "0.0")
         
-        planned_sl_price = active_order_data.get("planned_sl_price")
-        planned_sl_price_dec = Decimal(str(planned_sl_price)) if planned_sl_price is not None else Decimal("0.0")
+        entry_value_usdt = qty * avg_entry_price
+        exit_value_usdt = qty * avg_exit_price
+        gross_pnl_usdt = net_pnl + commission
 
         planned_risk_usdt = None
         realized_rrr = None
+        exit_price_result = None
 
-        if is_matched and planned_sl_price_dec > 0 and avg_entry_price > 0:
-            risk_per_unit = abs(avg_entry_price - planned_sl_price_dec)
-            planned_risk_usdt_dec = risk_per_unit * qty
+        if is_matched:
+            planned_sl_price = active_order_data.get("planned_sl_price")
+            planned_sl_price_dec = Decimal(str(planned_sl_price)) if planned_sl_price is not None else Decimal("0.0")
+
+            if planned_sl_price_dec > 0 and avg_entry_price > 0:
+                risk_per_unit = abs(avg_entry_price - planned_sl_price_dec)
+                planned_risk_usdt_dec = risk_per_unit * qty
+                
+                if planned_risk_usdt_dec > 0:
+                    realized_rrr_dec = (net_pnl / planned_risk_usdt_dec)
+                    planned_risk_usdt = float(planned_risk_usdt_dec)
+                    realized_rrr = float(realized_rrr_dec)
             
-            if planned_risk_usdt_dec > 0:
-                realized_rrr_dec = (net_pnl / planned_risk_usdt_dec)
-                planned_risk_usdt = float(planned_risk_usdt_dec)
-                realized_rrr = float(realized_rrr_dec)
+            exit_type = pnl_data.get("exitType")
+            if exit_type == "TakeProfit":
+                exit_price_result = active_order_data.get("planned_tp_price")
+            elif exit_type == "StopLoss":
+                exit_price_result = active_order_data.get("planned_sl_price")
 
+        # --- FINALNA, ZGODNA ZE SCHEMATEM STRUKTURA ---
         transformed_data = {
-            "alert_id": alert_id, "order_id": order_id, "symbol": symbol,
+            "alert_id": alert_id,
+            "order_id": order_id,
+            "symbol": symbol,
             "direction": active_order_data.get("direction", pnl_data.get("side")),
-            "qty": float(qty), "leverage": int(float(pnl_data.get("leverage", 0))) or None,
-            "avg_entry_price": float(avg_entry_price), "avg_exit_price": float(avg_exit_price),
-            "net_pnl_usdt": float(net_pnl), "commission_usdt": float(commission),
+            "qty": float(qty),
+            "leverage": int(float(pnl_data.get("leverage", 0))) or None,
+            "avg_entry_price": float(avg_entry_price),
+            "avg_exit_price": float(avg_exit_price),
+            "entry_value_usdt": float(entry_value_usdt) if entry_value_usdt > 0 else None,
+            "exit_value_usdt": float(exit_value_usdt) if exit_value_usdt > 0 else None,
+            "gross_pnl_usdt": float(gross_pnl_usdt) if gross_pnl_usdt != 0 else None,
+            "commission_usdt": float(commission),
+            "net_pnl_usdt": float(net_pnl),
             "exit_type": pnl_data.get("exitType"),
             "timestamp_entry": datetime.fromtimestamp(int(pnl_data.get("createdTime")) / 1000, tz=timezone.utc).isoformat(),
             "timestamp_close": datetime.fromtimestamp(int(pnl_data.get("updatedTime")) / 1000, tz=timezone.utc).isoformat(),
-            "planned_risk_usdt": planned_risk_usdt, "realized_rrr": realized_rrr,
-            "entry_price_alert": active_order_data.get("alert_entry_price"),
-            "sl_price_alert": active_order_data.get("alert_sl_price"),
-            "tp_price_alert": active_order_data.get("alert_tp_price"),
-            "entry_price_planned": active_order_data.get("planned_entry_price"),
-            "sl_price_planned": active_order_data.get("planned_sl_price"),
-            "tp_price_planned": active_order_data.get("planned_tp_price"),
+            "planned_risk_usdt": planned_risk_usdt,
+            "realized_rrr": realized_rrr,
+            "alert_entry_price": active_order_data.get("alert_entry_price"),
+            "alert_sl_price": active_order_data.get("alert_sl_price"),
+            "alert_tp_price": active_order_data.get("alert_tp_price"),
+            "planned_entry_price": active_order_data.get("planned_entry_price"),
+            "planned_sl_price": active_order_data.get("planned_sl_price"),
+            "planned_tp_price": active_order_data.get("planned_tp_price"),
+            "exit_price_result": exit_price_result,
+            "tp_price_chart": active_order_data.get("alert_tp_price"),
         }
     except Exception as e:
         logger.error(f"{log_prefix} Błąd podczas transformacji danych PnL: {e}", exc_info=True)
@@ -122,18 +138,12 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Dict[str,
         if not errors:
             logger.info(f"{log_prefix} SUKCES! Pomyślnie zapisano wynik transakcji do BigQuery.")
             
-            # --- POPRAWKA 2: Logika sprzątania ---
-            # Usuwamy dokument z 'active_orders' tylko i wyłącznie, jeśli transakcja była dopasowana.
             if is_matched:
-                # ID dokumentu w Firestore to nasz 'orderLinkId'. Funkcje state_manager dodają go
-                # do słownika pod kluczem 'id'. Używamy go do usunięcia właściwego dokumentu.
                 order_link_id_to_delete = active_order_data.get('id')
-                
                 if order_link_id_to_delete:
                     logger.info(f"{log_prefix} Sprzątanie: Usuwanie dokumentu '{order_link_id_to_delete}' z kolekcji active_orders.")
                     state_manager.delete_active_order_by_id(order_link_id_to_delete)
                 else:
-                    # Ten log jest zabezpieczeniem na wypadek błędu w logice state_managera.
                     logger.error(f"{log_prefix} BŁĄD KRYTYCZNY: Nie można usunąć rekordu, ponieważ 'id' (orderLinkId) nie zostało znalezione w dopasowanych danych.")
             
             return True
