@@ -1,4 +1,5 @@
 # Lokalizacja: /cloudbuild-collector.yaml
+# WERSJA POPRAWIONA
 
 steps:
 # Krok 1: Zbuduj obraz Docker
@@ -27,13 +28,7 @@ steps:
     - 'managed'
     - '--service-account'
     - 'trading-bot-463318@appspot.gserviceaccount.com'
-    - '--vpc-connector'
-    - 'app-connector-warsaw'
-    - '--vpc-egress'
-    - 'all'
-    # === KLUCZOWA DODANA SEKCJA ===
-    # Dodajemy to również tutaj, ponieważ ta usługa używa shared_lib
-    # i próbuje załadować konfigurację przy starcie.
+    - '--min-instances=0' # Upewniamy się, że skaluje się do zera
     - '--update-secrets'
     - 'BYBIT_API_KEY=bybit-api-key:latest,BYBIT_API_SECRET=bybit-api-secret:latest'
 
