@@ -300,8 +300,8 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
         logger.warning(f"Odrzucono alert [{alert.symbol}]: Nielogiczna pozycja. Kierunek: {alert.direction}, Wejście: {alert.entry}, SL: {alert.sl}.")
         return False
     risk_perc = _calculate_risk_percentage(alert.entry, alert.sl)
-    if risk_perc is None or risk_perc < 0.25:
-        logger.warning(f"Odrzucono alert [{alert.symbol}]: Ryzyko poniżej minimum 0.25%. Obliczone ryzyko: {risk_perc}% (Wejście: {alert.entry}, SL: {alert.sl}).")
+    if risk_perc is None or risk_perc < 0.43:
+        logger.warning(f"Odrzucono alert [{alert.symbol}]: Ryzyko poniżej minimum 0.43%. Obliczone ryzyko: {risk_perc}% (Wejście: {alert.entry}, SL: {alert.sl}).")
         return False
     logger.info(f"Alert [{alert.symbol}] przeszedł walidację. Kierunek: {alert.direction}, Ryzyko: {risk_perc}%.")
     return True
