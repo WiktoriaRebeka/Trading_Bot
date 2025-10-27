@@ -78,6 +78,16 @@ class BybitExecutor:
         if not symbol:
             logger.error("Brak 'symbol' w parametrach zlecenia.")
             return None
+            # --- NOWE, TWARDE ZABEZPIECZENIE ---
+        # Sprawdzamy, czy zlecenie jest typu LIMIT i czy ZAWSZE zawiera SL i TP.
+        if params.get("orderType") == "Limit":
+            if not params.get("stopLoss") or not params.get("takeProfit"):
+                logger.critical(
+                    f"[{symbol}] KRYTYCZNA PRÓBA WYSŁANIA ZLECENIA LIMIT BEZ SL/TP! Zlecenie zablokowane. Parametry: {params}"
+                )
+                # Zwracamy None, aby zablokować wysłanie zlecenia
+                return None
+        # --- KONIEC ZABEZPIECZENIA ---
         api_symbol = symbol.replace('.P', '')
         payload = {"category": "linear", "symbol": api_symbol, "side": params['side'], "orderType": params['orderType'], "qty": str(params['qty'])}
         optional_params = ["price", "takeProfit", "stopLoss", "tpTriggerBy", "slTriggerBy", "orderLinkId", "timeInForce"]
