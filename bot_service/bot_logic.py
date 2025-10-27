@@ -38,57 +38,71 @@ def process_new_alerts(executor: BybitExecutor):
     else:
         logger.info("Brak nowych alertów do przetworzenia.")
 
+# Lokalizacja: bot_service/bot_logic.py
+# ZASTĄP FUNKCJĘ '_process_alerts_transactionally' PONIŻSZĄ WERSJĄ
+
 def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: BybitExecutor):
     """
-    Przetwarza listę alertów, stosując nową, transakcyjną logikę.
-    Gwarantuje, że dla danego symbolu przetwarzany jest tylko najnowszy alert w cyklu.
+    Przetwarza listę alertów. Gwarantuje, że dla danego symbolu przetwarzany jest
+    tylko najnowszy alert w cyklu, a wszystkie poprzednie zlecenia są anulowane.
     """
     instrument_rules = get_instrument_rules()
     if not instrument_rules:
         logger.error("Nie udało się wczytać zasad instrumentów z Firestore. Przerywam przetwarzanie alertów.")
         return
 
+    # Sortujemy alerty od najstarszego do najnowszego
     alerts.sort(key=lambda a: a.get('received_at', datetime.min.replace(tzinfo=timezone.utc)))
     
-    processed_symbols_in_cycle = set()
-
+    # Grupujemy alerty po symbolu, aby łatwo znaleźć najnowszy
+    latest_alerts_per_symbol: Dict[str, Dict[str, Any]] = {}
     for alert_dict in alerts:
-        alert_id = alert_dict.get('id', 'unknown_id')
         try:
+            # Szybka walidacja Pydantic, aby uzyskać symbol
+            symbol = alert_dict.get('symbol')
+            if symbol:
+                latest_alerts_per_symbol[symbol] = alert_dict
+        except Exception:
+            alert_id = alert_dict.get('id', 'unknown_id')
+            logger.warning(f"Pominięto alert {alert_id} z powodu braku symbolu lub błędu parsowania wstępnego.")
+
+    # --- NOWA, POPRAWIONA LOGIKA ---
+    # Przechodzimy po unikalnych symbolach, dla których otrzymaliśmy alerty w tym cyklu
+    for symbol, alert_dict in latest_alerts_per_symbol.items():
+        alert_id = alert_dict.get('id', 'unknown_id')
+        
+        # KROK 1: ZAWSZE ANULUJ STARE ZLECENIA
+        # Robimy to na samym początku dla każdego symbolu, który otrzymał nowy alert.
+        logger.info(f"[{symbol}] Otrzymano nowy alert. Anuluję wszystkie poprzednie, oczekujące zlecenia limit dla tego symbolu.")
+        if not executor.cancel_all_open_orders_for_symbol(symbol):
+             logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się anulować poprzednich zleceň. Pomijam ten symbol w cyklu, aby uniknąć ryzyka.")
+             continue # Przejdź do następnego symbolu
+
+        try:
+            # KROK 2: PRZETWÓRZ NAJNOWSZY ALERT
+            logger.info(f"--- Rozpoczynam przetwarzanie najnowszego alertu [{symbol}] ID: {alert_id} ---")
             alert_model = AlertData.model_validate(alert_dict)
-            symbol = alert_model.symbol
-            logger.info(f"--- Rozpoczynam przetwarzanie alertu [{symbol}] ID: {alert_id} ---")
 
-            if not _correct_and_validate_alert(alert_model):
-                logger.warning(f"[{symbol}] ODRZUCONO (Walidacja Logiczna).")
-                processed_symbols_in_cycle.add(symbol)
-                continue
-
+            # Sprawdzamy, czy nie ma już otwartej pozycji
             open_position_side = executor.get_open_position_side(symbol)
             if open_position_side and open_position_side != "ERROR":
-                logger.warning(f"[{symbol}] ODRZUCONO (Strażnik Pozycji): Wykryto już otwartą pozycję ({open_position_side}).")
-                processed_symbols_in_cycle.add(symbol)
+                logger.warning(f"[{symbol}] ODRZUCONO: Wykryto już otwartą pozycję ({open_position_side}).")
                 continue
-            
-            logger.info(f"[{symbol}] Brak otwartej pozycji. Anuluję wszystkie oczekujące zlecenia limit dla tego symbolu.")
-            if not executor.cancel_all_open_orders_for_symbol(symbol):
-                 logger.error(f"[{symbol}] Nie udało się anulować poprzednich zleceń. Przerywam, aby uniknąć ryzyka.")
-                 processed_symbols_in_cycle.add(symbol)
-                 continue
 
+            # Walidacja logiki alertu
+            if not _correct_and_validate_alert(alert_model):
+                logger.warning(f"[{symbol}] ODRZUCONO: Nowy alert nie przeszedł walidacji logicznej.")
+                continue
+
+            # Reszta logiki pozostaje taka sama...
             rule = instrument_rules.get(symbol)
             if not rule or "tickSize" not in rule or "qtyStep" not in rule:
                 logger.warning(f"[{symbol}] ODRZUCONO (Brak Zasad): Nie znaleziono reguł dla instrumentu.")
-                processed_symbols_in_cycle.add(symbol)
                 continue
             tick_size, qty_step = rule["tickSize"], rule["qtyStep"]
 
             tp_level_key = os.getenv("TAKE_PROFIT_LEVEL", "tp_3_0")
-            if not hasattr(alert_model, tp_level_key):
-                logger.warning(f"[{symbol}] ODRZUCONO: Alert nie zawiera zdefiniowanego poziomu TP: {tp_level_key}. Używam domyślnego tp_3_0.")
-                tp_level_key = "tp_3_0"
-            
-            target_tp_price = getattr(alert_model, tp_level_key)
+            target_tp_price = getattr(alert_model, tp_level_key, getattr(alert_model, "tp_3_0"))
             alert_tp_price_to_save = getattr(alert_model, "tp_3_0")
 
             if alert_model.direction == 'LONG':
@@ -108,7 +122,6 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
 
             if not final_qty or final_qty <= 0:
                 logger.warning(f"[{symbol}] ODRZUCONO (Qty=0): Obliczona wielkość pozycji wynosi zero lub jest ujemna.")
-                processed_symbols_in_cycle.add(symbol)
                 continue
 
             custom_order_link_id = f"bot_{alert_id.replace('-', '')[:20]}"
@@ -128,31 +141,24 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
                 logger.info(f"[{symbol}] SUKCES! Zlecenie zintegrowane pomyślnie złożone. Order ID: {order_id}")
                 
                 order_data_to_save = {
-                    "symbol": symbol,
-                    "limitOrderId": order_id,
-                    "orderLinkId": custom_order_link_id,
-                    "alert_id": alert_id,
-                    "direction": alert_model.direction,
-                    "planned_entry_price": final_entry,
-                    "planned_sl_price": final_sl, 
-                    "planned_tp_price": final_tp,
-                    "planned_qty": final_qty,
-                    "alert_entry_price": alert_model.entry,
-                    "alert_sl_price": alert_model.sl,
+                    "symbol": symbol, "limitOrderId": order_id, "orderLinkId": custom_order_link_id,
+                    "alert_id": alert_id, "direction": alert_model.direction,
+                    "planned_entry_price": final_entry, "planned_sl_price": final_sl, 
+                    "planned_tp_price": final_tp, "planned_qty": final_qty,
+                    "alert_entry_price": alert_model.entry, "alert_sl_price": alert_model.sl,
                     "alert_tp_price": alert_tp_price_to_save
                 }
                 state_manager.save_active_order(custom_order_link_id, order_data_to_save)
             else:
                 logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się złożyć zlecenia (brak orderId w odpowiedzi).")
 
-            processed_symbols_in_cycle.add(symbol)
-
+        except ValidationError as e:
+            logger.error(f"Błąd walidacji danych dla alertu ID: {alert_id}. Dane: {alert_dict}. Błąd Pydantic: {e}")
+            continue
         except BybitAPIError as e:
             logger.error(f"Błąd API Bybit podczas przetwarzania alertu {alert_id}: {e}", exc_info=False)
-            processed_symbols_in_cycle.add(alert_dict.get("symbol", "UNKNOWN"))
         except Exception as e:
-            logger.error(f"Krytyczny błąd podczas transakcyjnego przetwarzania alertu {alert_id}: {e}", exc_info=True)
-            processed_symbols_in_cycle.add(alert_dict.get("symbol", "UNKNOWN"))
+            logger.error(f"Krytyczny błąd podczas przetwarzania alertu {alert_id}: {e}", exc_info=True)
 
 def _transform_liquidation_record(liq_record: Dict[str, Any]) -> Dict[str, Any]:
     return {
@@ -163,8 +169,6 @@ def _transform_liquidation_record(liq_record: Dict[str, Any]) -> Dict[str, Any]:
         "updatedTime": liq_record.get("updatedTime"), "exitType": "Liquidation"
     }
 
-# Lokalizacja: bot_service/bot_logic.py
-# ZASTĄP FUNKCJĘ 'log_closed_positions_pnl' PONIŻSZĄ WERSJĄ
 
 def log_closed_positions_pnl(executor: BybitExecutor) -> int:
     logger.info("[PNL_LOGGER] Rozpoczynam cykl logowania zamkniętych pozycji.")
