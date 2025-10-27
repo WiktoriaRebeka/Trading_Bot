@@ -7,4 +7,4 @@ node_modules/
 # System
 .DS_Store
 .env
-
+*.json
