@@ -38,6 +38,8 @@ def process_new_alerts(executor: BybitExecutor):
     else:
         logger.info("Brak nowych alertów do przetworzenia.")
 
+# Lokalizacja: bot_service/bot_logic.py
+# ZASTĄP FUNKCJĘ '_process_alerts_transactionally' PONIŻSZĄ WERSJĄ
 
 def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: BybitExecutor):
     """
@@ -158,37 +160,17 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
         except Exception as e:
             logger.error(f"Krytyczny błąd podczas przetwarzania alertu {alert_id}: {e}", exc_info=True)
 
-
 def _transform_liquidation_record(liq_record: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Transformuje rekord likwidacji z API Bybit do formatu zbliżonego
-    do rekordu PnL, aby można go było przetworzyć w tej samej logice.
-    """
     return {
-        "symbol": liq_record.get("symbol"),
-        "orderId": f"liq_{liq_record.get('symbol')}_{liq_record.get('updatedTime')}",
-        "side": "Buy" if liq_record.get("side") == "Sell" else "Sell", # Strona zamykająca pozycję
-        "qty": liq_record.get("size"),
-        "avgEntryPrice": None, # Tego nie mamy w danych o likwidacji
-        "avgExitPrice": liq_record.get("deliveryPrice"),
-        "closedPnl": liq_record.get("realisedPnl"),
-        "cumCommission": "0", # Prowizja jest już wliczona w realisedPnl
-        "leverage": None,
-        "createdTime": liq_record.get("updatedTime"), # Używamy czasu likwidacji jako obu
-        "updatedTime": liq_record.get("updatedTime"),
-        "exitType": "Liquidation"
+        "symbol": liq_record.get("symbol"), "orderId": f"liq_{liq_record.get('symbol')}_{liq_record.get('updatedTime')}",
+        "side": "Buy" if liq_record.get("side") == "Sell" else "Sell", "qty": liq_record.get("size"),
+        "avgEntryPrice": None, "avgExitPrice": liq_record.get("deliveryPrice"), "closedPnl": liq_record.get("realisedPnl"),
+        "cumCommission": "0", "leverage": None, "createdTime": liq_record.get("updatedTime"),
+        "updatedTime": liq_record.get("updatedTime"), "exitType": "Liquidation"
     }
 
 
-# Lokalizacja: bot_service/bot_logic.py
-
 def log_closed_positions_pnl(executor: BybitExecutor) -> int:
-    """
-    Pobiera zamknięte pozycje, znajduje dla nich dopasowanie w `active_orders`
-    i loguje wzbogacony rekord do BigQuery.
-    WERSJA FINALNA: Używa nowej, niezawodnej metody dopasowania po tpOrderId/slOrderId
-    oraz obsługuje likwidacje i inne przypadki brzegowe.
-    """
     logger.info("[PNL_LOGGER] Rozpoczynam cykl logowania zamkniętych pozycji.")
     
     last_check_ts_dt = load_last_processed_timestamp("pnl_logger_last_fetch_state")
@@ -231,30 +213,41 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
 
             logger.info(f"[PNL_LOGGER] Przetwarzanie rekordu dla {symbol} [OrderID z PnL: {order_id_from_pnl}, Typ: {exit_type}]")
             
-            # --- NOWA, UPROSZCZONA LOGIKA DOPASOWYWANIA ---
+            active_order_data = None
+
+            # Główna metoda dopasowania
+            if exit_type in ["TakeProfit", "StopLoss"]:
+                active_order_data = state_manager.get_active_order_by_tpsl_order_id(order_id_from_pnl)
             
-            # KROK 1: Zawsze próbuj znaleźć dopasowanie po orderId z rekordu PnL w naszych polach tpOrderId/slOrderId.
-            # To jest najbardziej niezawodna metoda.
-            active_order_data = state_manager.get_active_order_by_tpsl_order_id(order_id_from_pnl)
-            
-            # KROK 2: Jeśli to zawiedzie, spróbuj metody fallback opartej na orderLinkId.
-            # Ta metoda jest mniej pewna, ale może pomóc w przypadkach brzegowych.
+            # --- NOWA, ULEPSZONA LOGIKA FALLBACK ---
             if not active_order_data:
-                logger.warning(f"[{symbol}] Nie znaleziono dopasowania po tp/sl OrderId. Próbuję metody fallback po orderLinkId...")
+                logger.warning(f"[{symbol}] Nie znaleziono dopasowania po tp/sl OrderId. Uruchamiam zaawansowany fallback...")
                 
-                order_link_id_from_pnl = pnl_record.get("orderLinkId")
-                if order_link_id_from_pnl and order_link_id_from_pnl.startswith("bot_"):
-                    active_order_data = state_manager.get_active_order_by_id(order_link_id_from_pnl)
-                else:
-                    # Ta część jest mało prawdopodobna, ale zostawiamy jako ostateczność
-                    order_history = executor.get_order_history_by_id(order_id=order_id_from_pnl)
-                    if order_history and order_history.get("orderLinkId", "").startswith("bot_"):
-                        order_link_id = order_history.get("orderLinkId")
-                        active_order_data = state_manager.get_active_order_by_id(order_link_id)
+                # Krok 1: Znajdź orderLinkId z historii zlecenia zamykającego
+                order_history = executor.get_order_history_by_id(order_id=order_id_from_pnl)
+                if order_history and order_history.get("orderLinkId"):
+                    order_link_id = order_history.get("orderLinkId")
+                    logger.info(f"[{symbol}] Odzyskano orderLinkId: {order_link_id} ze zlecenia zamykającego.")
+                    
+                    # Krok 2: Znajdź nasz "złoty rekord" po orderLinkId
+                    potential_match = state_manager.get_active_order_by_id(order_link_id)
+                    
+                    # Krok 3: Sprawdź, czy to na pewno ten - porównaj ceny TP/SL
+                    if potential_match:
+                        logger.info(f"[{symbol}] Znaleziono potencjalne dopasowanie. Weryfikuję ceny TP/SL...")
+                        trigger_price = float(order_history.get("triggerPrice", 0))
+                        
+                        is_tp_match = math.isclose(trigger_price, potential_match.get('planned_tp_price', -1))
+                        is_sl_match = math.isclose(trigger_price, potential_match.get('planned_sl_price', -1))
 
-            # --- KONIEC NOWEJ LOGIKI ---
+                        if is_tp_match or is_sl_match:
+                            logger.info(f"[{symbol}] Weryfikacja pomyślna. To jest prawidłowe dopasowanie.")
+                            active_order_data = potential_match
+                        else:
+                            logger.warning(f"[{symbol}] Dopasowanie po orderLinkId nie powiodło się - ceny TP/SL się nie zgadzają.")
 
             if not active_order_data:
+                # Logika odroczenia i UNMATCHED
                 updated_time_ms = int(pnl_record.get("updatedTime", 0))
                 record_ts_dt = datetime.fromtimestamp(updated_time_ms / 1000, tz=timezone.utc)
                 
@@ -263,7 +256,7 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
                     continue
                 else:
                     logger.warning(f"[PNL_LOGGER] OSTATECZNIE nie znaleziono dopasowania dla orderId '{order_id_from_pnl}'.")
-                    active_order_data = {} # Przekaż pusty słownik, aby zalogować jako UNMATCHED
+                    active_order_data = {}
             else:
                 logger.info(f"[PNL_LOGGER] SUKCES! Znaleziono dopasowanie dla transakcji.")
 
@@ -318,149 +311,91 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
     return True
 
 
+
 def update_filled_orders(executor: BybitExecutor):
     """
-    Cykl monitorujący zlecenia.
-    1. Dla statusu 'PLACED' (i starych bez statusu): Sprawdza, czy zlecenie zostało zrealizowane i wzbogaca o ID TP/SL.
-    2. Dla statusu 'OPEN': Sprawdza, czy można aktywować zaawansowany Trailing Stop.
+    Cykl monitorujący zlecenia. Działa jako skrypt naprawczy dla starych zleceň
+    bez statusu oraz jako normalny proces dla nowych zleceň ze statusem 'PLACED'.
     """
     logger.info("[ORDER_UPDATER] Rozpoczynam cykl aktualizacji aktywnych zleceň.")
     
-    # --- CZĘŚĆ 1: Obsługa zleceń oczekujących na wejście ---
     placed_orders_docs = list(state_manager.get_orders_by_status('PLACED'))
+    logger.info(f"[ORDER_UPDATER] Znaleziono {len(placed_orders_docs)} zleceń ze statusem 'PLACED'.")
+
     legacy_orders_docs = list(state_manager.get_orders_without_status())
+    logger.info(f"[ORDER_UPDATER] Znaleziono {len(legacy_orders_docs)} starych zleceń bez statusu do naprawy.")
+
+    all_orders_to_process = {doc.id: doc for doc in placed_orders_docs}
+    all_orders_to_process.update({doc.id: doc for doc in legacy_orders_docs})
     
-    all_placed_orders = {doc.id: doc for doc in placed_orders_docs}
-    all_placed_orders.update({doc.id: doc for doc in legacy_orders_docs})
-    
-    if all_placed_orders:
-        logger.info(f"[ORDER_UPDATER] Przetwarzam {len(all_placed_orders)} zleceń oczekujących na wejście.")
-        for order_doc in all_placed_orders.values():
-            order_data = order_doc.to_dict()
-            order_link_id = order_doc.id
-            symbol = order_data.get('symbol')
+    if not all_orders_to_process:
+        logger.info("[ORDER_UPDATER] Brak zleceň do przetworzenia w tym cyklu.")
+        return
 
-            if not symbol or not order_link_id:
-                continue
+    logger.info(f"[ORDER_UPDATER] Łącznie do przetworzenia: {len(all_orders_to_process)} zleceń.")
 
-            log_prefix = f"[{symbol}|{order_link_id}]"
-            logger.info(f"{log_prefix} Sprawdzam status zlecenia (status: PLACED/legacy)...")
-
-            try:
-                order_status_data = executor.get_open_order_by_id(order_link_id=order_link_id)
-                
-                if not order_status_data:
-                    logger.info(f"{log_prefix} Zlecenie nie jest już aktywne. Sprawdzam historię...")
-                    order_status_data = executor.get_order_history_by_id(order_link_id=order_link_id)
-
-                if not order_status_data:
-                    logger.warning(f"{log_prefix} Nie można odnaleźć zlecenia. Oznaczam jako 'UNKNOWN'.")
-                    state_manager.update_active_order(order_link_id, {'status': 'UNKNOWN'})
-                    continue
-
-                if order_status_data.get('orderStatus') == 'Filled':
-                    logger.info(f"{log_prefix} Zlecenie otwierające zrealizowane! Szukam powiązanych zleceň TP/SL.")
-                    
-                    active_stop_orders = executor.get_active_tp_sl_orders(symbol)
-                    
-                    tp_order_id = None
-                    sl_order_id = None
-
-                    for stop_order in active_stop_orders:
-                        trigger_price = float(stop_order.get('triggerPrice', 0))
-                        if math.isclose(trigger_price, order_data.get('planned_tp_price')):
-                            tp_order_id = stop_order.get('orderId')
-                        elif math.isclose(trigger_price, order_data.get('planned_sl_price')):
-                            sl_order_id = stop_order.get('orderId')
-                    
-                    if tp_order_id and sl_order_id:
-                        updates = {
-                            'status': 'OPEN',
-                            'tpOrderId': tp_order_id,
-                            'slOrderId': sl_order_id,
-                            'position_opened_at': datetime.now(timezone.utc)
-                        }
-                        state_manager.update_active_order(order_link_id, updates)
-                        logger.info(f"{log_prefix} SUKCES! Zaktualizowano rekord o ID zleceň TP: {tp_order_id} i SL: {sl_order_id}.")
-                    else:
-                        logger.warning(f"{log_prefix} Zlecenie zrealizowane, ale nie znaleziono pasujących zleceň TP/SL na giełdzie. Spróbuję ponownie.")
-
-                elif order_status_data.get('orderStatus') in ['Cancelled', 'Rejected']:
-                     logger.warning(f"{log_prefix} Zlecenie otwierające zostało anulowane/odrzucone. Oznaczam jako anulowane.")
-                     state_manager.update_active_order(order_link_id, {'status': 'CANCELLED'})
-                
-                elif order_status_data.get('orderStatus') in ['New', 'PartiallyFilled']:
-                    logger.info(f"{log_prefix} Zlecenie wciąż aktywne (status: {order_status_data.get('orderStatus')}). Sprawdzę ponownie.")
-                    if 'status' not in order_data:
-                        state_manager.update_active_order(order_link_id, {'status': 'PLACED'})
-
-            except Exception as e:
-                logger.error(f"{log_prefix} Błąd podczas aktualizacji zlecenia PLACED: {e}", exc_info=True)
-
-    # --- CZĘŚĆ 2: Obsługa otwartych pozycji (Trailing Stop) ---
-    logger.info("[ORDER_UPDATER] Sprawdzam otwarte pozycje pod kątem aktywacji Trailing Stop.")
-    open_orders_docs = state_manager.get_orders_by_status('OPEN')
-
-    for order_doc in open_orders_docs:
+    for order_doc in all_orders_to_process.values():
         order_data = order_doc.to_dict()
         order_link_id = order_doc.id
         symbol = order_data.get('symbol')
 
-        if order_data.get('trailing_stop_activated'):
+        if not symbol or not order_link_id:
             continue
 
         log_prefix = f"[{symbol}|{order_link_id}]"
-        
+        logger.info(f"{log_prefix} Sprawdzam status zlecenia...")
+
         try:
-            mark_price = executor.get_mark_price(symbol)
-            if not mark_price:
-                logger.warning(f"{log_prefix} Nie udało się pobrać ceny rynkowej dla TSL. Pomijam.")
+            # --- KRYTYCZNA ZMIANA: Szukamy po orderLinkId ---
+            order_status_data = executor.get_open_order_by_id(order_link_id=order_link_id)
+            
+            if not order_status_data:
+                logger.info(f"{log_prefix} Zlecenie nie jest już aktywne. Sprawdzam historię...")
+                order_status_data = executor.get_order_history_by_id(order_link_id=order_link_id)
+
+            if not order_status_data:
+                logger.warning(f"{log_prefix} Nie można odnaleźć zlecenia ani w aktywnych, ani w historii. Oznaczam jako 'UNKNOWN'.")
+                state_manager.update_active_order(order_link_id, {'status': 'UNKNOWN'})
                 continue
 
-            direction = order_data.get('direction')
-            alert_id = order_data.get('alert_id')
-            
-            alert_data = state_manager.get_alert_data_by_id(alert_id)
-            if not alert_data:
-                logger.warning(f"{log_prefix} Nie udało się pobrać danych alertu {alert_id} dla TSL. Pomijam.")
-                continue
-            
-            alert_model = AlertData.model_validate(alert_data)
-            
-            tsl_activation_price = alert_model.tp_5_0
-            tsl_floor_price = alert_model.tp_4_0
-            
-            should_activate_tsl = False
-            if direction == 'LONG' and mark_price >= tsl_activation_price:
-                should_activate_tsl = True
-            elif direction == 'SHORT' and mark_price <= tsl_activation_price:
-                should_activate_tsl = True
+            if order_status_data.get('orderStatus') == 'Filled':
+                logger.info(f"{log_prefix} Zlecenie otwierające zrealizowane! Szukam powiązanych zleceň TP/SL.")
+                
+                active_stop_orders = executor.get_active_tp_sl_orders(symbol)
+                
+                tp_order_id = None
+                sl_order_id = None
 
-            if should_activate_tsl:
-                # <--- ZMIANA 1: Poprawiony log dla jasności ---
-                logger.info(f"{log_prefix} WARUNEK SPEŁNIONY! Cena rynkowa ({mark_price}) osiągnęła próg aktywacji TSL ({tsl_activation_price}).")
+                for stop_order in active_stop_orders:
+                    trigger_price = float(stop_order.get('triggerPrice', 0))
+                    if math.isclose(trigger_price, order_data.get('planned_tp_price')):
+                        tp_order_id = stop_order.get('orderId')
+                    elif math.isclose(trigger_price, order_data.get('planned_sl_price')):
+                        sl_order_id = stop_order.get('orderId')
                 
-                tp_order_id = order_data.get('tpOrderId')
-                
-                if executor.cancel_order(symbol, order_id=tp_order_id):
-                    logger.info(f"{log_prefix} Stare zlecenie Take Profit ({tp_order_id}) anulowane.")
-                    
-                    # Odległość TSL = 2R (różnica między tp_4_0 a tp_2_0)
-                    trailing_distance = abs(tsl_floor_price - alert_model.tp_2_0)
-                    
-                    if executor.set_trailing_stop(symbol, trailing_stop_price=str(trailing_distance), sl_price=str(tsl_floor_price)):
-                        logger.info(f"{log_prefix} SUKCES! Trailing Stop aktywowany. Podłoga zysku: {tsl_floor_price}, odległość śledzenia: {trailing_distance}.")
-                        state_manager.update_active_order(order_link_id, {'trailing_stop_activated': True, 'status': 'TRAILING'})
-                    else:
-                        logger.error(f"{log_prefix} Nie udało się ustawić Trailing Stop. Pozycja pozostaje bez TP!")
+                if tp_order_id and sl_order_id:
+                    updates = {
+                        'status': 'OPEN',
+                        'tpOrderId': tp_order_id,
+                        'slOrderId': sl_order_id,
+                        'position_opened_at': datetime.now(timezone.utc)
+                    }
+                    state_manager.update_active_order(order_link_id, updates)
+                    logger.info(f"{log_prefix} SUKCES! Zaktualizowano rekord o ID zleceň TP: {tp_order_id} i SL: {sl_order_id}.")
                 else:
-                    logger.error(f"{log_prefix} Nie udało się anulować starego zlecenia Take Profit.")
-            # <--- ZMIANA 2: Dodany blok 'else' dla lepszego debugowania ---
-            else:
-                logger.info(f"{log_prefix} Warunek TSL niespełniony. Cena rynkowa: {mark_price}, Próg aktywacji: {tsl_activation_price}, Kierunek: {direction}")
+                    logger.warning(f"{log_prefix} Zlecenie zrealizowane, ale nie znaleziono pasujących zleceň TP/SL na giełdzie. Spróbuję ponownie w następnym cyklu.")
+
+            elif order_status_data.get('orderStatus') in ['Cancelled', 'Rejected']:
+                 logger.warning(f"{log_prefix} Zlecenie otwierające zostało anulowane/odrzucone. Oznaczam jako anulowane.")
+                 state_manager.update_active_order(order_link_id, {'status': 'CANCELLED'})
+            
+            elif order_status_data.get('orderStatus') in ['New', 'PartiallyFilled']:
+                logger.info(f"{log_prefix} Zlecenie jest wciąż aktywne (status: {order_status_data.get('orderStatus')}). Dodaję status 'PLACED' i sprawdzę ponownie.")
+                if 'status' not in order_data:
+                    state_manager.update_active_order(order_link_id, {'status': 'PLACED'})
 
         except Exception as e:
-            logger.error(f"{log_prefix} Błąd podczas sprawdzania Trailing Stop: {e}", exc_info=True)
+            logger.error(f"{log_prefix} Błąd podczas aktualizacji zlecenia: {e}", exc_info=True)
 
 
 def repair_old_orders():
