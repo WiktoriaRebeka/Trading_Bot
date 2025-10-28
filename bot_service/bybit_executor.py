@@ -310,13 +310,14 @@ class BybitExecutor:
         payload = {
             "category": "linear",
             "symbol": api_symbol,
-            "tpslMode": "Partial", # Ważne, aby modyfikować tylko jedną stronę
+            "tpslMode": "Partial",
             "trailingStop": trailing_stop_price,
-            "stopLoss": sl_price # Zawsze musimy podawać też SL
+            "stopLoss": sl_price
         }
         logger.info(f"[{api_symbol}] Ustawianie Trailing Stop: {payload}")
         try:
-            self._send_request("POST", "/v5/position/set-tpsl", params=payload)
+            # --- POPRAWIONA NAZWA ENDPOINTU ---
+            self._send_request("POST", "/v5/position/trading-stop", params=payload)
             logger.info(f"[{api_symbol}] Trailing Stop pomyślnie ustawiony.")
             return True
         except Exception as e:
