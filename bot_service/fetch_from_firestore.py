@@ -2,6 +2,7 @@
 from google.cloud import firestore
 from datetime import datetime, timezone, timedelta
 import logging
+from typing import List, Dict, Any
 
 from shared_lib.firebase_client import get_db 
 from shared_lib.constants import (
@@ -15,6 +16,7 @@ logger = logging.getLogger(__name__)
 def load_last_processed_timestamp(doc_id: str) -> datetime:
     """
     Wczytuje ostatni przetworzony timestamp z określonego dokumentu w kolekcji konfiguracyjnej.
+    Używane przez cykl /log-pnl.
     """
     db = get_db()
     try:
@@ -35,6 +37,7 @@ def load_last_processed_timestamp(doc_id: str) -> datetime:
 def save_last_processed_timestamp(timestamp_dt: datetime, doc_id: str):
     """
     Zapisuje nowy timestamp do określonego dokumentu w kolekcji konfiguracyjnej.
+    Używane przez cykl /log-pnl.
     """
     db = get_db()
     try:
@@ -44,27 +47,27 @@ def save_last_processed_timestamp(timestamp_dt: datetime, doc_id: str):
     except Exception as e:
         logger.error(f"[FETCHER_ERROR] Nie udało się zapisać timestampu do '{doc_id}': {e}", exc_info=True)
 
-def fetch_new_alerts_since(last_ts_dt: datetime):
-    """Pobiera wszystkie nowe alerty od podanego timestampu."""
+def fetch_new_alerts() -> List[Dict[str, Any]]:
+    """Pobiera wszystkie alerty ze statusem 'NEW'."""
     db = get_db()
     new_alerts_list = []
-    new_max_ts = last_ts_dt
     try:
         query = db.collection(FIRESTORE_COLLECTION_ALERTS) \
-                  .where(field_path='received_at', op_string='>', value=last_ts_dt) \
+                  .where(field_path='status', op_string='==', value='NEW') \
                   .order_by('received_at')
+        
         docs = query.stream()
         for doc in docs:
             alert_data = doc.to_dict()
             alert_data['id'] = doc.id
             new_alerts_list.append(alert_data)
-            current_doc_ts = alert_data.get('received_at')
-            if current_doc_ts and current_doc_ts > new_max_ts:
-                new_max_ts = current_doc_ts
+            
         if new_alerts_list:
-            logger.info(f"[FETCHER] Pobrano {len(new_alerts_list)} nowych alertów.")
+            logger.info(f"[FETCHER] Pobrano {len(new_alerts_list)} nowych alertów ze statusem 'NEW'.")
         else:
-            logger.info("[FETCHER] Brak nowych alertów od ostatniego sprawdzenia.")
+            logger.info("[FETCHER] Brak nowych alertów do przetworzenia.")
+            
     except Exception as e:
         logger.error(f"[FETCHER_FIRESTORE_ERROR] Błąd podczas pobierania alertów: {e}", exc_info=True)
-    return new_alerts_list, new_max_ts
+        
+    return new_alerts_list

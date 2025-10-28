@@ -1,7 +1,7 @@
 # Lokalizacja: bot_service/state_manager.py
 
 import logging
-from typing import Iterable, Dict, Any, List, Optional
+from typing import Iterable, Dict, Any, Optional
 from datetime import datetime, timezone
 from google.cloud import firestore
 from google.cloud.firestore_v1.document import DocumentSnapshot
@@ -73,7 +73,6 @@ def get_latest_klines_from_cache(symbols: Iterable[str]) -> Dict[str, Dict[str, 
     return klines_cache
 
 def save_active_order(order_link_id: str, order_data: Dict[str, Any]):
-    """Zapisuje informacje o aktywnym zleceniu, używając orderLinkId jako ID dokumentu."""
     try:
         if not order_link_id:
             logger.error("Próba zapisu aktywnego zlecenia bez orderLinkId.")
@@ -81,14 +80,13 @@ def save_active_order(order_link_id: str, order_data: Dict[str, Any]):
         
         doc_ref = _get_db().collection(constants.ACTIVE_ORDERS_COLLECTION).document(order_link_id)
         order_data['created_at'] = datetime.now(timezone.utc)
-        order_data['status'] = 'PLACED'  # <-- KLUCZOWA ZMIANA
+        order_data['status'] = 'PLACED'
         doc_ref.set(order_data)
         logger.info(f"Zapisano aktywne zlecenie {order_link_id} dla symbolu {order_data.get('symbol')} ze statusem 'PLACED'.")
     except Exception as e:
         logger.error(f"Błąd podczas zapisu aktywnego zlecenia {order_link_id}: {e}", exc_info=True)
         
 def get_active_order_by_id(order_link_id: str) -> Optional[Dict[str, Any]]:
-    """Pobiera dane aktywnego zlecenia na podstawie jego orderLinkId (który jest ID dokumentu)."""
     try:
         doc_ref = _get_db().collection(constants.ACTIVE_ORDERS_COLLECTION).document(order_link_id)
         doc = doc_ref.get()
@@ -102,7 +100,6 @@ def get_active_order_by_id(order_link_id: str) -> Optional[Dict[str, Any]]:
         return None
 
 def get_active_order_by_limit_order_id(limit_order_id: str) -> Optional[Dict[str, Any]]:
-    """Wyszukuje aktywny dokument zlecenia na podstawie pola limitOrderId."""
     try:
         docs = _get_db().collection(constants.ACTIVE_ORDERS_COLLECTION).where('limitOrderId', '==', limit_order_id).limit(1).stream()
         doc_snapshot = next(docs, None)
@@ -116,7 +113,6 @@ def get_active_order_by_limit_order_id(limit_order_id: str) -> Optional[Dict[str
         return None
 
 def delete_active_order_by_id(order_link_id: str):
-    """Usuwa dokument aktywnego zlecenia na podstawie jego orderLinkId."""
     try:
         _get_db().collection(constants.ACTIVE_ORDERS_COLLECTION).document(order_link_id).delete()
         logger.info(f"[{order_link_id}] Pomyślnie usunięto przetworzone zlecenie z kolekcji active_orders.")
@@ -139,7 +135,6 @@ def get_orders_by_status(status: str) -> Iterable[DocumentSnapshot]:
     return _get_db().collection(constants.ACTIVE_ORDERS_COLLECTION).where('status', '==', status).stream()
 
 def get_orders_without_status() -> Iterable[DocumentSnapshot]:
-    """Pobiera dokumenty, które nie mają pola 'status' (dla kompatybilności wstecznej)."""
     return _get_db().collection(constants.ACTIVE_ORDERS_COLLECTION).where('status', '==', None).stream()
 
 def update_active_order(order_id: str, updates: Dict[str, Any]):
@@ -151,7 +146,6 @@ def update_active_order(order_id: str, updates: Dict[str, Any]):
         logger.error(f"Błąd podczas aktualizacji zlecenia {order_id}: {e}", exc_info=True)
 
 def get_active_order_by_tpsl_order_id(tpsl_order_id: str) -> Optional[Dict[str, Any]]:
-    """Wyszukuje aktywny dokument zlecenia na podstawie pola tpOrderId LUB slOrderId."""
     try:
         db = _get_db()
         query_tp = db.collection(constants.ACTIVE_ORDERS_COLLECTION).where('tpOrderId', '==', tpsl_order_id).limit(1)
@@ -174,40 +168,14 @@ def get_active_order_by_tpsl_order_id(tpsl_order_id: str) -> Optional[Dict[str, 
     except Exception as e:
         logger.error(f"Błąd podczas wyszukiwania zlecenia po tpsl_order_id {tpsl_order_id}: {e}", exc_info=True)
         return None
-# DODAJ TE DWIE FUNKCJE NA KOŃCU PLIKU state_manager.py
-
-def get_orders_without_status() -> Iterable[DocumentSnapshot]:
-    """Pobiera dokumenty, które nie mają pola 'status' (dla kompatybilności wstecznej)."""
-    return _get_db().collection(constants.ACTIVE_ORDERS_COLLECTION).where('status', '==', None).stream()
-
-def get_active_order_by_tpsl_order_id(tpsl_order_id: str) -> Optional[Dict[str, Any]]:
-    """Wyszukuje aktywny dokument zlecenia na podstawie pola tpOrderId LUB slOrderId."""
-    try:
-        db = _get_db()
-        # Zapytanie 1: Szukaj po tpOrderId
-        query_tp = db.collection(constants.ACTIVE_ORDERS_COLLECTION).where('tpOrderId', '==', tpsl_order_id).limit(1)
-        docs_tp = list(query_tp.stream())
-        if docs_tp:
-            doc_snapshot = docs_tp[0]
-            data = doc_snapshot.to_dict()
-            data['id'] = doc_snapshot.id
-            return data
-
-        # Zapytanie 2: Szukaj po slOrderId
-        query_sl = db.collection(constants.ACTIVE_ORDERS_COLLECTION).where('slOrderId', '==', tpsl_order_id).limit(1)
-        docs_sl = list(query_sl.stream())
-        if docs_sl:
-            doc_snapshot = docs_sl[0]
-            data = doc_snapshot.to_dict()
-            data['id'] = doc_snapshot.id
-            return data
-            
-        return None
-    except Exception as e:
-        logger.error(f"Błąd podczas wyszukiwania zlecenia po tpsl_order_id {tpsl_order_id}: {e}", exc_info=True)
-        return None
-
 
 def get_all_active_orders() -> Iterable[DocumentSnapshot]:
-    """Pobiera wszystkie dokumenty z kolekcji active_orders."""
     return _get_db().collection(constants.ACTIVE_ORDERS_COLLECTION).stream()
+
+def update_alert_status(alert_id: str, status: str):
+    try:
+        doc_ref = _get_db().collection(constants.FIRESTORE_COLLECTION_ALERTS).document(alert_id)
+        doc_ref.update({'status': status})
+        logger.info(f"Zaktualizowano status alertu {alert_id} na '{status}'.")
+    except Exception as e:
+        logger.error(f"Błąd podczas aktualizacji statusu alertu {alert_id}: {e}", exc_info=True)
