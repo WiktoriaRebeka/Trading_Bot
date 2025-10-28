@@ -35,6 +35,7 @@ def firestore_webhook_receiver(request):
         logging.warning(f"Odrzucono żądanie z niedozwoloną metodą: {request.method}")
         return ('Dozwolone są tylko żądania POST', 405)
 
+    # --- Krok 1: Weryfikacja Sekretu ---
     if not WEBHOOK_SECRET:
         logging.critical("Sekret WEBHOOK_SECRET_TOKEN nie jest skonfigurowany w środowisku Cloud Function!")
         return ("Błąd konfiguracji serwera", 500)
@@ -56,6 +57,8 @@ def firestore_webhook_receiver(request):
         logging.error(f"Błąd podczas parsowania JSON lub autoryzacji: {e}", exc_info=True)
         return ("Nieprawidłowe żądanie", 400)
     
+    # --- Koniec Weryfikacji ---
+
     try:
         client = get_db_client()
     except Exception:
@@ -69,7 +72,6 @@ def firestore_webhook_receiver(request):
 
         logging.info(f"Odebrano poprawny alert dla symbolu: {alert_data.get('symbol')}")
         alert_data['received_at'] = firestore.SERVER_TIMESTAMP
-        alert_data['status'] = 'NEW'
         
         doc_ref = client.collection('alerts').document()
         doc_ref.set(alert_data)
