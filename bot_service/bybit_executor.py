@@ -291,9 +291,10 @@ class BybitExecutor:
             logger.info(f"[{api_symbol}] Polecenie anulowania wysłane pomyślnie.")
             return True
         except BybitAPIError as e:
-            # Jeśli zlecenie już nie istnieje (bo zostało zrealizowane), to też jest OK
-            if e.ret_code == 110021: # Order does not exist
-                logger.warning(f"[{api_symbol}] Próba anulowania zlecenia, które już nie istnieje (prawdopodobnie zrealizowane).")
+            # <--- KLUCZOWA ZMIANA: Poprawiony kod błędu i log ---
+            # Jeśli zlecenie już nie istnieje (bo zostało zrealizowane lub anulowane), to też jest OK
+            if e.ret_code == 110001: # Poprzednio było 110021
+                logger.warning(f"[{api_symbol}] Próba anulowania zlecenia, które już nie istnieje (prawdopodobnie zrealizowane lub anulowane ręcznie). Traktuję jako sukces.")
                 return True
             logger.error(f"[{api_symbol}] Błąd API podczas anulowania zlecenia: {e}")
             return False

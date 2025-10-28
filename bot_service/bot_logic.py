@@ -318,7 +318,6 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
     return True
 
 
-
 def update_filled_orders(executor: BybitExecutor):
     """
     Cykl monitorujący zlecenia.
@@ -432,13 +431,14 @@ def update_filled_orders(executor: BybitExecutor):
             tsl_floor_price = alert_model.tp_4_0
             
             should_activate_tsl = False
-            if direction == 'LONG' and mark_price > tsl_activation_price:
+            if direction == 'LONG' and mark_price >= tsl_activation_price:
                 should_activate_tsl = True
-            elif direction == 'SHORT' and mark_price < tsl_activation_price:
+            elif direction == 'SHORT' and mark_price <= tsl_activation_price:
                 should_activate_tsl = True
 
             if should_activate_tsl:
-                logger.info(f"{log_prefix} CENA RYNKOWA ({mark_price}) PRZEKROCZYŁA PRÓG AKTYWACJI TSL ({tsl_activation_price}).")
+                # <--- ZMIANA 1: Poprawiony log dla jasności ---
+                logger.info(f"{log_prefix} WARUNEK SPEŁNIONY! Cena rynkowa ({mark_price}) osiągnęła próg aktywacji TSL ({tsl_activation_price}).")
                 
                 tp_order_id = order_data.get('tpOrderId')
                 
@@ -455,6 +455,9 @@ def update_filled_orders(executor: BybitExecutor):
                         logger.error(f"{log_prefix} Nie udało się ustawić Trailing Stop. Pozycja pozostaje bez TP!")
                 else:
                     logger.error(f"{log_prefix} Nie udało się anulować starego zlecenia Take Profit.")
+            # <--- ZMIANA 2: Dodany blok 'else' dla lepszego debugowania ---
+            else:
+                logger.info(f"{log_prefix} Warunek TSL niespełniony. Cena rynkowa: {mark_price}, Próg aktywacji: {tsl_activation_price}, Kierunek: {direction}")
 
         except Exception as e:
             logger.error(f"{log_prefix} Błąd podczas sprawdzania Trailing Stop: {e}", exc_info=True)
