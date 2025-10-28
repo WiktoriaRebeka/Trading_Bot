@@ -1,6 +1,5 @@
 # Lokalizacja: bot_service/bot_logic.py
 
-
 import logging
 import os
 import math
@@ -11,27 +10,36 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone, timedelta
 from pydantic import ValidationError
 
-from shared_lib.models import AlertData
+from shared_lib.models import AlertData, Kline, AnalyticalCase
 from shared_lib.firebase_client import get_instrument_rules
 from shared_lib.risk_manager import calculate_position_size
 from bot_service import state_manager
+from bot_service.bigquery_logger import log_analysis_result
 from bot_service.pnl_logger_real import log_real_trade_result
 from bot_service.bybit_executor import BybitExecutor, BybitAPIError
-from bot_service.fetch_from_firestore import fetch_new_alerts, load_last_processed_timestamp, save_last_processed_timestamp
+from bot_service.fetch_from_firestore import fetch_new_alerts_since, save_last_processed_timestamp, load_last_processed_timestamp
 
 logger = logging.getLogger(__name__)
 
 def process_new_alerts(executor: BybitExecutor):
     """
     Pobiera i przetwarza nowe alerty w trybie transakcyjnym.
+    Jest to główna funkcja wywoływana przez endpoint /process-alerts.
     """
     logger.info("Uruchamiam cykl przetwarzania nowych alertów.")
-    new_alerts = fetch_new_alerts() 
+    last_ts = load_last_processed_timestamp("alerts_last_fetch_state")
+    new_alerts, new_ts = fetch_new_alerts_since(last_ts)
 
     if new_alerts:
         _process_alerts_transactionally(new_alerts, executor)
+        
+        if new_ts and (not last_ts or new_ts > last_ts):
+            save_last_processed_timestamp(new_ts, "alerts_last_fetch_state")
     else:
         logger.info("Brak nowych alertów do przetworzenia.")
+
+# Lokalizacja: bot_service/bot_logic.py
+# ZASTĄP FUNKCJĘ '_process_alerts_transactionally' PONIŻSZĄ WERSJĄ
 
 def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: BybitExecutor):
     """
@@ -43,44 +51,53 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
         logger.error("Nie udało się wczytać zasad instrumentów z Firestore. Przerywam przetwarzanie alertów.")
         return
 
+    # Sortujemy alerty od najstarszego do najnowszego
     alerts.sort(key=lambda a: a.get('received_at', datetime.min.replace(tzinfo=timezone.utc)))
     
+    # Grupujemy alerty po symbolu, aby łatwo znaleźć najnowszy
     latest_alerts_per_symbol: Dict[str, Dict[str, Any]] = {}
     for alert_dict in alerts:
-        symbol = alert_dict.get('symbol')
-        if symbol:
-            latest_alerts_per_symbol[symbol] = alert_dict
-        else:
+        try:
+            # Szybka walidacja Pydantic, aby uzyskać symbol
+            symbol = alert_dict.get('symbol')
+            if symbol:
+                latest_alerts_per_symbol[symbol] = alert_dict
+        except Exception:
             alert_id = alert_dict.get('id', 'unknown_id')
-            logger.warning(f"Pominięto alert {alert_id} z powodu braku symbolu.")
+            logger.warning(f"Pominięto alert {alert_id} z powodu braku symbolu lub błędu parsowania wstępnego.")
 
+    # --- NOWA, POPRAWIONA LOGIKA ---
+    # Przechodzimy po unikalnych symbolach, dla których otrzymaliśmy alerty w tym cyklu
     for symbol, alert_dict in latest_alerts_per_symbol.items():
         alert_id = alert_dict.get('id', 'unknown_id')
         
+        # KROK 1: ZAWSZE ANULUJ STARE ZLECENIA
+        # Robimy to na samym początku dla każdego symbolu, który otrzymał nowy alert.
         logger.info(f"[{symbol}] Otrzymano nowy alert. Anuluję wszystkie poprzednie, oczekujące zlecenia limit dla tego symbolu.")
         if not executor.cancel_all_open_orders_for_symbol(symbol):
              logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się anulować poprzednich zleceň. Pomijam ten symbol w cyklu, aby uniknąć ryzyka.")
-             continue
+             continue # Przejdź do następnego symbolu
 
         try:
+            # KROK 2: PRZETWÓRZ NAJNOWSZY ALERT
             logger.info(f"--- Rozpoczynam przetwarzanie najnowszego alertu [{symbol}] ID: {alert_id} ---")
             alert_model = AlertData.model_validate(alert_dict)
 
+            # Sprawdzamy, czy nie ma już otwartej pozycji
             open_position_side = executor.get_open_position_side(symbol)
             if open_position_side and open_position_side != "ERROR":
                 logger.warning(f"[{symbol}] ODRZUCONO: Wykryto już otwartą pozycję ({open_position_side}).")
-                state_manager.update_alert_status(alert_id, "SKIPPED_POSITION_EXISTS")
                 continue
 
+            # Walidacja logiki alertu
             if not _correct_and_validate_alert(alert_model):
                 logger.warning(f"[{symbol}] ODRZUCONO: Nowy alert nie przeszedł walidacji logicznej.")
-                state_manager.update_alert_status(alert_id, "SKIPPED_VALIDATION_FAILED")
                 continue
 
+            # Reszta logiki pozostaje taka sama...
             rule = instrument_rules.get(symbol)
             if not rule or "tickSize" not in rule or "qtyStep" not in rule:
                 logger.warning(f"[{symbol}] ODRZUCONO (Brak Zasad): Nie znaleziono reguł dla instrumentu.")
-                state_manager.update_alert_status(alert_id, "SKIPPED_NO_RULES")
                 continue
             tick_size, qty_step = rule["tickSize"], rule["qtyStep"]
 
@@ -105,7 +122,6 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
 
             if not final_qty or final_qty <= 0:
                 logger.warning(f"[{symbol}] ODRZUCONO (Qty=0): Obliczona wielkość pozycji wynosi zero lub jest ujemna.")
-                state_manager.update_alert_status(alert_id, "SKIPPED_ZERO_QTY")
                 continue
 
             custom_order_link_id = f"bot_{alert_id.replace('-', '')[:20]}"
@@ -133,20 +149,16 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
                     "alert_tp_price": alert_tp_price_to_save
                 }
                 state_manager.save_active_order(custom_order_link_id, order_data_to_save)
-                state_manager.update_alert_status(alert_id, "PROCESSED")
             else:
                 logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się złożyć zlecenia (brak orderId w odpowiedzi).")
-                state_manager.update_alert_status(alert_id, "ERROR_ORDER_FAILED")
 
         except ValidationError as e:
             logger.error(f"Błąd walidacji danych dla alertu ID: {alert_id}. Dane: {alert_dict}. Błąd Pydantic: {e}")
-            state_manager.update_alert_status(alert_id, "ERROR_VALIDATION")
+            continue
         except BybitAPIError as e:
             logger.error(f"Błąd API Bybit podczas przetwarzania alertu {alert_id}: {e}", exc_info=False)
-            state_manager.update_alert_status(alert_id, "ERROR_API")
         except Exception as e:
             logger.error(f"Krytyczny błąd podczas przetwarzania alertu {alert_id}: {e}", exc_info=True)
-            state_manager.update_alert_status(alert_id, "ERROR_UNEXPECTED")
 
 def _transform_liquidation_record(liq_record: Dict[str, Any]) -> Dict[str, Any]:
     return {
@@ -156,6 +168,7 @@ def _transform_liquidation_record(liq_record: Dict[str, Any]) -> Dict[str, Any]:
         "cumCommission": "0", "leverage": None, "createdTime": liq_record.get("updatedTime"),
         "updatedTime": liq_record.get("updatedTime"), "exitType": "Liquidation"
     }
+
 
 def log_closed_positions_pnl(executor: BybitExecutor) -> int:
     logger.info("[PNL_LOGGER] Rozpoczynam cykl logowania zamkniętych pozycji.")
@@ -200,9 +213,41 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
 
             logger.info(f"[PNL_LOGGER] Przetwarzanie rekordu dla {symbol} [OrderID z PnL: {order_id_from_pnl}, Typ: {exit_type}]")
             
-            active_order_data = state_manager.get_active_order_by_tpsl_order_id(order_id_from_pnl)
+            active_order_data = None
+
+            # Główna metoda dopasowania
+            if exit_type in ["TakeProfit", "StopLoss"]:
+                active_order_data = state_manager.get_active_order_by_tpsl_order_id(order_id_from_pnl)
             
+            # --- NOWA, ULEPSZONA LOGIKA FALLBACK ---
             if not active_order_data:
+                logger.warning(f"[{symbol}] Nie znaleziono dopasowania po tp/sl OrderId. Uruchamiam zaawansowany fallback...")
+                
+                # Krok 1: Znajdź orderLinkId z historii zlecenia zamykającego
+                order_history = executor.get_order_history_by_id(order_id=order_id_from_pnl)
+                if order_history and order_history.get("orderLinkId"):
+                    order_link_id = order_history.get("orderLinkId")
+                    logger.info(f"[{symbol}] Odzyskano orderLinkId: {order_link_id} ze zlecenia zamykającego.")
+                    
+                    # Krok 2: Znajdź nasz "złoty rekord" po orderLinkId
+                    potential_match = state_manager.get_active_order_by_id(order_link_id)
+                    
+                    # Krok 3: Sprawdź, czy to na pewno ten - porównaj ceny TP/SL
+                    if potential_match:
+                        logger.info(f"[{symbol}] Znaleziono potencjalne dopasowanie. Weryfikuję ceny TP/SL...")
+                        trigger_price = float(order_history.get("triggerPrice", 0))
+                        
+                        is_tp_match = math.isclose(trigger_price, potential_match.get('planned_tp_price', -1))
+                        is_sl_match = math.isclose(trigger_price, potential_match.get('planned_sl_price', -1))
+
+                        if is_tp_match or is_sl_match:
+                            logger.info(f"[{symbol}] Weryfikacja pomyślna. To jest prawidłowe dopasowanie.")
+                            active_order_data = potential_match
+                        else:
+                            logger.warning(f"[{symbol}] Dopasowanie po orderLinkId nie powiodło się - ceny TP/SL się nie zgadzają.")
+
+            if not active_order_data:
+                # Logika odroczenia i UNMATCHED
                 updated_time_ms = int(pnl_record.get("updatedTime", 0))
                 record_ts_dt = datetime.fromtimestamp(updated_time_ms / 1000, tz=timezone.utc)
                 
@@ -265,21 +310,31 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
     logger.info(f"Alert [{alert.symbol}] przeszedł walidację. Kierunek: {alert.direction}, Ryzyko: {risk_perc}%.")
     return True
 
+
+
 def update_filled_orders(executor: BybitExecutor):
+    """
+    Cykl monitorujący zlecenia. Działa jako skrypt naprawczy dla starych zleceň
+    bez statusu oraz jako normalny proces dla nowych zleceň ze statusem 'PLACED'.
+    """
     logger.info("[ORDER_UPDATER] Rozpoczynam cykl aktualizacji aktywnych zleceň.")
     
     placed_orders_docs = list(state_manager.get_orders_by_status('PLACED'))
+    logger.info(f"[ORDER_UPDATER] Znaleziono {len(placed_orders_docs)} zleceń ze statusem 'PLACED'.")
+
     legacy_orders_docs = list(state_manager.get_orders_without_status())
+    logger.info(f"[ORDER_UPDATER] Znaleziono {len(legacy_orders_docs)} starych zleceń bez statusu do naprawy.")
+
+    all_orders_to_process = {doc.id: doc for doc in placed_orders_docs}
+    all_orders_to_process.update({doc.id: doc for doc in legacy_orders_docs})
     
-    all_placed_orders = {doc.id: doc for doc in placed_orders_docs}
-    all_placed_orders.update({doc.id: doc for doc in legacy_orders_docs})
-    
-    if not all_placed_orders:
-        logger.info("[ORDER_UPDATER] Brak zleceň oczekujących na wejście do przetworzenia.")
+    if not all_orders_to_process:
+        logger.info("[ORDER_UPDATER] Brak zleceň do przetworzenia w tym cyklu.")
         return
 
-    logger.info(f"[ORDER_UPDATER] Przetwarzam {len(all_placed_orders)} zleceń oczekujących na wejście.")
-    for order_doc in all_placed_orders.values():
+    logger.info(f"[ORDER_UPDATER] Łącznie do przetworzenia: {len(all_orders_to_process)} zleceń.")
+
+    for order_doc in all_orders_to_process.values():
         order_data = order_doc.to_dict()
         order_link_id = order_doc.id
         symbol = order_data.get('symbol')
@@ -288,9 +343,10 @@ def update_filled_orders(executor: BybitExecutor):
             continue
 
         log_prefix = f"[{symbol}|{order_link_id}]"
-        logger.info(f"{log_prefix} Sprawdzam status zlecenia (status: PLACED/legacy)...")
+        logger.info(f"{log_prefix} Sprawdzam status zlecenia...")
 
         try:
+            # --- KRYTYCZNA ZMIANA: Szukamy po orderLinkId ---
             order_status_data = executor.get_open_order_by_id(order_link_id=order_link_id)
             
             if not order_status_data:
@@ -298,7 +354,7 @@ def update_filled_orders(executor: BybitExecutor):
                 order_status_data = executor.get_order_history_by_id(order_link_id=order_link_id)
 
             if not order_status_data:
-                logger.warning(f"{log_prefix} Nie można odnaleźć zlecenia. Oznaczam jako 'UNKNOWN'.")
+                logger.warning(f"{log_prefix} Nie można odnaleźć zlecenia ani w aktywnych, ani w historii. Oznaczam jako 'UNKNOWN'.")
                 state_manager.update_active_order(order_link_id, {'status': 'UNKNOWN'})
                 continue
 
@@ -327,21 +383,27 @@ def update_filled_orders(executor: BybitExecutor):
                     state_manager.update_active_order(order_link_id, updates)
                     logger.info(f"{log_prefix} SUKCES! Zaktualizowano rekord o ID zleceň TP: {tp_order_id} i SL: {sl_order_id}.")
                 else:
-                    logger.warning(f"{log_prefix} Zlecenie zrealizowane, ale nie znaleziono pasujących zleceň TP/SL na giełdzie. Spróbuję ponownie.")
+                    logger.warning(f"{log_prefix} Zlecenie zrealizowane, ale nie znaleziono pasujących zleceň TP/SL na giełdzie. Spróbuję ponownie w następnym cyklu.")
 
             elif order_status_data.get('orderStatus') in ['Cancelled', 'Rejected']:
                  logger.warning(f"{log_prefix} Zlecenie otwierające zostało anulowane/odrzucone. Oznaczam jako anulowane.")
                  state_manager.update_active_order(order_link_id, {'status': 'CANCELLED'})
             
             elif order_status_data.get('orderStatus') in ['New', 'PartiallyFilled']:
-                logger.info(f"{log_prefix} Zlecenie wciąż aktywne (status: {order_status_data.get('orderStatus')}). Sprawdzę ponownie.")
+                logger.info(f"{log_prefix} Zlecenie jest wciąż aktywne (status: {order_status_data.get('orderStatus')}). Dodaję status 'PLACED' i sprawdzę ponownie.")
                 if 'status' not in order_data:
                     state_manager.update_active_order(order_link_id, {'status': 'PLACED'})
 
         except Exception as e:
-            logger.error(f"{log_prefix} Błąd podczas aktualizacji zlecenia PLACED: {e}", exc_info=True)
+            logger.error(f"{log_prefix} Błąd podczas aktualizacji zlecenia: {e}", exc_info=True)
+
 
 def repair_old_orders():
+    """
+    JEDNORAZOWY SKRYPT NAPRAWCZY.
+    Przechodzi przez wszystkie dokumenty w 'active_orders' i dodaje
+    pole 'status: PLACED', jeśli go brakuje.
+    """
     logger.info("[REPAIR_SCRIPT] Uruchamiam jednorazowy skrypt naprawczy dla starych zleceň.")
     
     all_orders = state_manager.get_all_active_orders()
