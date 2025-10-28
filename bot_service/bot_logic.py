@@ -180,6 +180,8 @@ def _transform_liquidation_record(liq_record: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+# Lokalizacja: bot_service/bot_logic.py
+
 def log_closed_positions_pnl(executor: BybitExecutor) -> int:
     """
     Pobiera zamknięte pozycje, znajduje dla nich dopasowanie w `active_orders`
@@ -229,25 +231,28 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
 
             logger.info(f"[PNL_LOGGER] Przetwarzanie rekordu dla {symbol} [OrderID z PnL: {order_id_from_pnl}, Typ: {exit_type}]")
             
-            active_order_data = None
-
-            if exit_type in ["TakeProfit", "StopLoss"]:
-                active_order_data = state_manager.get_active_order_by_tpsl_order_id(order_id_from_pnl)
+            # --- NOWA, UPROSZCZONA LOGIKA DOPASOWYWANIA ---
             
+            # KROK 1: Zawsze próbuj znaleźć dopasowanie po orderId z rekordu PnL w naszych polach tpOrderId/slOrderId.
+            # To jest najbardziej niezawodna metoda.
+            active_order_data = state_manager.get_active_order_by_tpsl_order_id(order_id_from_pnl)
+            
+            # KROK 2: Jeśli to zawiedzie, spróbuj metody fallback opartej na orderLinkId.
+            # Ta metoda jest mniej pewna, ale może pomóc w przypadkach brzegowych.
             if not active_order_data:
-                if exit_type in ["TakeProfit", "StopLoss"]:
-                    logger.warning(f"[{symbol}] Nie znaleziono dopasowania po tp/sl OrderId. Próbuję metody fallback...")
-                else:
-                    logger.info(f"[{symbol}] Typ zamknięcia to '{exit_type}'. Próbuję dopasowania po orderLinkId...")
-
+                logger.warning(f"[{symbol}] Nie znaleziono dopasowania po tp/sl OrderId. Próbuję metody fallback po orderLinkId...")
+                
                 order_link_id_from_pnl = pnl_record.get("orderLinkId")
-                if order_link_id_from_pnl:
+                if order_link_id_from_pnl and order_link_id_from_pnl.startswith("bot_"):
                     active_order_data = state_manager.get_active_order_by_id(order_link_id_from_pnl)
                 else:
+                    # Ta część jest mało prawdopodobna, ale zostawiamy jako ostateczność
                     order_history = executor.get_order_history_by_id(order_id=order_id_from_pnl)
-                    if order_history and order_history.get("orderLinkId"):
+                    if order_history and order_history.get("orderLinkId", "").startswith("bot_"):
                         order_link_id = order_history.get("orderLinkId")
                         active_order_data = state_manager.get_active_order_by_id(order_link_id)
+
+            # --- KONIEC NOWEJ LOGIKI ---
 
             if not active_order_data:
                 updated_time_ms = int(pnl_record.get("updatedTime", 0))
@@ -258,7 +263,7 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
                     continue
                 else:
                     logger.warning(f"[PNL_LOGGER] OSTATECZNIE nie znaleziono dopasowania dla orderId '{order_id_from_pnl}'.")
-                    active_order_data = {}
+                    active_order_data = {} # Przekaż pusty słownik, aby zalogować jako UNMATCHED
             else:
                 logger.info(f"[PNL_LOGGER] SUKCES! Znaleziono dopasowanie dla transakcji.")
 
@@ -279,7 +284,6 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
     save_last_processed_timestamp(final_timestamp_to_save, "pnl_logger_last_fetch_state")
     logger.info(f"[PNL_LOGGER] Zakończono cykl. Przetworzono {processed_count} rekordów. Zaktualizowano znacznik czasu na {final_timestamp_to_save.isoformat()}.")
     return processed_count
-
 
 def round_price_by_tick(price: float, tick_size: str, direction: str) -> float:
     price_decimal = Decimal(str(price))
