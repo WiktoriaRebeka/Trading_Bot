@@ -158,24 +158,27 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
         except Exception as e:
             logger.error(f"Krytyczny błąd podczas przetwarzania alertu {alert_id}: {e}", exc_info=True)
 
+
 def _transform_liquidation_record(liq_record: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Transformuje rekord likwidacji z API Bybit do formatu zbliżonego
+    do rekordu PnL, aby można go było przetworzyć w tej samej logice.
+    """
     return {
-        "symbol": liq_record.get("symbol"), "orderId": f"liq_{liq_record.get('symbol')}_{liq_record.get('updatedTime')}",
-        "side": "Buy" if liq_record.get("side") == "Sell" else "Sell", "qty": liq_record.get("size"),
-        "avgEntryPrice": None, "avgExitPrice": liq_record.get("deliveryPrice"), "closedPnl": liq_record.get("realisedPnl"),
-        "cumCommission": "0", "leverage": None, "createdTime": liq_record.get("updatedTime"),
-        "updatedTime": liq_record.get("updatedTime"), "exitType": "Liquidation"
+        "symbol": liq_record.get("symbol"),
+        "orderId": f"liq_{liq_record.get('symbol')}_{liq_record.get('updatedTime')}",
+        "side": "Buy" if liq_record.get("side") == "Sell" else "Sell", # Strona zamykająca pozycję
+        "qty": liq_record.get("size"),
+        "avgEntryPrice": None, # Tego nie mamy w danych o likwidacji
+        "avgExitPrice": liq_record.get("deliveryPrice"),
+        "closedPnl": liq_record.get("realisedPnl"),
+        "cumCommission": "0", # Prowizja jest już wliczona w realisedPnl
+        "leverage": None,
+        "createdTime": liq_record.get("updatedTime"), # Używamy czasu likwidacji jako obu
+        "updatedTime": liq_record.get("updatedTime"),
+        "exitType": "Liquidation"
     }
 
-
-# Lokalizacja: bot_service/bot_logic.py
-
-# ... (kod powyżej)
-
-def _transform_liquidation_record(liq_record: Dict[str, Any]) -> Dict[str, Any]:
-    # ... (zawartość tej funkcji)
-
-# --- UPEWNIJ SIĘ, ŻE PONIŻSZA FUNKCJA ISTNIEJE I JEST KOMPLETNA ---
 
 def log_closed_positions_pnl(executor: BybitExecutor) -> int:
     """
