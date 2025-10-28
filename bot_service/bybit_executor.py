@@ -271,3 +271,51 @@ class BybitExecutor:
         except Exception as e:
             logger.error(f"[{api_symbol}] Błąd podczas pobierania Mark Price: {e}")
             return None
+
+
+    def cancel_order(self, symbol: str, order_id: str = None, order_link_id: str = None) -> bool:
+        """Anuluje pojedyncze zlecenie na podstawie jego ID lub Link ID."""
+        api_symbol = symbol.replace('.P', '')
+        payload = {"category": "linear", "symbol": api_symbol}
+        if order_id:
+            payload['orderId'] = order_id
+        elif order_link_id:
+            payload['orderLinkId'] = order_link_id
+        else:
+            logger.error(f"[{api_symbol}] Musisz podać orderId lub orderLinkId do anulowania zlecenia.")
+            return False
+
+        logger.info(f"[{api_symbol}] Wysyłanie polecenia anulowania dla zlecenia: {payload}")
+        try:
+            self._send_request("POST", "/v5/order/cancel", params=payload)
+            logger.info(f"[{api_symbol}] Polecenie anulowania wysłane pomyślnie.")
+            return True
+        except BybitAPIError as e:
+            # Jeśli zlecenie już nie istnieje (bo zostało zrealizowane), to też jest OK
+            if e.ret_code == 110021: # Order does not exist
+                logger.warning(f"[{api_symbol}] Próba anulowania zlecenia, które już nie istnieje (prawdopodobnie zrealizowane).")
+                return True
+            logger.error(f"[{api_symbol}] Błąd API podczas anulowania zlecenia: {e}")
+            return False
+        except Exception as e:
+            logger.critical(f"[{api_symbol}] KRYTYCZNY BŁĄD podczas anulowania zlecenia: {e}", exc_info=True)
+            return False
+
+    def set_trailing_stop(self, symbol: str, trailing_stop_price: str, sl_price: str) -> bool:
+        """Ustawia lub modyfikuje Trailing Stop dla otwartej pozycji."""
+        api_symbol = symbol.replace('.P', '')
+        payload = {
+            "category": "linear",
+            "symbol": api_symbol,
+            "tpslMode": "Partial", # Ważne, aby modyfikować tylko jedną stronę
+            "trailingStop": trailing_stop_price,
+            "stopLoss": sl_price # Zawsze musimy podawać też SL
+        }
+        logger.info(f"[{api_symbol}] Ustawianie Trailing Stop: {payload}")
+        try:
+            self._send_request("POST", "/v5/position/set-tpsl", params=payload)
+            logger.info(f"[{api_symbol}] Trailing Stop pomyślnie ustawiony.")
+            return True
+        except Exception as e:
+            logger.error(f"[{api_symbol}] Błąd podczas ustawiania Trailing Stop: {e}", exc_info=True)
+            return False
