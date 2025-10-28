@@ -273,7 +273,6 @@ class BybitExecutor:
             return None
 
 
-
     def cancel_order(self, symbol: str, order_id: str = None, order_link_id: str = None) -> bool:
         """Anuluje pojedyncze zlecenie na podstawie jego ID lub Link ID."""
         api_symbol = symbol.replace('.P', '')
@@ -292,12 +291,10 @@ class BybitExecutor:
             logger.info(f"[{api_symbol}] Polecenie anulowania wysłane pomyślnie.")
             return True
         except BybitAPIError as e:
-            # --- KLUCZOWA ZMIANA ---
-            # Jeśli zlecenie już nie istnieje (bo zostało zrealizowane), traktujemy to jako sukces.
-            if e.ret_code == 110001: # Order does not exist or too late to cancel
-                logger.warning(f"[{api_symbol}] Próba anulowania zlecenia, które już nie istnieje (prawdopodobnie zrealizowane). Traktuję jako sukces.")
+            # Jeśli zlecenie już nie istnieje (bo zostało zrealizowane), to też jest OK
+            if e.ret_code == 110021: # Order does not exist
+                logger.warning(f"[{api_symbol}] Próba anulowania zlecenia, które już nie istnieje (prawdopodobnie zrealizowane).")
                 return True
-            # --- KONIEC ZMIANY ---
             logger.error(f"[{api_symbol}] Błąd API podczas anulowania zlecenia: {e}")
             return False
         except Exception as e:
@@ -310,13 +307,12 @@ class BybitExecutor:
         payload = {
             "category": "linear",
             "symbol": api_symbol,
-            "tpslMode": "Partial",
+            "tpslMode": "Partial", # Ważne, aby modyfikować tylko jedną stronę
             "trailingStop": trailing_stop_price,
-            "stopLoss": sl_price
+            "stopLoss": sl_price # Zawsze musimy podawać też SL
         }
         logger.info(f"[{api_symbol}] Ustawianie Trailing Stop: {payload}")
         try:
-            # --- POPRAWIONA NAZWA ENDPOINTU ---
             self._send_request("POST", "/v5/position/trading-stop", params=payload)
             logger.info(f"[{api_symbol}] Trailing Stop pomyślnie ustawiony.")
             return True
