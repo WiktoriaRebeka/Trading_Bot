@@ -259,3 +259,15 @@ class BybitExecutor:
         except (RequestException, BybitAPIError) as e:
             logger.error(f"[{symbol}] Błąd podczas pobierania aktywnych zleceň TP/SL: {e}")
             return []
+    def get_mark_price(self, symbol: str) -> Optional[float]:
+        """Pobiera aktualną cenę rynkową (Mark Price) dla danego symbolu."""
+        api_symbol = symbol.replace('.P', '')
+        params = {"category": "linear", "symbol": api_symbol}
+        try:
+            result = self._send_request("GET", "/v5/market/tickers", params=params)
+            if result and result.get('list'):
+                return float(result['list'][0].get('markPrice'))
+            return None
+        except Exception as e:
+            logger.error(f"[{api_symbol}] Błąd podczas pobierania Mark Price: {e}")
+            return None
