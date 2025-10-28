@@ -168,121 +168,115 @@ def _transform_liquidation_record(liq_record: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-# Lokalizacja: bot_service/pnl_logger_real.py
-# ZASTĄP FUNKCJĘ 'log_real_trade_result' PONIŻSZĄ WERSJĄ
+# Lokalizacja: bot_service/bot_logic.py
 
-def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Dict[str, Any]) -> bool:
-    order_id = pnl_data.get("orderId", f"unknown_{int(datetime.now().timestamp())}")
-    symbol = pnl_data.get("symbol", "unknown")
-    log_prefix = f"[PNL_SAVE][{symbol}|{order_id}]"
+# ... (kod powyżej)
 
-    if not bigquery_logger.initialize_bigquery():
-        logger.error(f"{log_prefix} BigQuery nie zostało zainicjalizowane – pomijam zapis.")
-        return False
+def _transform_liquidation_record(liq_record: Dict[str, Any]) -> Dict[str, Any]:
+    # ... (zawartość tej funkcji)
 
-    if not acquire_lock_for_order(order_id):
-        return False
+# --- UPEWNIJ SIĘ, ŻE PONIŻSZA FUNKCJA ISTNIEJE I JEST KOMPLETNA ---
 
-    is_matched = bool(active_order_data and 'alert_id' in active_order_data)
-    alert_id = active_order_data.get('alert_id', 'UNMATCHED_OR_MANUAL')
+def log_closed_positions_pnl(executor: BybitExecutor) -> int:
+    """
+    Pobiera zamknięte pozycje, znajduje dla nich dopasowanie w `active_orders`
+    i loguje wzbogacony rekord do BigQuery.
+    WERSJA FINALNA: Używa nowej, niezawodnej metody dopasowania po tpOrderId/slOrderId
+    oraz obsługuje likwidacje i inne przypadki brzegowe.
+    """
+    logger.info("[PNL_LOGGER] Rozpoczynam cykl logowania zamkniętych pozycji.")
     
-    if not is_matched:
-        logger.warning(f"{log_prefix} Nie znaleziono dopasowania. Transakcja zostanie zapisana jako UNMATCHED.")
-    else:
-        logger.info(f"{log_prefix} Rozpoczynam transakcyjny zapis (alert_id: {alert_id}).")
-
+    last_check_ts_dt = load_last_processed_timestamp("pnl_logger_last_fetch_state")
+    current_cycle_start_time = datetime.now(timezone.utc)
+    
+    GRACE_PERIOD_MINUTES = 3
+    grace_period_delta = timedelta(minutes=GRACE_PERIOD_MINUTES)
+    LOOKBACK_BUFFER_HOURS = 12
+    start_time_with_buffer = last_check_ts_dt - timedelta(hours=LOOKBACK_BUFFER_HOURS)
+    logger.info(f"[PNL_LOGGER] Sprawdzam zamknięte pozycje od: {start_time_with_buffer.isoformat()} (z {LOOKBACK_BUFFER_HOURS}h buforem).")
+    start_time_ms = int(start_time_with_buffer.timestamp() * 1000)
+    
+    all_records = []
     try:
-        # --- Konwersja na Decimal dla precyzji ---
-        qty = Decimal(pnl_data.get("qty", "0.0"))
-        avg_entry_price = Decimal(pnl_data.get("avgEntryPrice", "0.0"))
-        avg_exit_price = Decimal(pnl_data.get("avgExitPrice", "0.0"))
-        net_pnl = Decimal(pnl_data.get("closedPnl") or "0.0")
-        commission = Decimal(pnl_data.get("cumCommission") or "0.0")
+        pnl_records = executor.get_closed_pnl_history(start_time_ms=start_time_ms)
+        all_records.extend(pnl_records)
+    except Exception as e:
+        logger.critical(f"[PNL_LOGGER] Krytyczny błąd podczas pobierania historii z Bybit: {e}", exc_info=True)
+        return 0
+
+    if not all_records:
+        logger.info("[PNL_LOGGER] Nie znaleziono żadnych nowych zamkniętych pozycji.")
+        save_last_processed_timestamp(current_cycle_start_time, "pnl_logger_last_fetch_state")
+        return 0
+
+    logger.info(f"[PNL_LOGGER] Znaleziono łącznie {len(all_records)} zamkniętych pozycji. Rozpoczynam przetwarzanie.")
+    pnl_records_sorted = sorted(all_records, key=lambda r: int(r.get("updatedTime", 0)))
+    
+    processed_count = 0
+    new_max_ts_dt = last_check_ts_dt
+
+    for pnl_record in pnl_records_sorted:
+        order_id_from_pnl = pnl_record.get("orderId")
+        symbol = pnl_record.get("symbol")
+        exit_type = pnl_record.get("exitType")
         
-        # --- Obliczenia wymaganych pól ---
-        entry_value_usdt = qty * avg_entry_price
-        exit_value_usdt = qty * avg_exit_price
-        gross_pnl_usdt = net_pnl + commission
+        try:
+            if not order_id_from_pnl or not symbol:
+                continue
 
-        planned_risk_usdt = None
-        realized_rrr = None
-        exit_price_result = None
-
-        if is_matched:
-            planned_sl_price = active_order_data.get("planned_sl_price")
-            planned_sl_price_dec = Decimal(str(planned_sl_price)) if planned_sl_price is not None else Decimal("0.0")
-
-            if planned_sl_price_dec > 0 and avg_entry_price > 0:
-                risk_per_unit = abs(avg_entry_price - planned_sl_price_dec)
-                planned_risk_usdt_dec = risk_per_unit * qty
-                
-                if planned_risk_usdt_dec > 0:
-                    realized_rrr_dec = (net_pnl / planned_risk_usdt_dec)
-                    planned_risk_usdt = float(planned_risk_usdt_dec)
-                    realized_rrr = float(realized_rrr_dec)
+            logger.info(f"[PNL_LOGGER] Przetwarzanie rekordu dla {symbol} [OrderID z PnL: {order_id_from_pnl}, Typ: {exit_type}]")
             
-            # Ustalenie exit_price_result
-            exit_type = pnl_data.get("exitType")
-            if exit_type == "TakeProfit":
-                exit_price_result = active_order_data.get("planned_tp_price")
-            elif exit_type == "StopLoss":
-                exit_price_result = active_order_data.get("planned_sl_price")
+            active_order_data = None
 
-        # --- Budowa finalnego obiektu do zapisu ---
-        transformed_data = {
-            "alert_id": alert_id,
-            "order_id": order_id,
-            "symbol": symbol,
-            "direction": active_order_data.get("direction", pnl_data.get("side")),
-            "qty": float(qty),
-            "leverage": int(float(pnl_data.get("leverage", 0))) or None,
-            "avg_entry_price": float(avg_entry_price),
-            "avg_exit_price": float(avg_exit_price),
-            "entry_value_usdt": float(entry_value_usdt),
-            "exit_value_usdt": float(exit_value_usdt),
-            "gross_pnl_usdt": float(gross_pnl_usdt),
-            "commission_usdt": float(commission),
-            "net_pnl_usdt": float(net_pnl),
-            "exit_type": pnl_data.get("exitType"),
-            "timestamp_entry": datetime.fromtimestamp(int(pnl_data.get("createdTime")) / 1000, tz=timezone.utc).isoformat(),
-            "timestamp_close": datetime.fromtimestamp(int(pnl_data.get("updatedTime")) / 1000, tz=timezone.utc).isoformat(),
-            "planned_risk_usdt": planned_risk_usdt,
-            "realized_rrr": realized_rrr,
-            "alert_entry_price": active_order_data.get("alert_entry_price"), # <-- POPRAWIONE NAZWY
-            "alert_sl_price": active_order_data.get("alert_sl_price"),
-            "alert_tp_price": active_order_data.get("alert_tp_price"),
-            "planned_entry_price": active_order_data.get("planned_entry_price"),
-            "planned_sl_price": active_order_data.get("planned_sl_price"),
-            "planned_tp_price": active_order_data.get("planned_tp_price"),
-            "exit_price_result": exit_price_result,
-            "tp_price_chart": active_order_data.get("alert_tp_price"), # Zgodnie ze schematem, to ma być cena z alertu TV
-        }
-    except Exception as e:
-        logger.error(f"{log_prefix} Błąd podczas transformacji danych PnL: {e}", exc_info=True)
-        return False
-
-    try:
-        client = bigquery_logger.get_bigquery_client()
-        errors = client.insert_rows_json(bigquery_logger.REAL_TRADES_TABLE_REF, [transformed_data])
-
-        if not errors:
-            logger.info(f"{log_prefix} SUKCES! Pomyślnie zapisano wynik transakcji do BigQuery.")
+            if exit_type in ["TakeProfit", "StopLoss"]:
+                active_order_data = state_manager.get_active_order_by_tpsl_order_id(order_id_from_pnl)
             
-            if is_matched:
-                order_link_id_to_delete = active_order_data.get('id')
-                if order_link_id_to_delete:
-                    logger.info(f"{log_prefix} Sprzątanie: Usuwanie dokumentu '{order_link_id_to_delete}' z kolekcji active_orders.")
-                    state_manager.delete_active_order_by_id(order_link_id_to_delete)
+            if not active_order_data:
+                if exit_type in ["TakeProfit", "StopLoss"]:
+                    logger.warning(f"[{symbol}] Nie znaleziono dopasowania po tp/sl OrderId. Próbuję metody fallback...")
                 else:
-                    logger.error(f"{log_prefix} BŁĄD KRYTYCZNY: Nie można usunąć rekordu, ponieważ 'id' (orderLinkId) nie zostało znalezione w dopasowanych danych.")
+                    logger.info(f"[{symbol}] Typ zamknięcia to '{exit_type}'. Próbuję dopasowania po orderLinkId...")
+
+                order_link_id_from_pnl = pnl_record.get("orderLinkId")
+                if order_link_id_from_pnl:
+                    active_order_data = state_manager.get_active_order_by_id(order_link_id_from_pnl)
+                else:
+                    order_history = executor.get_order_history_by_id(order_id=order_id_from_pnl)
+                    if order_history and order_history.get("orderLinkId"):
+                        order_link_id = order_history.get("orderLinkId")
+                        active_order_data = state_manager.get_active_order_by_id(order_link_id)
+
+            if not active_order_data:
+                updated_time_ms = int(pnl_record.get("updatedTime", 0))
+                record_ts_dt = datetime.fromtimestamp(updated_time_ms / 1000, tz=timezone.utc)
+                
+                if current_cycle_start_time - record_ts_dt < grace_period_delta:
+                    logger.warning(f"[PNL_LOGGER][ODROCZENIE] Nie znaleziono dopasowania dla świeżej transakcji. Pomijam, spróbuję w następnym cyklu.")
+                    continue
+                else:
+                    logger.warning(f"[PNL_LOGGER] OSTATECZNIE nie znaleziono dopasowania dla orderId '{order_id_from_pnl}'.")
+                    active_order_data = {}
+            else:
+                logger.info(f"[PNL_LOGGER] SUKCES! Znaleziono dopasowanie dla transakcji.")
+
+            if log_real_trade_result(pnl_record, active_order_data):
+                processed_count += 1
             
-            return True
-        else:
-            logger.error(f"{log_prefix} Błąd podczas wstawiania wierszy do BigQuery: {errors}. Dokument w active_orders NIE został usunięty.")
-            return False
-    except Exception as e:
-        logger.critical(f"{log_prefix} Krytyczny błąd podczas zapisu do BigQuery: {e}. Dokument w active_orders NIE został usunięty.", exc_info=True)
-        return False
+            updated_time_ms = int(pnl_record.get("updatedTime", 0))
+            if updated_time_ms > 0:
+                record_ts_dt = datetime.fromtimestamp(updated_time_ms / 1000, tz=timezone.utc)
+                if record_ts_dt > new_max_ts_dt:
+                    new_max_ts_dt = record_ts_dt
+
+        except Exception as e:
+            logger.error(f"[PNL_LOGGER] Krytyczny błąd podczas przetwarzania rekordu dla {symbol} [OrderID: {order_id_from_pnl}]. Błąd: {e}", exc_info=True)
+            continue
+    
+    final_timestamp_to_save = max(new_max_ts_dt, current_cycle_start_time)
+    save_last_processed_timestamp(final_timestamp_to_save, "pnl_logger_last_fetch_state")
+    logger.info(f"[PNL_LOGGER] Zakończono cykl. Przetworzono {processed_count} rekordów. Zaktualizowano znacznik czasu na {final_timestamp_to_save.isoformat()}.")
+    return processed_count
+
 
 def round_price_by_tick(price: float, tick_size: str, direction: str) -> float:
     price_decimal = Decimal(str(price))
