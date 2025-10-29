@@ -7,8 +7,8 @@ BOT_CONFIG_COLLECTION = "bot_config"
 LATEST_KLINES_COLLECTION = "latest_klines"
 ANALYTICAL_CASES_COLLECTION = "analytical_cases"
 ACTIVE_ORDERS_COLLECTION = "active_orders"
-PROCESSED_ORDER_IDS_COLLECTION = "processed_order_ids" # Dla zapewnienia idempotentności
-
+PROCESSED_ALERT_IDS_COLLECTION = "processed_alert_ids"
+PROCESSED_ORDER_IDS_COLLECTION = "processed_pnl_ids" # ZMIENIONA NAZWA DLA JASNOŚCI
 
 # Nazwy dokumentów i pól
 SYMBOLS_CONFIG_DOC_ID = "symbols_config"

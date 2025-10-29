@@ -38,8 +38,7 @@ def process_new_alerts(executor: BybitExecutor):
     else:
         logger.info("Brak nowych alertów do przetworzenia.")
 
-# Lokalizacja: bot_service/bot_logic.py
-# ZASTĄP FUNKCJĘ '_process_alerts_transactionally' PONIŻSZĄ WERSJĄ
+
 
 def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: BybitExecutor):
     """
@@ -51,50 +50,43 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
         logger.error("Nie udało się wczytać zasad instrumentów z Firestore. Przerywam przetwarzanie alertów.")
         return
 
-    # Sortujemy alerty od najstarszego do najnowszego
     alerts.sort(key=lambda a: a.get('received_at', datetime.min.replace(tzinfo=timezone.utc)))
     
-    # Grupujemy alerty po symbolu, aby łatwo znaleźć najnowszy
     latest_alerts_per_symbol: Dict[str, Dict[str, Any]] = {}
     for alert_dict in alerts:
-        try:
-            # Szybka walidacja Pydantic, aby uzyskać symbol
-            symbol = alert_dict.get('symbol')
-            if symbol:
-                latest_alerts_per_symbol[symbol] = alert_dict
-        except Exception:
+        symbol = alert_dict.get('symbol')
+        if symbol:
+            latest_alerts_per_symbol[symbol] = alert_dict
+        else:
             alert_id = alert_dict.get('id', 'unknown_id')
-            logger.warning(f"Pominięto alert {alert_id} z powodu braku symbolu lub błędu parsowania wstępnego.")
+            logger.warning(f"Pominięto alert {alert_id} z powodu braku symbolu.")
 
-    # --- NOWA, POPRAWIONA LOGIKA ---
-    # Przechodzimy po unikalnych symbolach, dla których otrzymaliśmy alerty w tym cyklu
     for symbol, alert_dict in latest_alerts_per_symbol.items():
         alert_id = alert_dict.get('id', 'unknown_id')
         
-        # KROK 1: ZAWSZE ANULUJ STARE ZLECENIA
-        # Robimy to na samym początku dla każdego symbolu, który otrzymał nowy alert.
+        # --- KROK 1: SPRAWDZENIE "WIECZNEJ PAMIĘCI" ---
+        if state_manager.is_alert_processed(alert_id):
+            logger.warning(f"[{symbol}] ODRZUCONO: Alert {alert_id} został już wcześniej przetworzony. Pomijam.")
+            continue
+
         logger.info(f"[{symbol}] Otrzymano nowy alert. Anuluję wszystkie poprzednie, oczekujące zlecenia limit dla tego symbolu.")
         if not executor.cancel_all_open_orders_for_symbol(symbol):
              logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się anulować poprzednich zleceň. Pomijam ten symbol w cyklu, aby uniknąć ryzyka.")
-             continue # Przejdź do następnego symbolu
+             continue
 
         try:
-            # KROK 2: PRZETWÓRZ NAJNOWSZY ALERT
             logger.info(f"--- Rozpoczynam przetwarzanie najnowszego alertu [{symbol}] ID: {alert_id} ---")
             alert_model = AlertData.model_validate(alert_dict)
 
-            # Sprawdzamy, czy nie ma już otwartej pozycji
             open_position_side = executor.get_open_position_side(symbol)
             if open_position_side and open_position_side != "ERROR":
                 logger.warning(f"[{symbol}] ODRZUCONO: Wykryto już otwartą pozycję ({open_position_side}).")
                 continue
 
-            # Walidacja logiki alertu
             if not _correct_and_validate_alert(alert_model):
                 logger.warning(f"[{symbol}] ODRZUCONO: Nowy alert nie przeszedł walidacji logicznej.")
                 continue
 
-            # Reszta logiki pozostaje taka sama...
             rule = instrument_rules.get(symbol)
             if not rule or "tickSize" not in rule or "qtyStep" not in rule:
                 logger.warning(f"[{symbol}] ODRZUCONO (Brak Zasad): Nie znaleziono reguł dla instrumentu.")
@@ -149,12 +141,14 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
                     "alert_tp_price": alert_tp_price_to_save
                 }
                 state_manager.save_active_order(custom_order_link_id, order_data_to_save)
+                
+                # --- KROK 2: ZAPIS DO "WIECZNEJ PAMIĘCI" ---
+                state_manager.mark_alert_as_processed(alert_id)
             else:
                 logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się złożyć zlecenia (brak orderId w odpowiedzi).")
 
         except ValidationError as e:
             logger.error(f"Błąd walidacji danych dla alertu ID: {alert_id}. Dane: {alert_dict}. Błąd Pydantic: {e}")
-            continue
         except BybitAPIError as e:
             logger.error(f"Błąd API Bybit podczas przetwarzania alertu {alert_id}: {e}", exc_info=False)
         except Exception as e:
