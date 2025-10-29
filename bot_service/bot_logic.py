@@ -165,33 +165,41 @@ def _transform_liquidation_record(liq_record: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+# W bot_service/bot_logic.py
+
 def _find_matching_order(pnl_record: Dict[str, Any], all_active_orders_by_symbol: Dict[str, List[Dict]]) -> Optional[Dict[str, Any]]:
     """
     Zaawansowana funkcja dopasowująca rekord PnL do zlecenia w Firestore.
     """
     symbol = pnl_record.get("symbol")
-    if not symbol or symbol not in all_active_orders_by_symbol:
+    order_id_from_pnl = pnl_record.get("orderId")
+
+    if not symbol or not order_id_from_pnl:
         return None
 
-    # --- Metoda 1: Dopasowanie po ID zlecenia TP/SL (najszybsza i preferowana) ---
-    order_id_from_pnl = pnl_record.get("orderId")
-    if order_id_from_pnl:
-        for order_data in all_active_orders_by_symbol[symbol]:
-            if order_data.get('tpOrderId') == order_id_from_pnl or order_data.get('slOrderId') == order_id_from_pnl:
-                logger.info(f"[{symbol}] MATCH FOUND (Method 1: TP/SL OrderID): PnL OrderID {order_id_from_pnl} matched.")
-                return order_data
+    # --- Metoda 0: Dopasowanie po orderLinkId (NAJWAŻNIEJSZA I NAJBARDZIEJ NIEZAWODNA) ---
+    # Sprawdzamy, czy orderId z PnL to tak naprawdę nasz orderLinkId (ID dokumentu).
+    for order_data in all_active_orders_by_symbol.get(symbol, []):
+        if order_data.get('id') == order_id_from_pnl:
+            logger.info(f"[{symbol}] MATCH FOUND (Method 0: Direct orderLinkId): PnL OrderID {order_id_from_pnl} matched document ID.")
+            return order_data
 
-    # --- Metoda 2: Dopasowanie po czasie otwarcia (niezawodny fallback) ---
+    # --- Metoda 1: Dopasowanie po ID zlecenia TP/SL (standardowa ścieżka) ---
+    for order_data in all_active_orders_by_symbol.get(symbol, []):
+        if order_data.get('tpOrderId') == order_id_from_pnl or order_data.get('slOrderId') == order_id_from_pnl:
+            logger.info(f"[{symbol}] MATCH FOUND (Method 1: TP/SL OrderID): PnL OrderID {order_id_from_pnl} matched.")
+            return order_data
+
+    # --- Metoda 2: Dopasowanie po czasie otwarcia (ostateczny fallback) ---
     bybit_entry_ts_ms = int(pnl_record.get('createdTime', 0))
     if bybit_entry_ts_ms == 0:
         return None
     
     bybit_entry_dt = datetime.fromtimestamp(bybit_entry_ts_ms / 1000, tz=timezone.utc)
-    time_tolerance = timedelta(minutes=2) # Tolerancja 2 minut na opóźnienia
+    time_tolerance = timedelta(minutes=2)
 
-    for order_data in all_active_orders_by_symbol[symbol]:
+    for order_data in all_active_orders_by_symbol.get(symbol, []):
         firestore_entry_dt = order_data.get('created_at')
-        # Upewnijmy się, że mamy do czynienia z obiektem datetime ze strefą czasową
         if isinstance(firestore_entry_dt, datetime) and firestore_entry_dt.tzinfo is None:
              firestore_entry_dt = firestore_entry_dt.replace(tzinfo=timezone.utc)
 
