@@ -285,3 +285,37 @@ class BybitExecutor:
         except Exception as e:
             logger.critical(f"[{api_symbol}] KRYTYCZNY BŁĄD podczas wysyłania awaryjnego zlecenia zamknięcia: {e}", exc_info=True)
             return False
+
+    def get_position_info(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Pobiera informacje o otwartej pozycji dla danego symbolu."""
+        api_symbol = symbol.replace('.P', '')
+        params = {"category": "linear", "symbol": api_symbol}
+        try:
+            result = self._send_request("GET", "/v5/position/list", params=params)
+            if result and result.get('list'):
+                position_data = result['list'][0]
+                if float(position_data.get("size", "0")) > 0:
+                    return position_data
+            return None
+        except (RequestException, BybitAPIError) as e:
+            logger.error(f"[{symbol}] Błąd podczas pobierania informacji o pozycji: {e}")
+            return None
+
+    def find_tpsl_order_ids(self, symbol: str, order_data: Dict[str, Any]) -> (Optional[str], Optional[str]):
+        """
+        Pomocnicza funkcja do znajdowania ID zleceń TP/SL po ich cenie.
+        Używana do wzbogacania danych, a nie do krytycznej weryfikacji.
+        """
+        tp_order_id, sl_order_id = None, None
+        try:
+            active_stop_orders = self.get_active_tp_sl_orders(symbol)
+            for stop_order in active_stop_orders:
+                trigger_price = float(stop_order.get('triggerPrice', 0))
+                if math.isclose(trigger_price, order_data.get('planned_tp_price')):
+                    tp_order_id = stop_order.get('orderId')
+                elif math.isclose(trigger_price, order_data.get('planned_sl_price')):
+                    sl_order_id = stop_order.get('orderId')
+            return tp_order_id, sl_order_id
+        except Exception as e:
+            logger.warning(f"[{symbol}] Nie udało się pobrać ID zleceň TP/SL: {e}")
+            return None, None

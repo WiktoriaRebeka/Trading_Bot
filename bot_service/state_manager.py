@@ -188,3 +188,13 @@ def mark_alert_as_processed(alert_id: str):
         logger.info(f"Oznaczono alert {alert_id} jako permanentnie przetworzony.")
     except Exception as e:
         logger.error(f"Błąd podczas oznaczania alertu {alert_id} jako przetworzony: {e}", exc_info=True)
+
+def is_pnl_record_processed(order_id: str) -> bool:
+    """Sprawdza, czy rekord PnL o danym orderId został już przetworzony."""
+    if not order_id: return True # Unikaj przetwarzania rekordów bez ID
+    try:
+        doc_ref = _get_db().collection(constants.PROCESSED_ORDER_IDS_COLLECTION).document(order_id)
+        return doc_ref.get().exists
+    except Exception as e:
+        logger.error(f"Błąd podczas sprawdzania blokady PnL dla {order_id}: {e}", exc_info=True)
+        return True # W razie błędu lepiej założyć, że był przetworzony, niż ryzykować duplikat

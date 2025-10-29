@@ -8,7 +8,7 @@ LATEST_KLINES_COLLECTION = "latest_klines"
 ANALYTICAL_CASES_COLLECTION = "analytical_cases"
 ACTIVE_ORDERS_COLLECTION = "active_orders"
 PROCESSED_ALERT_IDS_COLLECTION = "processed_alert_ids"
-PROCESSED_ORDER_IDS_COLLECTION = "processed_pnl_ids" # ZMIENIONA NAZWA DLA JASNOŚCI
+PROCESSED_ORDER_IDS_COLLECTION = "processed_pnl_ids"
 
 # Nazwy dokumentów i pól
 SYMBOLS_CONFIG_DOC_ID = "symbols_config"
