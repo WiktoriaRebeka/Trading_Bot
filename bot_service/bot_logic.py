@@ -207,41 +207,11 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
 
             logger.info(f"[PNL_LOGGER] Przetwarzanie rekordu dla {symbol} [OrderID z PnL: {order_id_from_pnl}, Typ: {exit_type}]")
             
-            active_order_data = None
-
-            # Główna metoda dopasowania
-            if exit_type in ["TakeProfit", "StopLoss"]:
-                active_order_data = state_manager.get_active_order_by_tpsl_order_id(order_id_from_pnl)
+            # --- FINALNA, NAJPROSTSZA LOGIKA DOPASOWYWANIA ---
+            # Zawsze próbujemy znaleźć dopasowanie po orderId z rekordu PnL w naszych polach tpOrderId/slOrderId.
+            active_order_data = state_manager.get_active_order_by_tpsl_order_id(order_id_from_pnl)
             
-            # --- NOWA, ULEPSZONA LOGIKA FALLBACK ---
             if not active_order_data:
-                logger.warning(f"[{symbol}] Nie znaleziono dopasowania po tp/sl OrderId. Uruchamiam zaawansowany fallback...")
-                
-                # Krok 1: Znajdź orderLinkId z historii zlecenia zamykającego
-                order_history = executor.get_order_history_by_id(order_id=order_id_from_pnl)
-                if order_history and order_history.get("orderLinkId"):
-                    order_link_id = order_history.get("orderLinkId")
-                    logger.info(f"[{symbol}] Odzyskano orderLinkId: {order_link_id} ze zlecenia zamykającego.")
-                    
-                    # Krok 2: Znajdź nasz "złoty rekord" po orderLinkId
-                    potential_match = state_manager.get_active_order_by_id(order_link_id)
-                    
-                    # Krok 3: Sprawdź, czy to na pewno ten - porównaj ceny TP/SL
-                    if potential_match:
-                        logger.info(f"[{symbol}] Znaleziono potencjalne dopasowanie. Weryfikuję ceny TP/SL...")
-                        trigger_price = float(order_history.get("triggerPrice", 0))
-                        
-                        is_tp_match = math.isclose(trigger_price, potential_match.get('planned_tp_price', -1))
-                        is_sl_match = math.isclose(trigger_price, potential_match.get('planned_sl_price', -1))
-
-                        if is_tp_match or is_sl_match:
-                            logger.info(f"[{symbol}] Weryfikacja pomyślna. To jest prawidłowe dopasowanie.")
-                            active_order_data = potential_match
-                        else:
-                            logger.warning(f"[{symbol}] Dopasowanie po orderLinkId nie powiodło się - ceny TP/SL się nie zgadzają.")
-
-            if not active_order_data:
-                # Logika odroczenia i UNMATCHED
                 updated_time_ms = int(pnl_record.get("updatedTime", 0))
                 record_ts_dt = datetime.fromtimestamp(updated_time_ms / 1000, tz=timezone.utc)
                 
