@@ -259,3 +259,29 @@ class BybitExecutor:
         except (RequestException, BybitAPIError) as e:
             logger.error(f"[{symbol}] Błąd podczas pobierania aktywnych zleceň TP/SL: {e}")
             return []
+    def close_position_market(self, symbol: str, qty: float, side: str) -> bool:
+        """
+        Awaryjnie zamyka całą pozycję zleceniem MARKET.
+        """
+        api_symbol = symbol.replace('.P', '')
+        
+        # Strona zlecenia zamykającego jest przeciwna do strony otwierającej
+        close_side = "Sell" if side == "Buy" else "Buy"
+        
+        payload = {
+            "category": "linear",
+            "symbol": api_symbol,
+            "side": close_side,
+            "orderType": "Market",
+            "qty": str(qty),
+            "reduceOnly": True # Gwarantuje, że zlecenie tylko zamknie pozycję, a nie otworzy nowej
+        }
+        
+        logger.warning(f"[{api_symbol}] Wysyłanie awaryjnego zlecenia MARKET zamykającego pozycję: {payload}")
+        try:
+            self._send_request("POST", "/v5/order/create", params=payload)
+            logger.info(f"[{api_symbol}] Awaryjne zlecenie zamknięcia wysłane pomyślnie.")
+            return True
+        except Exception as e:
+            logger.critical(f"[{api_symbol}] KRYTYCZNY BŁĄD podczas wysyłania awaryjnego zlecenia zamknięcia: {e}", exc_info=True)
+            return False

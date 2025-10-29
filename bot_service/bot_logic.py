@@ -308,27 +308,24 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
 
 def update_filled_orders(executor: BybitExecutor):
     """
-    Cykl monitorujący zlecenia. Działa jako skrypt naprawczy dla starych zleceň
-    bez statusu oraz jako normalny proces dla nowych zleceň ze statusem 'PLACED'.
+    Cykl monitorujący zlecenia. Weryfikuje, czy zlecenie zostało zrealizowane
+    i wzbogaca rekord o ID zleceń TP/SL. Posiada mechanizm awaryjnego zamykania
+    pozycji, jeśli TP/SL nie zostały poprawnie ustawione przez giełdę.
     """
     logger.info("[ORDER_UPDATER] Rozpoczynam cykl aktualizacji aktywnych zleceň.")
     
     placed_orders_docs = list(state_manager.get_orders_by_status('PLACED'))
-    logger.info(f"[ORDER_UPDATER] Znaleziono {len(placed_orders_docs)} zleceń ze statusem 'PLACED'.")
-
     legacy_orders_docs = list(state_manager.get_orders_without_status())
-    logger.info(f"[ORDER_UPDATER] Znaleziono {len(legacy_orders_docs)} starych zleceń bez statusu do naprawy.")
-
-    all_orders_to_process = {doc.id: doc for doc in placed_orders_docs}
-    all_orders_to_process.update({doc.id: doc for doc in legacy_orders_docs})
     
-    if not all_orders_to_process:
-        logger.info("[ORDER_UPDATER] Brak zleceň do przetworzenia w tym cyklu.")
+    all_placed_orders = {doc.id: doc for doc in placed_orders_docs}
+    all_placed_orders.update({doc.id: doc for doc in legacy_orders_docs})
+    
+    if not all_placed_orders:
+        logger.info("[ORDER_UPDATER] Brak zleceň oczekujących na wejście do przetworzenia.")
         return
 
-    logger.info(f"[ORDER_UPDATER] Łącznie do przetworzenia: {len(all_orders_to_process)} zleceń.")
-
-    for order_doc in all_orders_to_process.values():
+    logger.info(f"[ORDER_UPDATER] Przetwarzam {len(all_placed_orders)} zleceń oczekujących na wejście.")
+    for order_doc in all_placed_orders.values():
         order_data = order_doc.to_dict()
         order_link_id = order_doc.id
         symbol = order_data.get('symbol')
@@ -337,10 +334,9 @@ def update_filled_orders(executor: BybitExecutor):
             continue
 
         log_prefix = f"[{symbol}|{order_link_id}]"
-        logger.info(f"{log_prefix} Sprawdzam status zlecenia...")
+        logger.info(f"{log_prefix} Sprawdzam status zlecenia (status: PLACED/legacy)...")
 
         try:
-            # --- KRYTYCZNA ZMIANA: Szukamy po orderLinkId ---
             order_status_data = executor.get_open_order_by_id(order_link_id=order_link_id)
             
             if not order_status_data:
@@ -348,12 +344,12 @@ def update_filled_orders(executor: BybitExecutor):
                 order_status_data = executor.get_order_history_by_id(order_link_id=order_link_id)
 
             if not order_status_data:
-                logger.warning(f"{log_prefix} Nie można odnaleźć zlecenia ani w aktywnych, ani w historii. Oznaczam jako 'UNKNOWN'.")
+                logger.warning(f"{log_prefix} Nie można odnaleźć zlecenia. Oznaczam jako 'UNKNOWN'.")
                 state_manager.update_active_order(order_link_id, {'status': 'UNKNOWN'})
                 continue
 
             if order_status_data.get('orderStatus') == 'Filled':
-                logger.info(f"{log_prefix} Zlecenie otwierające zrealizowane! Szukam powiązanych zleceň TP/SL.")
+                logger.info(f"{log_prefix} Zlecenie otwierające zrealizowane! Weryfikuję zlecenia TP/SL.")
                 
                 active_stop_orders = executor.get_active_tp_sl_orders(symbol)
                 
@@ -375,21 +371,32 @@ def update_filled_orders(executor: BybitExecutor):
                         'position_opened_at': datetime.now(timezone.utc)
                     }
                     state_manager.update_active_order(order_link_id, updates)
-                    logger.info(f"{log_prefix} SUKCES! Zaktualizowano rekord o ID zleceň TP: {tp_order_id} i SL: {sl_order_id}.")
+                    logger.info(f"{log_prefix} SUKCES! Zlecenia TP/SL poprawnie zweryfikowane. ID: TP={tp_order_id}, SL={sl_order_id}.")
                 else:
-                    logger.warning(f"{log_prefix} Zlecenie zrealizowane, ale nie znaleziono pasujących zleceň TP/SL na giełdzie. Spróbuję ponownie w następnym cyklu.")
+                    # --- PROCEDURA AWARYJNA ---
+                    logger.critical(f"{log_prefix} KRYTYCZNY BŁĄD BEZPIECZEŃSTWA: Pozycja otwarta bez TP i/lub SL! Uruchamiam awaryjne zamknięcie pozycji.")
+                    
+                    position_qty = float(order_status_data.get('cumExecQty', 0))
+                    position_side = order_status_data.get('side') # 'Buy' lub 'Sell'
+
+                    if executor.close_position_market(symbol, position_qty, position_side):
+                        logger.info(f"{log_prefix} Pozycja została awaryjnie zamknięta zleceniem MARKET.")
+                        state_manager.update_active_order(order_link_id, {'status': 'CLOSED_EMERGENCY', 'reason': 'Missing TP/SL on exchange.'})
+                    else:
+                        logger.critical(f"{log_prefix} KRYTYCZNY BŁĄD SYSTEMOWY: Nie udało się awaryjnie zamknąć pozycji! Wymagana natychmiastowa interwencja manualna!")
+                        state_manager.update_active_order(order_link_id, {'status': 'ERROR_NEEDS_MANUAL_CLOSURE'})
 
             elif order_status_data.get('orderStatus') in ['Cancelled', 'Rejected']:
                  logger.warning(f"{log_prefix} Zlecenie otwierające zostało anulowane/odrzucone. Oznaczam jako anulowane.")
                  state_manager.update_active_order(order_link_id, {'status': 'CANCELLED'})
             
             elif order_status_data.get('orderStatus') in ['New', 'PartiallyFilled']:
-                logger.info(f"{log_prefix} Zlecenie jest wciąż aktywne (status: {order_status_data.get('orderStatus')}). Dodaję status 'PLACED' i sprawdzę ponownie.")
+                logger.info(f"{log_prefix} Zlecenie wciąż aktywne (status: {order_status_data.get('orderStatus')}). Sprawdzę ponownie.")
                 if 'status' not in order_data:
                     state_manager.update_active_order(order_link_id, {'status': 'PLACED'})
 
         except Exception as e:
-            logger.error(f"{log_prefix} Błąd podczas aktualizacji zlecenia: {e}", exc_info=True)
+            logger.error(f"{log_prefix} Błąd podczas aktualizacji zlecenia PLACED: {e}", exc_info=True)
 
 
 def repair_old_orders():
