@@ -286,6 +286,7 @@ class BybitExecutor:
             logger.critical(f"[{api_symbol}] KRYTYCZNY BŁĄD podczas wysyłania awaryjnego zlecenia zamknięcia: {e}", exc_info=True)
             return False
 
+
     def get_position_info(self, symbol: str) -> Optional[Dict[str, Any]]:
         """Pobiera informacje o otwartej pozycji dla danego symbolu."""
         api_symbol = symbol.replace('.P', '')
@@ -294,6 +295,7 @@ class BybitExecutor:
             result = self._send_request("GET", "/v5/position/list", params=params)
             if result and result.get('list'):
                 position_data = result['list'][0]
+                # Zwróć dane tylko jeśli pozycja faktycznie istnieje (ma wielkość > 0)
                 if float(position_data.get("size", "0")) > 0:
                     return position_data
             return None
@@ -306,11 +308,14 @@ class BybitExecutor:
         Pomocnicza funkcja do znajdowania ID zleceń TP/SL po ich cenie.
         Używana do wzbogacania danych, a nie do krytycznej weryfikacji.
         """
+        import math # Upewnij się, że math jest zaimportowane w pliku
+        
         tp_order_id, sl_order_id = None, None
         try:
             active_stop_orders = self.get_active_tp_sl_orders(symbol)
             for stop_order in active_stop_orders:
                 trigger_price = float(stop_order.get('triggerPrice', 0))
+                # Używamy math.isclose do bezpiecznego porównywania liczb zmiennoprzecinkowych
                 if math.isclose(trigger_price, order_data.get('planned_tp_price')):
                     tp_order_id = stop_order.get('orderId')
                 elif math.isclose(trigger_price, order_data.get('planned_sl_price')):

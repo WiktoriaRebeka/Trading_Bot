@@ -165,11 +165,99 @@ def _transform_liquidation_record(liq_record: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-# W bot_service/bot_logic.py
+
+def update_filled_orders(executor: BybitExecutor):
+    """
+    Cykl monitorujący zlecenia. Weryfikuje, czy zlecenie zostało zrealizowane
+    i wzbogaca rekord o ID zleceń TP/SL. Posiada mechanizm awaryjnego zamykania
+    pozycji, jeśli TP/SL nie zostały poprawnie ustawione przez giełdę.
+    """
+    logger.info("[ORDER_UPDATER] Rozpoczynam cykl aktualizacji aktywnych zleceň.")
+    
+    placed_orders_docs = list(state_manager.get_orders_by_status('PLACED'))
+    legacy_orders_docs = list(state_manager.get_orders_without_status())
+    all_orders_to_check = placed_orders_docs + legacy_orders_docs
+
+    if not all_orders_to_check:
+        logger.info("[ORDER_UPDATER] Brak zleceň oczekujących na wejście do przetworzenia.")
+        return
+
+    logger.info(f"[ORDER_UPDATER] Przetwarzam {len(all_orders_to_check)} zleceń oczekujących na wejście.")
+    for order_doc in all_orders_to_check:
+        order_data = order_doc.to_dict()
+        order_link_id = order_doc.id
+        symbol = order_data.get('symbol')
+        log_prefix = f"[{symbol}|{order_link_id}]"
+
+        try:
+            # Zawsze sprawdzaj historię, jest bardziej niezawodna dla szybko realizowanych zleceń
+            entry_order_details = executor.get_order_history_by_id(order_link_id=order_link_id)
+
+            if not entry_order_details:
+                logger.warning(f"{log_prefix} Nie można odnaleźć zlecenia w historii. Oznaczam jako 'UNKNOWN'.")
+                state_manager.update_active_order(order_link_id, {'status': 'UNKNOWN'})
+                continue
+
+            order_status = entry_order_details.get('orderStatus')
+
+            if order_status == 'Filled':
+                logger.info(f"{log_prefix} Zlecenie otwierające zrealizowane! Weryfikuję pozycję...")
+                
+                # KROK KRYTYCZNY: Daj giełdzie sekundę na synchronizację stanu.
+                time.sleep(1) 
+
+                # --- NOWA, KULOODPORNA LOGIKA WERYFIKACJI ---
+                position_info = executor.get_position_info(symbol)
+
+                if position_info:
+                    tp_set = position_info.get('takeProfit') and float(position_info.get('takeProfit')) > 0
+                    sl_set = position_info.get('stopLoss') and float(position_info.get('stopLoss')) > 0
+
+                    if tp_set and sl_set:
+                        # ŚCIEŻKA SZCZĘŚLIWA: Pozycja jest bezpieczna
+                        logger.info(f"{log_prefix} SUKCES! Pozycja ma poprawnie ustawione TP={position_info.get('takeProfit')} i SL={position_info.get('stopLoss')}.")
+                        
+                        tp_order_id, sl_order_id = executor.find_tpsl_order_ids(symbol, order_data)
+                        
+                        updates = {
+                            'status': 'OPEN',
+                            'tpOrderId': tp_order_id,
+                            'slOrderId': sl_order_id,
+                            'position_opened_at': datetime.now(timezone.utc)
+                        }
+                        state_manager.update_active_order(order_link_id, updates)
+                    else:
+                        # ŚCIEŻKA AWARYJNA: Pozycja jest "naga"
+                        logger.critical(f"{log_prefix} KRYTYCZNY BŁĄD BEZPIECZEŃSTWA: Pozycja otwarta BEZ TP/SL! Uruchamiam awaryjne zamknięcie.")
+                        
+                        position_qty = float(position_info.get('size', 0))
+                        position_side = position_info.get('side') # 'Buy' lub 'Sell'
+
+                        if position_qty > 0 and executor.close_position_market(symbol, position_qty, position_side):
+                            logger.info(f"{log_prefix} Pozycja została awaryjnie zamknięta zleceniem MARKET.")
+                            state_manager.update_active_order(order_link_id, {'status': 'CLOSED_EMERGENCY', 'reason': 'Missing TP/SL on position.'})
+                        else:
+                            logger.critical(f"{log_prefix} KRYTYCZNY BŁĄD SYSTEMOWY: Nie udało się awaryjnie zamknąć pozycji! Wymagana natychmiastowa interwencja manualna!")
+                            state_manager.update_active_order(order_link_id, {'status': 'ERROR_NEEDS_MANUAL_CLOSURE'})
+                else:
+                    logger.warning(f"{log_prefix} Nie udało się pobrać informacji o pozycji dla {symbol} zaraz po jej otwarciu. Spróbuję ponownie w następnym cyklu.")
+
+            elif order_status in ['Cancelled', 'Rejected']:
+                 logger.warning(f"{log_prefix} Zlecenie otwierające zostało anulowane/odrzucone. Usuwam z aktywnych.")
+                 state_manager.delete_active_order_by_id(order_link_id)
+            
+            elif order_status in ['New', 'PartiallyFilled']:
+                logger.info(f"{log_prefix} Zlecenie wciąż aktywne (status: {order_status}). Sprawdzę ponownie.")
+                if 'status' not in order_data:
+                    state_manager.update_active_order(order_link_id, {'status': 'PLACED'})
+
+        except Exception as e:
+            logger.error(f"{log_prefix} Błąd podczas aktualizacji zlecenia: {e}", exc_info=True)
+
 
 def _find_matching_order(pnl_record: Dict[str, Any], all_active_orders_by_symbol: Dict[str, List[Dict]]) -> Optional[Dict[str, Any]]:
     """
-    Zaawansowana funkcja dopasowująca rekord PnL do zlecenia w Firestore.
+    Zaawansowana, hierarchiczna funkcja dopasowująca rekord PnL do zlecenia w Firestore.
     """
     symbol = pnl_record.get("symbol")
     order_id_from_pnl = pnl_record.get("orderId")
@@ -177,15 +265,17 @@ def _find_matching_order(pnl_record: Dict[str, Any], all_active_orders_by_symbol
     if not symbol or not order_id_from_pnl:
         return None
 
-    # --- Metoda 0: Dopasowanie po orderLinkId (NAJWAŻNIEJSZA I NAJBARDZIEJ NIEZAWODNA) ---
-    # Sprawdzamy, czy orderId z PnL to tak naprawdę nasz orderLinkId (ID dokumentu).
-    for order_data in all_active_orders_by_symbol.get(symbol, []):
+    orders_for_symbol = all_active_orders_by_symbol.get(symbol, [])
+
+    # --- Metoda 0: Dopasowanie po orderLinkId (NAJWAŻNIEJSZA) ---
+    # Sprawdza, czy orderId z PnL to tak naprawdę nasz orderLinkId (ID dokumentu).
+    for order_data in orders_for_symbol:
         if order_data.get('id') == order_id_from_pnl:
             logger.info(f"[{symbol}] MATCH FOUND (Method 0: Direct orderLinkId): PnL OrderID {order_id_from_pnl} matched document ID.")
             return order_data
 
     # --- Metoda 1: Dopasowanie po ID zlecenia TP/SL (standardowa ścieżka) ---
-    for order_data in all_active_orders_by_symbol.get(symbol, []):
+    for order_data in orders_for_symbol:
         if order_data.get('tpOrderId') == order_id_from_pnl or order_data.get('slOrderId') == order_id_from_pnl:
             logger.info(f"[{symbol}] MATCH FOUND (Method 1: TP/SL OrderID): PnL OrderID {order_id_from_pnl} matched.")
             return order_data
@@ -198,7 +288,7 @@ def _find_matching_order(pnl_record: Dict[str, Any], all_active_orders_by_symbol
     bybit_entry_dt = datetime.fromtimestamp(bybit_entry_ts_ms / 1000, tz=timezone.utc)
     time_tolerance = timedelta(minutes=2)
 
-    for order_data in all_active_orders_by_symbol.get(symbol, []):
+    for order_data in orders_for_symbol:
         firestore_entry_dt = order_data.get('created_at')
         if isinstance(firestore_entry_dt, datetime) and firestore_entry_dt.tzinfo is None:
              firestore_entry_dt = firestore_entry_dt.replace(tzinfo=timezone.utc)
@@ -218,7 +308,7 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
     
     GRACE_PERIOD_MINUTES = 5
     grace_period_delta = timedelta(minutes=GRACE_PERIOD_MINUTES)
-    LOOKBACK_BUFFER_HOURS = 24 # Zwiększamy bufor dla pewności
+    LOOKBACK_BUFFER_HOURS = 24
     start_time_with_buffer = last_check_ts_dt - timedelta(hours=LOOKBACK_BUFFER_HOURS)
     start_time_ms = int(start_time_with_buffer.timestamp() * 1000)
     
@@ -233,12 +323,11 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
         save_last_processed_timestamp(current_cycle_start_time, "pnl_logger_last_fetch_state")
         return 0
 
-    # Pobierz wszystkie aktywne zlecenia raz i zgrupuj je po symbolu dla wydajności
     all_active_orders = state_manager.get_all_active_orders()
     all_active_orders_by_symbol: Dict[str, List[Dict]] = {}
     for doc in all_active_orders:
         order_data = doc.to_dict()
-        order_data['id'] = doc.id # Dodajemy ID dokumentu do danych
+        order_data['id'] = doc.id
         symbol = order_data.get('symbol')
         if symbol:
             if symbol not in all_active_orders_by_symbol:
@@ -253,7 +342,6 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
         symbol = pnl_record.get("symbol")
         
         try:
-            # Sprawdź, czy rekord nie został już przetworzony (używamy blokady)
             if state_manager.is_pnl_record_processed(order_id_from_pnl):
                 logger.info(f"[{symbol}] Pomijam już przetworzony rekord PnL o ID: {order_id_from_pnl}")
                 continue
@@ -267,7 +355,7 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
                     continue
                 else:
                     logger.warning(f"[{symbol}] OSTATECZNIE nie znaleziono dopasowania dla rekordu PnL. Zostanie zalogowany jako UNMATCHED.")
-                    active_order_data = {} # Pusty słownik dla logowania jako UNMATCHED
+                    active_order_data = {}
 
             if log_real_trade_result(pnl_record, active_order_data):
                 processed_count += 1
@@ -316,97 +404,6 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
     logger.info(f"Alert [{alert.symbol}] przeszedł walidację. Kierunek: {alert.direction}, Ryzyko: {risk_perc}%.")
     return True
 
-
-
-def update_filled_orders(executor: BybitExecutor):
-    """
-    Cykl monitorujący zlecenia. Weryfikuje, czy zlecenie zostało zrealizowane
-    i wzbogaca rekord o ID zleceń TP/SL. Posiada mechanizm awaryjnego zamykania
-    pozycji, jeśli TP/SL nie zostały poprawnie ustawione przez giełdę.
-    """
-    logger.info("[ORDER_UPDATER] Rozpoczynam cykl aktualizacji aktywnych zleceň.")
-    
-    # Pobieramy zlecenia ze statusem PLACED lub bez statusu (dla kompatybilności wstecznej)
-    placed_orders_docs = list(state_manager.get_orders_by_status('PLACED'))
-    legacy_orders_docs = list(state_manager.get_orders_without_status())
-    all_orders_to_check = placed_orders_docs + legacy_orders_docs
-
-    if not all_orders_to_check:
-        logger.info("[ORDER_UPDATER] Brak zleceň oczekujących na wejście do przetworzenia.")
-        return
-
-    logger.info(f"[ORDER_UPDATER] Przetwarzam {len(all_orders_to_check)} zleceń oczekujących na wejście.")
-    for order_doc in all_orders_to_check:
-        order_data = order_doc.to_dict()
-        order_link_id = order_doc.id
-        symbol = order_data.get('symbol')
-        log_prefix = f"[{symbol}|{order_link_id}]"
-
-        try:
-            # Sprawdź status zlecenia wejścia
-            entry_order_details = executor.get_order_history_by_id(order_link_id=order_link_id)
-
-            if not entry_order_details:
-                logger.warning(f"{log_prefix} Nie można odnaleźć zlecenia w historii. Oznaczam jako 'UNKNOWN'.")
-                state_manager.update_active_order(order_link_id, {'status': 'UNKNOWN'})
-                continue
-
-            order_status = entry_order_details.get('orderStatus')
-
-            if order_status == 'Filled':
-                logger.info(f"{log_prefix} Zlecenie otwierające zrealizowane! Weryfikuję pozycję...")
-                
-                # Dajemy giełdzie sekundę na synchronizację stanu. To krytycznie ważne.
-                time.sleep(1) 
-
-                # --- NOWA, NIEZAWODNA LOGIKA WERYFIKACJI ---
-                # Zamiast szukać zleceń, sprawdzamy bezpośrednio pozycję.
-                position_info = executor.get_position_info(symbol)
-
-                if position_info:
-                    tp_set = position_info.get('takeProfit') and float(position_info.get('takeProfit')) > 0
-                    sl_set = position_info.get('stopLoss') and float(position_info.get('stopLoss')) > 0
-
-                    if tp_set and sl_set:
-                        logger.info(f"{log_prefix} SUKCES! Pozycja ma poprawnie ustawione TP/SL. TP={position_info.get('takeProfit')}, SL={position_info.get('stopLoss')}.")
-                        
-                        # Opcjonalnie: nadal możemy pobrać ID zleceń TP/SL dla spójności danych
-                        tp_order_id, sl_order_id = executor.find_tpsl_order_ids(symbol, order_data)
-                        
-                        updates = {
-                            'status': 'OPEN',
-                            'tpOrderId': tp_order_id,
-                            'slOrderId': sl_order_id,
-                            'position_opened_at': datetime.now(timezone.utc)
-                        }
-                        state_manager.update_active_order(order_link_id, updates)
-                    else:
-                        # --- MECHANIZM AWARYJNY ---
-                        logger.critical(f"{log_prefix} KRYTYCZNY BŁĄD BEZPIECZEŃSTWA: Pozycja otwarta BEZ TP/SL! Uruchamiam awaryjne zamknięcie.")
-                        
-                        position_qty = float(position_info.get('size', 0))
-                        position_side = position_info.get('side') # 'Buy' lub 'Sell'
-
-                        if position_qty > 0 and executor.close_position_market(symbol, position_qty, position_side):
-                            logger.info(f"{log_prefix} Pozycja została awaryjnie zamknięta zleceniem MARKET.")
-                            state_manager.update_active_order(order_link_id, {'status': 'CLOSED_EMERGENCY', 'reason': 'Missing TP/SL on position.'})
-                        else:
-                            logger.critical(f"{log_prefix} KRYTYCZNY BŁĄD SYSTEMOWY: Nie udało się awaryjnie zamknąć pozycji! Wymagana natychmiastowa interwencja manualna!")
-                            state_manager.update_active_order(order_link_id, {'status': 'ERROR_NEEDS_MANUAL_CLOSURE'})
-                else:
-                    logger.warning(f"{log_prefix} Nie udało się pobrać informacji o pozycji dla {symbol} zaraz po jej otwarciu. Spróbuję ponownie w następnym cyklu.")
-
-            elif order_status in ['Cancelled', 'Rejected']:
-                 logger.warning(f"{log_prefix} Zlecenie otwierające zostało anulowane/odrzucone. Usuwam z aktywnych.")
-                 state_manager.delete_active_order_by_id(order_link_id)
-            
-            elif order_status in ['New', 'PartiallyFilled']:
-                logger.info(f"{log_prefix} Zlecenie wciąż aktywne (status: {order_status}). Sprawdzę ponownie.")
-                if 'status' not in order_data: # Naprawa starych zleceń
-                    state_manager.update_active_order(order_link_id, {'status': 'PLACED'})
-
-        except Exception as e:
-            logger.error(f"{log_prefix} Błąd podczas aktualizacji zlecenia: {e}", exc_info=True)
 
 
 def repair_old_orders():
