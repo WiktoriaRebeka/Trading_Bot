@@ -165,6 +165,8 @@ def _transform_liquidation_record(liq_record: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+# Lokalizacja: bot_service/bot_logic.py
+# ZASTĄP TYLKO TĘ JEDNĄ FUNKCJĘ
 
 def update_filled_orders(executor: BybitExecutor):
     """
@@ -190,23 +192,27 @@ def update_filled_orders(executor: BybitExecutor):
         log_prefix = f"[{symbol}|{order_link_id}]"
 
         try:
-            # Zawsze sprawdzaj historię, jest bardziej niezawodna dla szybko realizowanych zleceń
-            entry_order_details = executor.get_order_history_by_id(order_link_id=order_link_id)
+            # --- NOWA, POPRAWNA LOGIKA SPRAWDZANIA STATUSU ---
+            # Krok 1: Sprawdź, czy zlecenie jest wciąż aktywne.
+            order_details = executor.get_open_order_by_id(order_link_id=order_link_id)
+            
+            # Krok 2: Jeśli nie jest aktywne, sprawdź w historii.
+            if not order_details:
+                logger.info(f"{log_prefix} Zlecenie nie jest już aktywne. Sprawdzam historię...")
+                order_details = executor.get_order_history_by_id(order_link_id=order_link_id)
 
-            if not entry_order_details:
-                logger.warning(f"{log_prefix} Nie można odnaleźć zlecenia w historii. Oznaczam jako 'UNKNOWN'.")
+            # Krok 3: Jeśli nigdzie go nie ma, oznacz jako UNKNOWN.
+            if not order_details:
+                logger.warning(f"{log_prefix} Nie można odnaleźć zlecenia ani w aktywnych, ani w historii. Oznaczam jako 'UNKNOWN'.")
                 state_manager.update_active_order(order_link_id, {'status': 'UNKNOWN'})
                 continue
 
-            order_status = entry_order_details.get('orderStatus')
+            order_status = order_details.get('orderStatus')
 
             if order_status == 'Filled':
                 logger.info(f"{log_prefix} Zlecenie otwierające zrealizowane! Weryfikuję pozycję...")
-                
-                # KROK KRYTYCZNY: Daj giełdzie sekundę na synchronizację stanu.
                 time.sleep(1) 
 
-                # --- NOWA, KULOODPORNA LOGIKA WERYFIKACJI ---
                 position_info = executor.get_position_info(symbol)
 
                 if position_info:
@@ -214,11 +220,8 @@ def update_filled_orders(executor: BybitExecutor):
                     sl_set = position_info.get('stopLoss') and float(position_info.get('stopLoss')) > 0
 
                     if tp_set and sl_set:
-                        # ŚCIEŻKA SZCZĘŚLIWA: Pozycja jest bezpieczna
                         logger.info(f"{log_prefix} SUKCES! Pozycja ma poprawnie ustawione TP={position_info.get('takeProfit')} i SL={position_info.get('stopLoss')}.")
-                        
                         tp_order_id, sl_order_id = executor.find_tpsl_order_ids(symbol, order_data)
-                        
                         updates = {
                             'status': 'OPEN',
                             'tpOrderId': tp_order_id,
@@ -227,17 +230,13 @@ def update_filled_orders(executor: BybitExecutor):
                         }
                         state_manager.update_active_order(order_link_id, updates)
                     else:
-                        # ŚCIEŻKA AWARYJNA: Pozycja jest "naga"
                         logger.critical(f"{log_prefix} KRYTYCZNY BŁĄD BEZPIECZEŃSTWA: Pozycja otwarta BEZ TP/SL! Uruchamiam awaryjne zamknięcie.")
-                        
                         position_qty = float(position_info.get('size', 0))
-                        position_side = position_info.get('side') # 'Buy' lub 'Sell'
+                        position_side = position_info.get('side')
 
                         if position_qty > 0 and executor.close_position_market(symbol, position_qty, position_side):
-                            logger.info(f"{log_prefix} Pozycja została awaryjnie zamknięta zleceniem MARKET.")
                             state_manager.update_active_order(order_link_id, {'status': 'CLOSED_EMERGENCY', 'reason': 'Missing TP/SL on position.'})
                         else:
-                            logger.critical(f"{log_prefix} KRYTYCZNY BŁĄD SYSTEMOWY: Nie udało się awaryjnie zamknąć pozycji! Wymagana natychmiastowa interwencja manualna!")
                             state_manager.update_active_order(order_link_id, {'status': 'ERROR_NEEDS_MANUAL_CLOSURE'})
                 else:
                     logger.warning(f"{log_prefix} Nie udało się pobrać informacji o pozycji dla {symbol} zaraz po jej otwarciu. Spróbuję ponownie w następnym cyklu.")
@@ -252,8 +251,7 @@ def update_filled_orders(executor: BybitExecutor):
                     state_manager.update_active_order(order_link_id, {'status': 'PLACED'})
 
         except Exception as e:
-            logger.error(f"{log_prefix} Błąd podczas aktualizacji zlecenia: {e}", exc_info=True)
-
+            logger.error(f"{log_prefix} Błąd podczas aktualizacji zlecenia: {e}", exc_info=True)       
 
 def _find_matching_order(pnl_record: Dict[str, Any], all_active_orders_by_symbol: Dict[str, List[Dict]]) -> Optional[Dict[str, Any]]:
     """
