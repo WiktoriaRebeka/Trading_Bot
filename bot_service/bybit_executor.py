@@ -1,11 +1,11 @@
 # Lokalizacja: bot_service/bybit_executor.py
 
-
 import logging
 import time
 import hmac
 import hashlib
 import json
+import math
 from typing import Dict, Any, Optional, List
 from urllib.parse import urlencode
 import requests
@@ -78,16 +78,12 @@ class BybitExecutor:
         if not symbol:
             logger.error("Brak 'symbol' w parametrach zlecenia.")
             return None
-            # --- NOWE, TWARDE ZABEZPIECZENIE ---
-        # Sprawdzamy, czy zlecenie jest typu LIMIT i czy ZAWSZE zawiera SL i TP.
         if params.get("orderType") == "Limit":
             if not params.get("stopLoss") or not params.get("takeProfit"):
                 logger.critical(
                     f"[{symbol}] KRYTYCZNA PRÓBA WYSŁANIA ZLECENIA LIMIT BEZ SL/TP! Zlecenie zablokowane. Parametry: {params}"
                 )
-                # Zwracamy None, aby zablokować wysłanie zlecenia
                 return None
-        # --- KONIEC ZABEZPIECZENIA ---
         api_symbol = symbol.replace('.P', '')
         payload = {"category": "linear", "symbol": api_symbol, "side": params['side'], "orderType": params['orderType'], "qty": str(params['qty'])}
         optional_params = ["price", "takeProfit", "stopLoss", "tpTriggerBy", "slTriggerBy", "orderLinkId", "timeInForce"]
@@ -176,15 +172,9 @@ class BybitExecutor:
             return False
 
     def get_order_history_by_id(self, order_id: str = None, order_link_id: str = None) -> Optional[Dict[str, Any]]:
-        """
-        Pobiera szczegóły historycznego zlecenia na podstawie jego orderId LUB orderLinkId.
-        """
         if not order_id and not order_link_id:
             return None
-            
         endpoint = "/v5/order/history"
-        
-        # Wyszukiwanie po orderLinkId jest bardziej niezawodne
         if order_link_id:
             params = {"category": "linear", "orderLinkId": order_link_id}
             try:
@@ -194,7 +184,6 @@ class BybitExecutor:
                     return result['list'][0]
             except Exception:
                 logger.warning(f"Nie udało się sprawdzić historii po orderLinkId {order_link_id}.")
-
         if order_id:
             params = {"category": "linear", "orderId": order_id, "orderFilter": "StopOrder"}
             try:
@@ -204,7 +193,6 @@ class BybitExecutor:
                     return result['list'][0]
             except Exception:
                 logger.warning(f"Nie udało się sprawdzić historii zleceň warunkowych dla {order_id}.")
-
             params = {"category": "linear", "orderId": order_id}
             try:
                 result = self._send_request("GET", endpoint, params=params)
@@ -213,25 +201,18 @@ class BybitExecutor:
                     return result['list'][0]
             except Exception:
                 logger.warning(f"Nie udało się sprawdzić historii zleceň zwykłych dla {order_id}.")
-
         logger.warning(f"Ostatecznie nie znaleziono historii dla orderId: {order_id} / orderLinkId: {order_link_id}.")
         return None
 
     def get_open_order_by_id(self, order_id: str = None, order_link_id: str = None) -> Optional[Dict[str, Any]]:
-        """
-        Pobiera szczegóły AKTYWNEGO, OTWARTEGO zlecenia na podstawie jego
-        orderId LUB orderLinkId.
-        """
         if not order_id and not order_link_id:
             return None
-
         endpoint = "/v5/order/realtime"
         params = {"category": "linear"}
         if order_link_id:
             params["orderLinkId"] = order_link_id
         else:
             params["orderId"] = order_id
-            
         try:
             result = self._send_request("GET", endpoint, params=params)
             if result and result.get('list'):
@@ -243,14 +224,9 @@ class BybitExecutor:
             return None
 
     def get_active_tp_sl_orders(self, symbol: str) -> List[Dict[str, Any]]:
-        """Pobiera listę aktywnych zleceň warunkowych (TP/SL) dla danego symbolu."""
         api_symbol = symbol.replace('.P', '')
         endpoint = "/v5/order/realtime"
-        params = {
-            "category": "linear",
-            "symbol": api_symbol,
-            "orderFilter": "StopOrder"
-        }
+        params = { "category": "linear", "symbol": api_symbol, "orderFilter": "StopOrder" }
         try:
             result = self._send_request("GET", endpoint, params=params)
             order_list = result.get('list', [])
@@ -259,24 +235,14 @@ class BybitExecutor:
         except (RequestException, BybitAPIError) as e:
             logger.error(f"[{symbol}] Błąd podczas pobierania aktywnych zleceň TP/SL: {e}")
             return []
+
     def close_position_market(self, symbol: str, qty: float, side: str) -> bool:
-        """
-        Awaryjnie zamyka całą pozycję zleceniem MARKET.
-        """
         api_symbol = symbol.replace('.P', '')
-        
-        # Strona zlecenia zamykającego jest przeciwna do strony otwierającej
         close_side = "Sell" if side == "Buy" else "Buy"
-        
         payload = {
-            "category": "linear",
-            "symbol": api_symbol,
-            "side": close_side,
-            "orderType": "Market",
-            "qty": str(qty),
-            "reduceOnly": True # Gwarantuje, że zlecenie tylko zamknie pozycję, a nie otworzy nowej
+            "category": "linear", "symbol": api_symbol, "side": close_side,
+            "orderType": "Market", "qty": str(qty), "reduceOnly": True
         }
-        
         logger.warning(f"[{api_symbol}] Wysyłanie awaryjnego zlecenia MARKET zamykającego pozycję: {payload}")
         try:
             self._send_request("POST", "/v5/order/create", params=payload)
@@ -286,16 +252,13 @@ class BybitExecutor:
             logger.critical(f"[{api_symbol}] KRYTYCZNY BŁĄD podczas wysyłania awaryjnego zlecenia zamknięcia: {e}", exc_info=True)
             return False
 
-
     def get_position_info(self, symbol: str) -> Optional[Dict[str, Any]]:
-        """Pobiera informacje o otwartej pozycji dla danego symbolu."""
         api_symbol = symbol.replace('.P', '')
         params = {"category": "linear", "symbol": api_symbol}
         try:
             result = self._send_request("GET", "/v5/position/list", params=params)
             if result and result.get('list'):
                 position_data = result['list'][0]
-                # Zwróć dane tylko jeśli pozycja faktycznie istnieje (ma wielkość > 0)
                 if float(position_data.get("size", "0")) > 0:
                     return position_data
             return None
@@ -304,18 +267,11 @@ class BybitExecutor:
             return None
 
     def find_tpsl_order_ids(self, symbol: str, order_data: Dict[str, Any]) -> (Optional[str], Optional[str]):
-        """
-        Pomocnicza funkcja do znajdowania ID zleceń TP/SL po ich cenie.
-        Używana do wzbogacania danych, a nie do krytycznej weryfikacji.
-        """
-        import math # Upewnij się, że math jest zaimportowane w pliku
-        
         tp_order_id, sl_order_id = None, None
         try:
             active_stop_orders = self.get_active_tp_sl_orders(symbol)
             for stop_order in active_stop_orders:
                 trigger_price = float(stop_order.get('triggerPrice', 0))
-                # Używamy math.isclose do bezpiecznego porównywania liczb zmiennoprzecinkowych
                 if math.isclose(trigger_price, order_data.get('planned_tp_price')):
                     tp_order_id = stop_order.get('orderId')
                 elif math.isclose(trigger_price, order_data.get('planned_sl_price')):

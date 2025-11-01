@@ -11,11 +11,10 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone, timedelta
 from pydantic import ValidationError
 
-from shared_lib.models import AlertData, Kline, AnalyticalCase
+from shared_lib.models import AlertData
 from shared_lib.firebase_client import get_instrument_rules
 from shared_lib.risk_manager import calculate_position_size
 from bot_service import state_manager
-from bot_service.bigquery_logger import log_analysis_result
 from bot_service.pnl_logger_real import log_real_trade_result
 from bot_service.bybit_executor import BybitExecutor, BybitAPIError
 from bot_service.fetch_from_firestore import fetch_new_alerts_since, save_last_processed_timestamp, load_last_processed_timestamp
@@ -23,10 +22,6 @@ from bot_service.fetch_from_firestore import fetch_new_alerts_since, save_last_p
 logger = logging.getLogger(__name__)
 
 def process_new_alerts(executor: BybitExecutor):
-    """
-    Pobiera i przetwarza nowe alerty w trybie transakcyjnym.
-    Jest to główna funkcja wywoływana przez endpoint /process-alerts.
-    """
     logger.info("Uruchamiam cykl przetwarzania nowych alertów.")
     last_ts = load_last_processed_timestamp("alerts_last_fetch_state")
     new_alerts, new_ts = fetch_new_alerts_since(last_ts)
@@ -39,13 +34,7 @@ def process_new_alerts(executor: BybitExecutor):
     else:
         logger.info("Brak nowych alertów do przetworzenia.")
 
-
-
 def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: BybitExecutor):
-    """
-    Przetwarza listę alertów. Gwarantuje, że dla danego symbolu przetwarzany jest
-    tylko najnowszy alert w cyklu, a wszystkie poprzednie zlecenia są anulowane.
-    """
     instrument_rules = get_instrument_rules()
     if not instrument_rules:
         logger.error("Nie udało się wczytać zasad instrumentów z Firestore. Przerywam przetwarzanie alertów.")
@@ -65,7 +54,6 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
     for symbol, alert_dict in latest_alerts_per_symbol.items():
         alert_id = alert_dict.get('id', 'unknown_id')
         
-        # --- KROK 1: SPRAWDZENIE "WIECZNEJ PAMIĘCI" ---
         if state_manager.is_alert_processed(alert_id):
             logger.warning(f"[{symbol}] ODRZUCONO: Alert {alert_id} został już wcześniej przetworzony. Pomijam.")
             continue
@@ -142,8 +130,6 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
                     "alert_tp_price": alert_tp_price_to_save
                 }
                 state_manager.save_active_order(custom_order_link_id, order_data_to_save)
-                
-                # --- KROK 2: ZAPIS DO "WIECZNEJ PAMIĘCI" ---
                 state_manager.mark_alert_as_processed(alert_id)
             else:
                 logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się złożyć zlecenia (brak orderId w odpowiedzi).")
@@ -155,25 +141,7 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
         except Exception as e:
             logger.error(f"Krytyczny błąd podczas przetwarzania alertu {alert_id}: {e}", exc_info=True)
 
-def _transform_liquidation_record(liq_record: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "symbol": liq_record.get("symbol"), "orderId": f"liq_{liq_record.get('symbol')}_{liq_record.get('updatedTime')}",
-        "side": "Buy" if liq_record.get("side") == "Sell" else "Sell", "qty": liq_record.get("size"),
-        "avgEntryPrice": None, "avgExitPrice": liq_record.get("deliveryPrice"), "closedPnl": liq_record.get("realisedPnl"),
-        "cumCommission": "0", "leverage": None, "createdTime": liq_record.get("updatedTime"),
-        "updatedTime": liq_record.get("updatedTime"), "exitType": "Liquidation"
-    }
-
-
-# Lokalizacja: bot_service/bot_logic.py
-# ZASTĄP TYLKO TĘ JEDNĄ FUNKCJĘ
-
 def update_filled_orders(executor: BybitExecutor):
-    """
-    Cykl monitorujący zlecenia. Weryfikuje, czy zlecenie zostało zrealizowane
-    i wzbogaca rekord o ID zleceń TP/SL. Posiada mechanizm awaryjnego zamykania
-    pozycji, jeśli TP/SL nie zostały poprawnie ustawione przez giełdę.
-    """
     logger.info("[ORDER_UPDATER] Rozpoczynam cykl aktualizacji aktywnych zleceň.")
     
     placed_orders_docs = list(state_manager.get_orders_by_status('PLACED'))
@@ -192,16 +160,12 @@ def update_filled_orders(executor: BybitExecutor):
         log_prefix = f"[{symbol}|{order_link_id}]"
 
         try:
-            # --- NOWA, POPRAWNA LOGIKA SPRAWDZANIA STATUSU ---
-            # Krok 1: Sprawdź, czy zlecenie jest wciąż aktywne.
             order_details = executor.get_open_order_by_id(order_link_id=order_link_id)
             
-            # Krok 2: Jeśli nie jest aktywne, sprawdź w historii.
             if not order_details:
                 logger.info(f"{log_prefix} Zlecenie nie jest już aktywne. Sprawdzam historię...")
                 order_details = executor.get_order_history_by_id(order_link_id=order_link_id)
 
-            # Krok 3: Jeśli nigdzie go nie ma, oznacz jako UNKNOWN.
             if not order_details:
                 logger.warning(f"{log_prefix} Nie można odnaleźć zlecenia ani w aktywnych, ani w historii. Oznaczam jako 'UNKNOWN'.")
                 state_manager.update_active_order(order_link_id, {'status': 'UNKNOWN'})
@@ -251,12 +215,9 @@ def update_filled_orders(executor: BybitExecutor):
                     state_manager.update_active_order(order_link_id, {'status': 'PLACED'})
 
         except Exception as e:
-            logger.error(f"{log_prefix} Błąd podczas aktualizacji zlecenia: {e}", exc_info=True)       
+            logger.error(f"{log_prefix} Błąd podczas aktualizacji zlecenia: {e}", exc_info=True)
 
 def _find_matching_order(pnl_record: Dict[str, Any], all_active_orders_by_symbol: Dict[str, List[Dict]]) -> Optional[Dict[str, Any]]:
-    """
-    Zaawansowana, hierarchiczna funkcja dopasowująca rekord PnL do zlecenia w Firestore.
-    """
     symbol = pnl_record.get("symbol")
     order_id_from_pnl = pnl_record.get("orderId")
 
@@ -265,20 +226,16 @@ def _find_matching_order(pnl_record: Dict[str, Any], all_active_orders_by_symbol
 
     orders_for_symbol = all_active_orders_by_symbol.get(symbol, [])
 
-    # --- Metoda 0: Dopasowanie po orderLinkId (NAJWAŻNIEJSZA) ---
-    # Sprawdza, czy orderId z PnL to tak naprawdę nasz orderLinkId (ID dokumentu).
     for order_data in orders_for_symbol:
         if order_data.get('id') == order_id_from_pnl:
             logger.info(f"[{symbol}] MATCH FOUND (Method 0: Direct orderLinkId): PnL OrderID {order_id_from_pnl} matched document ID.")
             return order_data
 
-    # --- Metoda 1: Dopasowanie po ID zlecenia TP/SL (standardowa ścieżka) ---
     for order_data in orders_for_symbol:
         if order_data.get('tpOrderId') == order_id_from_pnl or order_data.get('slOrderId') == order_id_from_pnl:
             logger.info(f"[{symbol}] MATCH FOUND (Method 1: TP/SL OrderID): PnL OrderID {order_id_from_pnl} matched.")
             return order_data
 
-    # --- Metoda 2: Dopasowanie po czasie otwarcia (ostateczny fallback) ---
     bybit_entry_ts_ms = int(pnl_record.get('createdTime', 0))
     if bybit_entry_ts_ms == 0:
         return None
@@ -296,7 +253,6 @@ def _find_matching_order(pnl_record: Dict[str, Any], all_active_orders_by_symbol
             return order_data
             
     return None
-
 
 def log_closed_positions_pnl(executor: BybitExecutor) -> int:
     logger.info("[PNL_LOGGER] Rozpoczynam cykl logowania zamkniętych pozycji.")
@@ -401,8 +357,6 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
         return False
     logger.info(f"Alert [{alert.symbol}] przeszedł walidację. Kierunek: {alert.direction}, Ryzyko: {risk_perc}%.")
     return True
-
-
 
 def repair_old_orders():
     """
