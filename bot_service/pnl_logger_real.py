@@ -41,10 +41,14 @@ def acquire_lock_for_order(order_id: str) -> bool:
         logger.error(f"[PNL_LOCK] Błąd podczas próby założenia blokady dla order_id {order_id}: {e}", exc_info=True)
         return False
 
-# Lokalizacja: bot_service/pnl_logger_real.py
-# ZASTĄP FUNKCJĘ 'log_real_trade_result' PONIŻSZĄ WERSJĄ
 
-def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Dict[str, Any]) -> bool:
+def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[Dict[str, Any]]) -> bool:
+    """
+    Zapisuje wynik rzeczywistej transakcji do BigQuery, dopasowując ją do aktywnego zlecenia.
+    Wersja rozszerzona: próba automatycznego dopasowania zlecenia w przypadku UNMATCHED.
+    """
+    from bot_service import state_manager
+
     order_id = pnl_data.get("orderId", f"unknown_{int(datetime.now().timestamp())}")
     symbol = pnl_data.get("symbol", "unknown")
     log_prefix = f"[PNL_SAVE][{symbol}|{order_id}]"
@@ -53,16 +57,40 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Dict[str,
         logger.error(f"{log_prefix} BigQuery nie zostało zainicjalizowane – pomijam zapis.")
         return False
 
+    # --- 🔒 Zabezpieczenie przed duplikacją ---
     if not acquire_lock_for_order(order_id):
         return False
 
+    # --- 🧠 AUTOMATYCZNE DOPASOWANIE, GDY BRAK ACTIVE_ORDER ---
+    if not active_order_data:
+        logger.warning(f"{log_prefix} Brak dopasowania – próbuję znaleźć ręcznie...")
+        limit_order_id = pnl_data.get("orderLinkId") or pnl_data.get("orderId")
+        if limit_order_id:
+            active_order_data = state_manager.get_active_order_by_limit_order_id(limit_order_id)
+        if not active_order_data and pnl_data.get("tpslOrderId"):
+            active_order_data = state_manager.get_active_order_by_tpsl_order_id(pnl_data["tpslOrderId"])
+        if not active_order_data and symbol:
+            # fallback: dopasowanie po symbol + cena wejścia + ilość
+            all_orders = list(state_manager.get_all_active_orders())
+            for doc in all_orders:
+                od = doc.to_dict()
+                if (
+                    od.get("symbol") == symbol
+                    and abs(float(od.get("alert_entry_price", 0)) - float(pnl_data.get("avgEntryPrice", 0))) < 0.5
+                    and abs(float(od.get("qty", 0)) - float(pnl_data.get("qty", 0))) < 0.0001
+                ):
+                    active_order_data = od
+                    logger.info(f"{log_prefix} Znaleziono dopasowanie po symbolu i cenie wejścia.")
+                    break
+
+    # --- STATUS DOPASOWANIA ---
     is_matched = bool(active_order_data and 'alert_id' in active_order_data)
-    alert_id = active_order_data.get('alert_id', 'UNMATCHED_OR_MANUAL')
+    alert_id = active_order_data.get('alert_id', 'UNMATCHED_OR_MANUAL') if active_order_data else 'UNMATCHED_OR_MANUAL'
     
     if not is_matched:
-        logger.warning(f"{log_prefix} Nie znaleziono dopasowania. Transakcja zostanie zapisana jako UNMATCHED.")
+        logger.warning(f"{log_prefix} ⚠️ Transakcja UNMATCHED – zapisuję z oznaczeniem.")
     else:
-        logger.info(f"{log_prefix} Rozpoczynam transakcyjny zapis (alert_id: {alert_id}).")
+        logger.info(f"{log_prefix} ✅ Zlecenie dopasowane (alert_id: {alert_id}).")
 
     try:
         qty = Decimal(pnl_data.get("qty", "0.0"))
@@ -70,7 +98,7 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Dict[str,
         avg_exit_price = Decimal(pnl_data.get("avgExitPrice", "0.0"))
         net_pnl = Decimal(pnl_data.get("closedPnl") or "0.0")
         commission = Decimal(pnl_data.get("cumCommission") or "0.0")
-        
+
         entry_value_usdt = qty * avg_entry_price
         exit_value_usdt = qty * avg_exit_price
         gross_pnl_usdt = net_pnl + commission
@@ -81,29 +109,27 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Dict[str,
 
         if is_matched:
             planned_sl_price = active_order_data.get("planned_sl_price")
-            planned_sl_price_dec = Decimal(str(planned_sl_price)) if planned_sl_price is not None else Decimal("0.0")
+            if planned_sl_price:
+                planned_sl_price_dec = Decimal(str(planned_sl_price))
+                if planned_sl_price_dec > 0 and avg_entry_price > 0:
+                    risk_per_unit = abs(avg_entry_price - planned_sl_price_dec)
+                    planned_risk_usdt_dec = risk_per_unit * qty
+                    if planned_risk_usdt_dec > 0:
+                        realized_rrr_dec = (net_pnl / planned_risk_usdt_dec)
+                        planned_risk_usdt = float(planned_risk_usdt_dec)
+                        realized_rrr = float(realized_rrr_dec)
 
-            if planned_sl_price_dec > 0 and avg_entry_price > 0:
-                risk_per_unit = abs(avg_entry_price - planned_sl_price_dec)
-                planned_risk_usdt_dec = risk_per_unit * qty
-                
-                if planned_risk_usdt_dec > 0:
-                    realized_rrr_dec = (net_pnl / planned_risk_usdt_dec)
-                    planned_risk_usdt = float(planned_risk_usdt_dec)
-                    realized_rrr = float(realized_rrr_dec)
-            
             exit_type = pnl_data.get("exitType")
             if exit_type == "TakeProfit":
                 exit_price_result = active_order_data.get("planned_tp_price")
             elif exit_type == "StopLoss":
                 exit_price_result = active_order_data.get("planned_sl_price")
 
-        # --- FINALNA, ZGODNA ZE SCHEMATEM STRUKTURA ---
         transformed_data = {
             "alert_id": alert_id,
             "order_id": order_id,
             "symbol": symbol,
-            "direction": active_order_data.get("direction", pnl_data.get("side")),
+            "direction": active_order_data.get("direction") if active_order_data else pnl_data.get("side"),
             "qty": float(qty),
             "leverage": int(float(pnl_data.get("leverage", 0))) or None,
             "avg_entry_price": float(avg_entry_price),
@@ -118,38 +144,39 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Dict[str,
             "timestamp_close": datetime.fromtimestamp(int(pnl_data.get("updatedTime")) / 1000, tz=timezone.utc).isoformat(),
             "planned_risk_usdt": planned_risk_usdt,
             "realized_rrr": realized_rrr,
-            "alert_entry_price": active_order_data.get("alert_entry_price"),
-            "alert_sl_price": active_order_data.get("alert_sl_price"),
-            "alert_tp_price": active_order_data.get("alert_tp_price"),
-            "planned_entry_price": active_order_data.get("planned_entry_price"),
-            "planned_sl_price": active_order_data.get("planned_sl_price"),
-            "planned_tp_price": active_order_data.get("planned_tp_price"),
+            "alert_entry_price": active_order_data.get("alert_entry_price") if active_order_data else None,
+            "alert_sl_price": active_order_data.get("alert_sl_price") if active_order_data else None,
+            "alert_tp_price": active_order_data.get("alert_tp_price") if active_order_data else None,
+            "planned_entry_price": active_order_data.get("planned_entry_price") if active_order_data else None,
+            "planned_sl_price": active_order_data.get("planned_sl_price") if active_order_data else None,
+            "planned_tp_price": active_order_data.get("planned_tp_price") if active_order_data else None,
             "exit_price_result": exit_price_result,
-            "tp_price_chart": active_order_data.get("alert_tp_price"),
+            "tp_price_chart": active_order_data.get("alert_tp_price") if active_order_data else None,
         }
+
     except Exception as e:
         logger.error(f"{log_prefix} Błąd podczas transformacji danych PnL: {e}", exc_info=True)
         return False
 
+    # --- ZAPIS DO BIGQUERY ---
     try:
         client = bigquery_logger.get_bigquery_client()
         errors = client.insert_rows_json(bigquery_logger.REAL_TRADES_TABLE_REF, [transformed_data])
 
         if not errors:
-            logger.info(f"{log_prefix} SUKCES! Pomyślnie zapisano wynik transakcji do BigQuery.")
-            
+            logger.info(f"{log_prefix} ✅ Zapisano wynik transakcji do BigQuery.")
             if is_matched:
                 order_link_id_to_delete = active_order_data.get('id')
                 if order_link_id_to_delete:
-                    logger.info(f"{log_prefix} Sprzątanie: Usuwanie dokumentu '{order_link_id_to_delete}' z kolekcji active_orders.")
+                    logger.info(f"{log_prefix} Sprzątanie: Usuwam dokument '{order_link_id_to_delete}' z active_orders.")
                     state_manager.delete_active_order_by_id(order_link_id_to_delete)
                 else:
-                    logger.error(f"{log_prefix} BŁĄD KRYTYCZNY: Nie można usunąć rekordu, ponieważ 'id' (orderLinkId) nie zostało znalezione w dopasowanych danych.")
-            
+                    logger.error(f"{log_prefix} Nie można usunąć dokumentu – brak pola 'id'.")
             return True
         else:
-            logger.error(f"{log_prefix} Błąd podczas wstawiania wierszy do BigQuery: {errors}. Dokument w active_orders NIE został usunięty.")
+            logger.error(f"{log_prefix} Błąd podczas wstawiania do BigQuery: {errors}. Dokument w active_orders NIE został usunięty.")
             return False
+
     except Exception as e:
-        logger.critical(f"{log_prefix} Krytyczny błąd podczas zapisu do BigQuery: {e}. Dokument w active_orders NIE został usunięty.", exc_info=True)
+        logger.critical(f"{log_prefix} Krytyczny błąd podczas zapisu do BigQuery: {e}", exc_info=True)
         return False

@@ -197,4 +197,22 @@ def is_pnl_record_processed(order_id: str) -> bool:
         return doc_ref.get().exists
     except Exception as e:
         logger.error(f"Błąd podczas sprawdzania blokady PnL dla {order_id}: {e}", exc_info=True)
-        return True # W razie błędu lepiej założyć, że był przetworzony, niż ryzykować duplikat
+        return True # W razie błędu lepiej założyć, że był przetworzony, niż ryzykować 
+        
+def get_latest_active_order_for_symbol(symbol: str, side: str) -> Optional[Dict[str, Any]]:
+    try:
+        db = _get_db()
+        query = db.collection(constants.ACTIVE_ORDERS_COLLECTION) \
+                  .where('symbol', '==', symbol) \
+                  .where('direction', '==', side) \
+                  .order_by('created_at', direction=firestore.Query.DESCENDING) \
+                  .limit(1)
+        docs = list(query.stream())
+        if docs:
+            data = docs[0].to_dict()
+            data['id'] = docs[0].id
+            return data
+        return None
+    except Exception as e:
+        logger.error(f"Błąd podczas awaryjnego dopasowania zlecenia dla {symbol}/{side}: {e}", exc_info=True)
+        return None
