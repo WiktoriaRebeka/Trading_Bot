@@ -1,7 +1,7 @@
 # Lokalizacja: bot_service/pnl_logger_real.py
 
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from datetime import datetime, timezone
 from google.cloud import firestore
 from decimal import Decimal, getcontext
