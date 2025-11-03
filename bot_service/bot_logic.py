@@ -217,41 +217,37 @@ def update_filled_orders(executor: BybitExecutor):
         except Exception as e:
             logger.error(f"{log_prefix} Błąd podczas aktualizacji zlecenia: {e}", exc_info=True)
 
-def _find_matching_order(pnl_record: Dict[str, Any], all_active_orders_by_symbol: Dict[str, List[Dict]]) -> Optional[Dict[str, Any]]:
+def _find_matching_order(pnl_record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Ulepszona, hierarchiczna funkcja dopasowująca rekord PnL z Bybit do dokumentu w active_orders.
+    """
     symbol = pnl_record.get("symbol")
-    order_id_from_pnl = pnl_record.get("orderId")
+    pnl_order_link_id = pnl_record.get("orderLinkId")
+    pnl_closing_order_id = pnl_record.get("orderId")
+    log_prefix = f"[{symbol}|{pnl_closing_order_id}]"
 
-    if not symbol or not order_id_from_pnl:
-        return None
+    # --- Metoda 1: Dopasowanie po orderLinkId (najbardziej niezawodna) ---
+    # Rekord PnL z Bybit zawiera orderLinkId zlecenia OTWIERAJĄCEGO.
+    # Używamy go do bezpośredniego odnalezienia naszego dokumentu w Firestore.
+    if pnl_order_link_id:
+        logger.info(f"{log_prefix} Próba dopasowania po orderLinkId z rekordu PnL: {pnl_order_link_id}")
+        # Odpytujemy bazę NA BIEŻĄCO, a nie z pamięci podręcznej
+        matched_order = state_manager.get_active_order_by_id(pnl_order_link_id)
+        if matched_order:
+            logger.info(f"{log_prefix} ✅ MATCH FOUND (Method 1: PnL's Order Link ID).")
+            return matched_order
 
-    orders_for_symbol = all_active_orders_by_symbol.get(symbol, [])
+    # --- Metoda 2: Dopasowanie po ID zlecenia zamykającego (Fallback dla TP/SL) ---
+    # Użyteczna, jeśli z jakiegoś powodu orderLinkId zniknie z odpowiedzi API.
+    if pnl_closing_order_id:
+        logger.info(f"{log_prefix} Metoda 1 zawiodła. Próba dopasowania po ID zlecenia zamykającego (TP/SL): {pnl_closing_order_id}")
+        # Odpytujemy bazę NA BIEŻĄCO
+        matched_order = state_manager.get_active_order_by_tpsl_order_id(pnl_closing_order_id)
+        if matched_order:
+            logger.info(f"{log_prefix} ✅ MATCH FOUND (Method 2: TP/SL Order ID).")
+            return matched_order
 
-    for order_data in orders_for_symbol:
-        if order_data.get('id') == order_id_from_pnl:
-            logger.info(f"[{symbol}] MATCH FOUND (Method 0: Direct orderLinkId): PnL OrderID {order_id_from_pnl} matched document ID.")
-            return order_data
-
-    for order_data in orders_for_symbol:
-        if order_data.get('tpOrderId') == order_id_from_pnl or order_data.get('slOrderId') == order_id_from_pnl:
-            logger.info(f"[{symbol}] MATCH FOUND (Method 1: TP/SL OrderID): PnL OrderID {order_id_from_pnl} matched.")
-            return order_data
-
-    bybit_entry_ts_ms = int(pnl_record.get('createdTime', 0))
-    if bybit_entry_ts_ms == 0:
-        return None
-    
-    bybit_entry_dt = datetime.fromtimestamp(bybit_entry_ts_ms / 1000, tz=timezone.utc)
-    time_tolerance = timedelta(minutes=2)
-
-    for order_data in orders_for_symbol:
-        firestore_entry_dt = order_data.get('created_at')
-        if isinstance(firestore_entry_dt, datetime) and firestore_entry_dt.tzinfo is None:
-             firestore_entry_dt = firestore_entry_dt.replace(tzinfo=timezone.utc)
-
-        if firestore_entry_dt and abs(bybit_entry_dt - firestore_entry_dt) < time_tolerance:
-            logger.info(f"[{symbol}] MATCH FOUND (Method 2: Timestamp): Bybit entry time {bybit_entry_dt} matches Firestore time {firestore_entry_dt}.")
-            return order_data
-            
+    logger.warning(f"{log_prefix} OSTATECZNIE nie znaleziono dopasowania dla rekordu PnL.")
     return None
 
 def log_closed_positions_pnl(executor: BybitExecutor) -> int:
@@ -277,17 +273,6 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
         save_last_processed_timestamp(current_cycle_start_time, "pnl_logger_last_fetch_state")
         return 0
 
-    all_active_orders = state_manager.get_all_active_orders()
-    all_active_orders_by_symbol: Dict[str, List[Dict]] = {}
-    for doc in all_active_orders:
-        order_data = doc.to_dict()
-        order_data['id'] = doc.id
-        symbol = order_data.get('symbol')
-        if symbol:
-            if symbol not in all_active_orders_by_symbol:
-                all_active_orders_by_symbol[symbol] = []
-            all_active_orders_by_symbol[symbol].append(order_data)
-
     processed_count = 0
     new_max_ts_dt = last_check_ts_dt
 
@@ -300,7 +285,8 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
                 logger.info(f"[{symbol}] Pomijam już przetworzony rekord PnL o ID: {order_id_from_pnl}")
                 continue
 
-            active_order_data = _find_matching_order(pnl_record, all_active_orders_by_symbol)
+            # Wywołujemy nową, samowystarczalną funkcję dopasowującą
+            active_order_data = _find_matching_order(pnl_record)
             
             if not active_order_data:
                 record_ts_dt = datetime.fromtimestamp(int(pnl_record.get("updatedTime", 0)) / 1000, tz=timezone.utc)
@@ -309,7 +295,6 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
                     continue
                 else:
                     logger.warning(f"[{symbol}] OSTATECZNIE nie znaleziono dopasowania dla rekordu PnL. Zostanie zalogowany jako UNMATCHED.")
-                    active_order_data = {}
 
             if log_real_trade_result(pnl_record, active_order_data):
                 processed_count += 1
