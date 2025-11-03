@@ -175,9 +175,21 @@ def update_filled_orders(executor: BybitExecutor):
 
             if order_status == 'Filled':
                 logger.info(f"{log_prefix} Zlecenie otwierające zrealizowane! Weryfikuję pozycję...")
-                time.sleep(1) 
+                
+                position_info = None
+                max_retries = 3
+                retry_delay_seconds = 2
 
-                position_info = executor.get_position_info(symbol)
+                for attempt in range(max_retries):
+                    logger.info(f"{log_prefix} Próba pobrania informacji o pozycji (próba {attempt + 1}/{max_retries})...")
+                    position_info = executor.get_position_info(symbol)
+                    if position_info:
+                        logger.info(f"{log_prefix} Sukces! Pomyślnie pobrano informacje o pozycji.")
+                        break
+                    
+                    if attempt < max_retries - 1:
+                        logger.warning(f"{log_prefix} Nie udało się pobrać informacji o pozycji. Czekam {retry_delay_seconds}s przed ponowieniem.")
+                        time.sleep(retry_delay_seconds)
 
                 if position_info:
                     tp_set = position_info.get('takeProfit') and float(position_info.get('takeProfit')) > 0
@@ -203,7 +215,9 @@ def update_filled_orders(executor: BybitExecutor):
                         else:
                             state_manager.update_active_order(order_link_id, {'status': 'ERROR_NEEDS_MANUAL_CLOSURE'})
                 else:
-                    logger.warning(f"{log_prefix} Nie udało się pobrać informacji o pozycji dla {symbol} zaraz po jej otwarciu. Spróbuję ponownie w następnym cyklu.")
+                    # NOWA LOGIKA: Jeśli po wszystkich próbach nie ma pozycji, oznaczamy ją, by przerwać pętlę.
+                    logger.error(f"{log_prefix} KRYTYCZNY BŁĄD: Nie udało się pobrać informacji o pozycji dla {symbol} po {max_retries} próbach. Prawdopodobnie pozycja została zamknięta przed weryfikacją.")
+                    state_manager.update_active_order(order_link_id, {'status': 'CLOSED_UNVERIFIED', 'reason': 'Position closed before TP/SL order IDs could be retrieved.'})
 
             elif order_status in ['Cancelled', 'Rejected']:
                  logger.warning(f"{log_prefix} Zlecenie otwierające zostało anulowane/odrzucone. Usuwam z aktywnych.")
@@ -216,7 +230,7 @@ def update_filled_orders(executor: BybitExecutor):
 
         except Exception as e:
             logger.error(f"{log_prefix} Błąd podczas aktualizacji zlecenia: {e}", exc_info=True)
-
+            
 def _find_matching_order(pnl_record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
     Ulepszona, hierarchiczna funkcja dopasowująca rekord PnL z Bybit do dokumentu w active_orders.

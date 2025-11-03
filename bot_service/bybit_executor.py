@@ -254,16 +254,29 @@ class BybitExecutor:
 
     def get_position_info(self, symbol: str) -> Optional[Dict[str, Any]]:
         api_symbol = symbol.replace('.P', '')
-        params = {"category": "linear", "symbol": api_symbol}
+        
+        # ZMIANA: Usuwamy filtrowanie po symbolu w parametrach zapytania.
+        # Poprosimy o WSZYSTKIE otwarte pozycje.
+        params = {"category": "linear"}
+        
         try:
             result = self._send_request("GET", "/v5/position/list", params=params)
+            
             if result and result.get('list'):
-                position_data = result['list'][0]
-                if float(position_data.get("size", "0")) > 0:
-                    return position_data
+                # ZMIANA: Iterujemy po liście wszystkich pozycji.
+                for position_data in result['list']:
+                    # Sprawdzamy, czy symbol pozycji pasuje do tego, którego szukamy
+                    # ORAZ czy rozmiar pozycji jest większy od zera.
+                    if position_data.get('symbol') == api_symbol and float(position_data.get("size", "0")) > 0:
+                        logger.info(f"[{symbol}] Znaleziono aktywną pozycję na liście wszystkich pozycji.")
+                        return position_data # Zwracamy pasującą pozycję
+            
+            # Jeśli pętla się zakończy i nic nie znajdziemy, zwracamy None.
+            logger.warning(f"[{symbol}] Nie znaleziono aktywnej pozycji dla symbolu {api_symbol} na liście wszystkich otwartych pozycji.")
             return None
+            
         except (RequestException, BybitAPIError) as e:
-            logger.error(f"[{symbol}] Błąd podczas pobierania informacji o pozycji: {e}")
+            logger.error(f"[{symbol}] Błąd podczas pobierania informacji o pozycji: {e}", exc_info=True)
             return None
 
     def find_tpsl_order_ids(self, symbol: str, order_data: Dict[str, Any]) -> (Optional[str], Optional[str]):
