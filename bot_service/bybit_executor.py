@@ -78,18 +78,34 @@ class BybitExecutor:
         if not symbol:
             logger.error("Brak 'symbol' w parametrach zlecenia.")
             return None
+        
+        # --- POCZĄTEK ZMIAN: Aktualizacja logiki zabezpieczającej ---
         if params.get("orderType") == "Limit":
-            if not params.get("stopLoss") or not params.get("takeProfit"):
+            has_stop_loss = params.get("stopLoss")
+            has_take_profit = params.get("takeProfit")
+            has_trailing_stop = params.get("trailingStop")
+
+            # Zlecenie jest bezpieczne, jeśli ma Stop Loss ORAZ (Take Profit LUB Trailing Stop)
+            if not has_stop_loss or not (has_take_profit or has_trailing_stop):
                 logger.critical(
-                    f"[{symbol}] KRYTYCZNA PRÓBA WYSŁANIA ZLECENIA LIMIT BEZ SL/TP! Zlecenie zablokowane. Parametry: {params}"
+                    f"[{symbol}] KRYTYCZNA PRÓBA WYSŁANIA ZLECENIA LIMIT BEZ ZABEZPIECZEŃ! Zlecenie zablokowane. Parametry: {params}"
                 )
                 return None
+        # --- KONIEC ZMIAN ---
+
         api_symbol = symbol.replace('.P', '')
         payload = {"category": "linear", "symbol": api_symbol, "side": params['side'], "orderType": params['orderType'], "qty": str(params['qty'])}
-        optional_params = ["price", "takeProfit", "stopLoss", "tpTriggerBy", "slTriggerBy", "orderLinkId", "timeInForce"]
+        
+        # Zaktualizowana lista parametrów, które mogą być wysłane
+        optional_params = [
+            "price", "takeProfit", "stopLoss", "tpTriggerBy", "slTriggerBy", 
+            "orderLinkId", "timeInForce", "trailingStop", "activePrice"
+        ]
+        
         for param in optional_params:
             if param in params:
                 payload[param] = str(params[param])
+                
         logger.info(f"[{symbol}] Wysyłanie zlecenia do Bybit: {payload}")
         try:
             result = self._send_request("POST", "/v5/order/create", params=payload)
