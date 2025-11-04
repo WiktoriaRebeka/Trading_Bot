@@ -42,13 +42,13 @@ def acquire_lock_for_order(order_id: str) -> bool:
         return False
 
 
+# Lokalizacja: bot_service/pnl_logger_real.py
+
+# ZASTĄP CAŁĄ TĘ FUNKCJĘ:
 def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[Dict[str, Any]]) -> bool:
     """
     Zapisuje wynik rzeczywistej transakcji do BigQuery, dopasowując ją do aktywnego zlecenia.
-    Wersja rozszerzona: próba automatycznego dopasowania zlecenia w przypadku UNMATCHED.
     """
-    from bot_service import state_manager
-
     order_id = pnl_data.get("orderId", f"unknown_{int(datetime.now().timestamp())}")
     symbol = pnl_data.get("symbol", "unknown")
     log_prefix = f"[PNL_SAVE][{symbol}|{order_id}]"
@@ -57,33 +57,9 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
         logger.error(f"{log_prefix} BigQuery nie zostało zainicjalizowane – pomijam zapis.")
         return False
 
-    # --- 🔒 Zabezpieczenie przed duplikacją ---
     if not acquire_lock_for_order(order_id):
         return False
 
-    # --- 🧠 AUTOMATYCZNE DOPASOWANIE, GDY BRAK ACTIVE_ORDER ---
-    if not active_order_data:
-        logger.warning(f"{log_prefix} Brak dopasowania – próbuję znaleźć ręcznie...")
-        limit_order_id = pnl_data.get("orderLinkId") or pnl_data.get("orderId")
-        if limit_order_id:
-            active_order_data = state_manager.get_active_order_by_limit_order_id(limit_order_id)
-        if not active_order_data and pnl_data.get("tpslOrderId"):
-            active_order_data = state_manager.get_active_order_by_tpsl_order_id(pnl_data["tpslOrderId"])
-        if not active_order_data and symbol:
-            # fallback: dopasowanie po symbol + cena wejścia + ilość
-            all_orders = list(state_manager.get_all_active_orders())
-            for doc in all_orders:
-                od = doc.to_dict()
-                if (
-                    od.get("symbol") == symbol
-                    and abs(float(od.get("alert_entry_price", 0)) - float(pnl_data.get("avgEntryPrice", 0))) < 0.5
-                    and abs(float(od.get("qty", 0)) - float(pnl_data.get("qty", 0))) < 0.0001
-                ):
-                    active_order_data = od
-                    logger.info(f"{log_prefix} Znaleziono dopasowanie po symbolu i cenie wejścia.")
-                    break
-
-    # --- STATUS DOPASOWANIA ---
     is_matched = bool(active_order_data and 'alert_id' in active_order_data)
     alert_id = active_order_data.get('alert_id', 'UNMATCHED_OR_MANUAL') if active_order_data else 'UNMATCHED_OR_MANUAL'
     
@@ -93,6 +69,7 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
         logger.info(f"{log_prefix} ✅ Zlecenie dopasowane (alert_id: {alert_id}).")
 
     try:
+        # Używamy Decimal do precyzyjnych obliczeń
         qty = Decimal(pnl_data.get("qty", "0.0"))
         avg_entry_price = Decimal(pnl_data.get("avgEntryPrice", "0.0"))
         avg_exit_price = Decimal(pnl_data.get("avgExitPrice", "0.0"))
@@ -117,7 +94,8 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
                     if planned_risk_usdt_dec > 0:
                         realized_rrr_dec = (net_pnl / planned_risk_usdt_dec)
                         planned_risk_usdt = float(planned_risk_usdt_dec)
-                        realized_rrr = float(realized_rrr_dec)
+                        # --- ZMIANA: Zaokrąglamy realized_rrr do 4 miejsc po przecinku ---
+                        realized_rrr = round(float(realized_rrr_dec), 4)
 
             exit_type = pnl_data.get("exitType")
             if exit_type == "TakeProfit":
@@ -125,6 +103,8 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
             elif exit_type == "StopLoss":
                 exit_price_result = active_order_data.get("planned_sl_price")
 
+        # --- ZMIANA: Dodajemy zaokrąglanie dla wszystkich pól NUMERIC ---
+        # Używamy 6 miejsc po przecinku dla bezpieczeństwa
         transformed_data = {
             "alert_id": alert_id,
             "order_id": order_id,
@@ -134,16 +114,16 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
             "leverage": int(float(pnl_data.get("leverage", 0))) or None,
             "avg_entry_price": float(avg_entry_price),
             "avg_exit_price": float(avg_exit_price),
-            "entry_value_usdt": float(entry_value_usdt) if entry_value_usdt > 0 else None,
-            "exit_value_usdt": float(exit_value_usdt) if exit_value_usdt > 0 else None,
-            "gross_pnl_usdt": float(gross_pnl_usdt) if gross_pnl_usdt != 0 else None,
+            "entry_value_usdt": round(float(entry_value_usdt), 6) if entry_value_usdt > 0 else None,
+            "exit_value_usdt": round(float(exit_value_usdt), 6) if exit_value_usdt > 0 else None,
+            "gross_pnl_usdt": round(float(gross_pnl_usdt), 6) if gross_pnl_usdt != 0 else None,
             "commission_usdt": float(commission),
             "net_pnl_usdt": float(net_pnl),
             "exit_type": pnl_data.get("exitType"),
             "timestamp_entry": datetime.fromtimestamp(int(pnl_data.get("createdTime")) / 1000, tz=timezone.utc).isoformat(),
             "timestamp_close": datetime.fromtimestamp(int(pnl_data.get("updatedTime")) / 1000, tz=timezone.utc).isoformat(),
-            "planned_risk_usdt": planned_risk_usdt,
-            "realized_rrr": realized_rrr,
+            "planned_risk_usdt": round(planned_risk_usdt, 6) if planned_risk_usdt is not None else None,
+            "realized_rrr": realized_rrr, # Już zaokrąglone
             "alert_entry_price": active_order_data.get("alert_entry_price") if active_order_data else None,
             "alert_sl_price": active_order_data.get("alert_sl_price") if active_order_data else None,
             "alert_tp_price": active_order_data.get("alert_tp_price") if active_order_data else None,
@@ -158,7 +138,6 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
         logger.error(f"{log_prefix} Błąd podczas transformacji danych PnL: {e}", exc_info=True)
         return False
 
-    # --- ZAPIS DO BIGQUERY ---
     try:
         client = bigquery_logger.get_bigquery_client()
         errors = client.insert_rows_json(bigquery_logger.REAL_TRADES_TABLE_REF, [transformed_data])
@@ -171,7 +150,8 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
                     logger.info(f"{log_prefix} Sprzątanie: Usuwam dokument '{order_link_id_to_delete}' z active_orders.")
                     state_manager.delete_active_order_by_id(order_link_id_to_delete)
                 else:
-                    logger.error(f"{log_prefix} Nie można usunąć dokumentu – brak pola 'id'.")
+                    # To się nie powinno zdarzyć, ale dodajemy log na wszelki wypadek
+                    logger.error(f"{log_prefix} Nie można usunąć dokumentu – brak pola 'id' w dopasowanych danych.")
             return True
         else:
             logger.error(f"{log_prefix} Błąd podczas wstawiania do BigQuery: {errors}. Dokument w active_orders NIE został usunięty.")
