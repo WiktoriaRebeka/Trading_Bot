@@ -83,7 +83,6 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
                 continue
             tick_size, qty_step = rule["tickSize"], rule["qtyStep"]
 
-            # Zapisujemy oryginalną cenę TP z alertu do celów analitycznych
             alert_tp_price_to_save = getattr(alert_model, "tp_3_0")
 
             if alert_model.direction == 'LONG':
@@ -127,12 +126,9 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
                 "qty": str(final_qty),
                 "price": str(final_entry),
                 
-                # Usuwamy stały takeProfit
+                # --- ZMIANA: Usunięto 'stopLoss' i 'slTriggerBy' ---
+                # Zakładamy, że Trailing Stop jest jedynym wymaganym zabezpieczeniem.
                 
-                "stopLoss": str(final_sl),
-                "slTriggerBy": "MarkPrice",
-                
-                # Dodajemy parametry Trailing Stop
                 "trailingStop": str(trailing_distance_2R),
                 "activePrice": str(activation_price_final),
                 
@@ -152,7 +148,6 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
                     "symbol": symbol, "limitOrderId": order_id, "orderLinkId": custom_order_link_id,
                     "alert_id": alert_id, "direction": alert_model.direction,
                     "planned_entry_price": final_entry, "planned_sl_price": final_sl, 
-                    # Zapisujemy planowaną cenę aktywacji TS zamiast starego TP
                     "planned_tp_price": activation_price_final, 
                     "planned_qty": final_qty,
                     "alert_entry_price": alert_model.entry, "alert_sl_price": alert_model.sl,
@@ -170,9 +165,7 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
         except Exception as e:
             logger.error(f"Krytyczny błąd podczas przetwarzania alertu {alert_id}: {e}", exc_info=True)
 
-# Lokalizacja: bot_service/bot_logic.py
-
-# ZASTĄP CAŁĄ TĘ FUNKCJĘ OSTATECZNĄ, UPROSZCZONĄ WERSJĄ:
+            
 def update_filled_orders(executor: BybitExecutor):
     logger.info("[ORDER_UPDATER] Rozpoczynam cykl aktualizacji aktywnych zleceň.")
     
