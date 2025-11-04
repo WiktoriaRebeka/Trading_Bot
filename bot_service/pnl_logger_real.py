@@ -41,13 +41,10 @@ def acquire_lock_for_order(order_id: str) -> bool:
         logger.error(f"[PNL_LOCK] Błąd podczas próby założenia blokady dla order_id {order_id}: {e}", exc_info=True)
         return False
 
-
-# Lokalizacja: bot_service/pnl_logger_real.py
-
-# ZASTĄP CAŁĄ TĘ FUNKCJĘ:
 def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[Dict[str, Any]]) -> bool:
     """
     Zapisuje wynik rzeczywistej transakcji do BigQuery, dopasowując ją do aktywnego zlecenia.
+    Wersja z kompleksowym zaokrąglaniem wszystkich wartości NUMERIC.
     """
     order_id = pnl_data.get("orderId", f"unknown_{int(datetime.now().timestamp())}")
     symbol = pnl_data.get("symbol", "unknown")
@@ -66,10 +63,19 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
     if not is_matched:
         logger.warning(f"{log_prefix} ⚠️ Transakcja UNMATCHED – zapisuję z oznaczeniem.")
     else:
-        logger.info(f"{log_prefix} ✅ Zlecenie dopasowane (alert_id: {alert_id}).")
+        logger.info(f"{log_prefix} ✅ Zlecenie dopasowane (alert_id: {active_order_data.get('id', 'unknown')}).")
 
     try:
-        # Używamy Decimal do precyzyjnych obliczeń
+        # --- Funkcja pomocnicza do bezpiecznego zaokrąglania ---
+        def safe_round(value, precision=6):
+            if value is None:
+                return None
+            try:
+                return round(float(value), precision)
+            except (ValueError, TypeError):
+                return None
+
+        # Używamy Decimal do precyzyjnych obliczeń wewnętrznych
         qty = Decimal(pnl_data.get("qty", "0.0"))
         avg_entry_price = Decimal(pnl_data.get("avgEntryPrice", "0.0"))
         avg_exit_price = Decimal(pnl_data.get("avgExitPrice", "0.0"))
@@ -94,8 +100,7 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
                     if planned_risk_usdt_dec > 0:
                         realized_rrr_dec = (net_pnl / planned_risk_usdt_dec)
                         planned_risk_usdt = float(planned_risk_usdt_dec)
-                        # --- ZMIANA: Zaokrąglamy realized_rrr do 4 miejsc po przecinku ---
-                        realized_rrr = round(float(realized_rrr_dec), 4)
+                        realized_rrr = float(realized_rrr_dec)
 
             exit_type = pnl_data.get("exitType")
             if exit_type == "TakeProfit":
@@ -103,35 +108,34 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
             elif exit_type == "StopLoss":
                 exit_price_result = active_order_data.get("planned_sl_price")
 
-        # --- ZMIANA: Dodajemy zaokrąglanie dla wszystkich pól NUMERIC ---
-        # Używamy 6 miejsc po przecinku dla bezpieczeństwa
+        # Przygotowanie finalnego obiektu z zaokrąglaniem wszystkich pól NUMERIC
         transformed_data = {
             "alert_id": alert_id,
             "order_id": order_id,
             "symbol": symbol,
             "direction": active_order_data.get("direction") if active_order_data else pnl_data.get("side"),
             "qty": float(qty),
-            "leverage": int(float(pnl_data.get("leverage", 0))) or None,
-            "avg_entry_price": float(avg_entry_price),
-            "avg_exit_price": float(avg_exit_price),
-            "entry_value_usdt": round(float(entry_value_usdt), 6) if entry_value_usdt > 0 else None,
-            "exit_value_usdt": round(float(exit_value_usdt), 6) if exit_value_usdt > 0 else None,
-            "gross_pnl_usdt": round(float(gross_pnl_usdt), 6) if gross_pnl_usdt != 0 else None,
-            "commission_usdt": float(commission),
-            "net_pnl_usdt": float(net_pnl),
+            "leverage": int(float(pnl_data.get("leverage", 0))) if pnl_data.get("leverage") else None,
+            "avg_entry_price": safe_round(float(avg_entry_price)),
+            "avg_exit_price": safe_round(float(avg_exit_price)),
+            "entry_value_usdt": safe_round(float(entry_value_usdt)) if entry_value_usdt > 0 else None,
+            "exit_value_usdt": safe_round(float(exit_value_usdt)) if exit_value_usdt > 0 else None,
+            "gross_pnl_usdt": safe_round(float(gross_pnl_usdt)),
+            "commission_usdt": safe_round(float(commission)),
+            "net_pnl_usdt": safe_round(float(net_pnl)),
             "exit_type": pnl_data.get("exitType"),
             "timestamp_entry": datetime.fromtimestamp(int(pnl_data.get("createdTime")) / 1000, tz=timezone.utc).isoformat(),
             "timestamp_close": datetime.fromtimestamp(int(pnl_data.get("updatedTime")) / 1000, tz=timezone.utc).isoformat(),
-            "planned_risk_usdt": round(planned_risk_usdt, 6) if planned_risk_usdt is not None else None,
-            "realized_rrr": realized_rrr, # Już zaokrąglone
-            "alert_entry_price": active_order_data.get("alert_entry_price") if active_order_data else None,
-            "alert_sl_price": active_order_data.get("alert_sl_price") if active_order_data else None,
-            "alert_tp_price": active_order_data.get("alert_tp_price") if active_order_data else None,
-            "planned_entry_price": active_order_data.get("planned_entry_price") if active_order_data else None,
-            "planned_sl_price": active_order_data.get("planned_sl_price") if active_order_data else None,
-            "planned_tp_price": active_order_data.get("planned_tp_price") if active_order_data else None,
-            "exit_price_result": exit_price_result,
-            "tp_price_chart": active_order_data.get("alert_tp_price") if active_order_data else None,
+            "planned_risk_usdt": safe_round(planned_risk_usdt),
+            "realized_rrr": safe_round(realized_rrr, 4), # RRR z mniejszą precyzją
+            "alert_entry_price": safe_round(active_order_data.get("alert_entry_price")) if active_order_data else None,
+            "alert_sl_price": safe_round(active_order_data.get("alert_sl_price")) if active_order_data else None,
+            "alert_tp_price": safe_round(active_order_data.get("alert_tp_price")) if active_order_data else None,
+            "planned_entry_price": safe_round(active_order_data.get("planned_entry_price")) if active_order_data else None,
+            "planned_sl_price": safe_round(active_order_data.get("planned_sl_price")) if active_order_data else None,
+            "planned_tp_price": safe_round(active_order_data.get("planned_tp_price")) if active_order_data else None,
+            "exit_price_result": safe_round(exit_price_result),
+            "tp_price_chart": safe_round(active_order_data.get("alert_tp_price")) if active_order_data else None,
         }
 
     except Exception as e:
@@ -150,7 +154,6 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
                     logger.info(f"{log_prefix} Sprzątanie: Usuwam dokument '{order_link_id_to_delete}' z active_orders.")
                     state_manager.delete_active_order_by_id(order_link_id_to_delete)
                 else:
-                    # To się nie powinno zdarzyć, ale dodajemy log na wszelki wypadek
                     logger.error(f"{log_prefix} Nie można usunąć dokumentu – brak pola 'id' w dopasowanych danych.")
             return True
         else:
