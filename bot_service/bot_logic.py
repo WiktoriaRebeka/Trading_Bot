@@ -170,6 +170,9 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
         except Exception as e:
             logger.error(f"Krytyczny błąd podczas przetwarzania alertu {alert_id}: {e}", exc_info=True)
 
+# Lokalizacja: bot_service/bot_logic.py
+
+# ZASTĄP CAŁĄ TĘ FUNKCJĘ OSTATECZNĄ, UPROSZCZONĄ WERSJĄ:
 def update_filled_orders(executor: BybitExecutor):
     logger.info("[ORDER_UPDATER] Rozpoczynam cykl aktualizacji aktywnych zleceň.")
     
@@ -221,11 +224,11 @@ def update_filled_orders(executor: BybitExecutor):
                         time.sleep(retry_delay_seconds)
 
                 if position_info:
-                    tp_set = position_info.get('takeProfit') and float(position_info.get('takeProfit')) > 0
+                    # --- POCZĄTEK ZMIAN: Uproszczona logika weryfikacji ---
                     sl_set = position_info.get('stopLoss') and float(position_info.get('stopLoss')) > 0
-
-                    if tp_set and sl_set:
-                        logger.info(f"{log_prefix} SUKCES! Pozycja ma poprawnie ustawione TP={position_info.get('takeProfit')} i SL={position_info.get('stopLoss')}.")
+                    
+                    if sl_set:
+                        logger.info(f"{log_prefix} SUKCES! Pozycja jest poprawnie zabezpieczona Stop Lossem na poziomie {position_info.get('stopLoss')}.")
                         tp_order_id, sl_order_id = executor.find_tpsl_order_ids(symbol, order_data)
                         updates = {
                             'status': 'OPEN',
@@ -235,16 +238,16 @@ def update_filled_orders(executor: BybitExecutor):
                         }
                         state_manager.update_active_order(order_link_id, updates)
                     else:
-                        logger.critical(f"{log_prefix} KRYTYCZNY BŁĄD BEZPIECZEŃSTWA: Pozycja otwarta BEZ TP/SL! Uruchamiam awaryjne zamknięcie.")
+                        logger.critical(f"{log_prefix} KRYTYCZNY BŁĄD BEZPIECZEŃSTWA: Pozycja otwarta BEZ STOP LOSSA! Uruchamiam awaryjne zamknięcie.")
                         position_qty = float(position_info.get('size', 0))
                         position_side = position_info.get('side')
 
                         if position_qty > 0 and executor.close_position_market(symbol, position_qty, position_side):
-                            state_manager.update_active_order(order_link_id, {'status': 'CLOSED_EMERGENCY', 'reason': 'Missing TP/SL on position.'})
+                            state_manager.update_active_order(order_link_id, {'status': 'CLOSED_EMERGENCY', 'reason': 'Missing SL on position.'})
                         else:
                             state_manager.update_active_order(order_link_id, {'status': 'ERROR_NEEDS_MANUAL_CLOSURE'})
+                    # --- KONIEC ZMIAN ---
                 else:
-                    # NOWA LOGIKA: Jeśli po wszystkich próbach nie ma pozycji, oznaczamy ją, by przerwać pętlę.
                     logger.error(f"{log_prefix} KRYTYCZNY BŁĄD: Nie udało się pobrać informacji o pozycji dla {symbol} po {max_retries} próbach. Prawdopodobnie pozycja została zamknięta przed weryfikacją.")
                     state_manager.update_active_order(order_link_id, {'status': 'CLOSED_UNVERIFIED', 'reason': 'Position closed before TP/SL order IDs could be retrieved.'})
 
