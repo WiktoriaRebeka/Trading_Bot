@@ -34,6 +34,7 @@ def process_new_alerts(executor: BybitExecutor):
     else:
         logger.info("Brak nowych alertów do przetworzenia.")
 
+    
 def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: BybitExecutor):
     instrument_rules = get_instrument_rules()
     if not instrument_rules:
@@ -82,18 +83,15 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
                 continue
             tick_size, qty_step = rule["tickSize"], rule["qtyStep"]
 
-            tp_level_key = os.getenv("TAKE_PROFIT_LEVEL", "tp_3_0")
-            target_tp_price = getattr(alert_model, tp_level_key, getattr(alert_model, "tp_3_0"))
+            # Zapisujemy oryginalną cenę TP z alertu do celów analitycznych
             alert_tp_price_to_save = getattr(alert_model, "tp_3_0")
 
             if alert_model.direction == 'LONG':
                 final_entry = round_price_by_tick(alert_model.entry, tick_size, 'down')
                 final_sl = round_price_by_tick(alert_model.sl, tick_size, 'up')
-                final_tp = round_price_by_tick(target_tp_price, tick_size, 'down')
             else: # SHORT
                 final_entry = round_price_by_tick(alert_model.entry, tick_size, 'up')
                 final_sl = round_price_by_tick(alert_model.sl, tick_size, 'down')
-                final_tp = round_price_by_tick(target_tp_price, tick_size, 'up')
 
             risk_usdt = float(os.getenv("RISK_PER_TRADE_USDT", "2.5"))
             final_qty = calculate_position_size(
@@ -105,16 +103,45 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
                 logger.warning(f"[{symbol}] ODRZUCONO (Qty=0): Obliczona wielkość pozycji wynosi zero lub jest ujemna.")
                 continue
 
+            # --- POCZĄTEK IMPLEMENTACJI TRAILING STOP ---
+            
+            # 1. Obliczamy odległość 1R (ryzyko w punktach ceny)
+            risk_distance_1R = abs(final_entry - final_sl)
+            
+            # 2. Ustawiamy szerokość Trailing Stopa na 2R
+            trailing_distance_2R = risk_distance_1R * 2
+            
+            # 3. Definiujemy cenę aktywacji na poziomie tp_3_0 z alertu
+            activation_price_raw = alert_model.tp_3_0
+            activation_price_final = round_price_by_tick(
+                activation_price_raw, 
+                tick_size, 
+                'down' if alert_model.direction == 'LONG' else 'up'
+            )
+
             custom_order_link_id = f"bot_{alert_id.replace('-', '')[:20]}"
             order_params = {
-                "symbol": symbol, "side": "Buy" if alert_model.direction == "LONG" else "Sell",
-                "orderType": "Limit", "qty": final_qty, "price": final_entry,
-                "takeProfit": final_tp, "stopLoss": final_sl,
-                "tpTriggerBy": "MarkPrice", "slTriggerBy": "MarkPrice",
-                "orderLinkId": custom_order_link_id, "timeInForce": "GTC"
+                "symbol": symbol,
+                "side": "Buy" if alert_model.direction == "LONG" else "Sell",
+                "orderType": "Limit",
+                "qty": str(final_qty),
+                "price": str(final_entry),
+                
+                # Usuwamy stały takeProfit
+                
+                "stopLoss": str(final_sl),
+                "slTriggerBy": "MarkPrice",
+                
+                # Dodajemy parametry Trailing Stop
+                "trailingStop": str(trailing_distance_2R),
+                "activePrice": str(activation_price_final),
+                
+                "orderLinkId": custom_order_link_id,
+                "timeInForce": "GTC"
             }
+            # --- KONIEC IMPLEMENTACJI TRAILING STOP ---
             
-            logger.info(f"[{symbol}] Przygotowano finalne zlecenie: {order_params}")
+            logger.info(f"[{symbol}] Przygotowano finalne zlecenie z Trailing Stop: {order_params}")
             response = executor.place_order(order_params)
             
             if response and response.get('orderId'):
@@ -125,7 +152,9 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
                     "symbol": symbol, "limitOrderId": order_id, "orderLinkId": custom_order_link_id,
                     "alert_id": alert_id, "direction": alert_model.direction,
                     "planned_entry_price": final_entry, "planned_sl_price": final_sl, 
-                    "planned_tp_price": final_tp, "planned_qty": final_qty,
+                    # Zapisujemy planowaną cenę aktywacji TS zamiast starego TP
+                    "planned_tp_price": activation_price_final, 
+                    "planned_qty": final_qty,
                     "alert_entry_price": alert_model.entry, "alert_sl_price": alert_model.sl,
                     "alert_tp_price": alert_tp_price_to_save
                 }
