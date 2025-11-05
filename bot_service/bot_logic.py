@@ -34,138 +34,52 @@ def process_new_alerts(executor: BybitExecutor):
     else:
         logger.info("Brak nowych alertów do przetworzenia.")
 
-# Lokalizacja: bot_service/bot_logic.py
+# Lokalizacja: bot_service/bybit_executor.py
 
-# ZASTĄP CAŁĄ TĘ FUNKCJĘ OSTATECZNĄ, BEZPIECZNĄ WERSJĄ:
-def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: BybitExecutor):
-    instrument_rules = get_instrument_rules()
-    if not instrument_rules:
-        logger.error("Nie udało się wczytać zasad instrumentów z Firestore. Przerywam przetwarzanie alertów.")
-        return
-
-    alerts.sort(key=lambda a: a.get('received_at', datetime.min.replace(tzinfo=timezone.utc)))
+def place_order(self, params: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    symbol = params.get('symbol')
+    if not symbol:
+        logger.error("Brak 'symbol' w parametrach zlecenia.")
+        return None
     
-    latest_alerts_per_symbol: Dict[str, Dict[str, Any]] = {}
-    for alert_dict in alerts:
-        symbol = alert_dict.get('symbol')
-        if symbol:
-            latest_alerts_per_symbol[symbol] = alert_dict
-        else:
-            alert_id = alert_dict.get('id', 'unknown_id')
-            logger.warning(f"Pominięto alert {alert_id} z powodu braku symbolu.")
+    if params.get("orderType") == "Limit":
+        has_stop_loss = params.get("stopLoss")
+        has_take_profit = params.get("takeProfit")
+        has_trailing_stop = params.get("trailingStop")
 
-    for symbol, alert_dict in latest_alerts_per_symbol.items():
-        alert_id = alert_dict.get('id', 'unknown_id')
-        
-        if state_manager.is_alert_processed(alert_id):
-            logger.warning(f"[{symbol}] ODRZUCONO: Alert {alert_id} został już wcześniej przetworzony. Pomijam.")
-            continue
-
-        # --- POCZĄTEK KRYTYCZNEJ POPRAWKI BEZPIECZEŃSTWA ---
-        
-        # KROK 1: NAJPIERW sprawdzamy, czy istnieje otwarta pozycja.
-        open_position_side = executor.get_open_position_side(symbol)
-        if open_position_side and open_position_side != "ERROR":
-            logger.warning(f"[{symbol}] ODRZUCONO: Wykryto już otwartą pozycję ({open_position_side}). Nowy alert {alert_id} jest ignorowany, aby chronić istniejącą pozycję i jej zabezpieczenia.")
-            # Oznaczamy alert jako przetworzony, aby nie próbować go przetwarzać w nieskończoność.
-            state_manager.mark_alert_as_processed(alert_id)
-            continue # Przechodzimy do następnego symbolu, NIE wykonując żadnych dalszych akcji.
-
-        # KROK 2: TYLKO jeśli nie ma otwartej pozycji, możemy bezpiecznie anulować stare zlecenia LIMIT.
-        logger.info(f"[{symbol}] Brak otwartej pozycji. Anuluję wszystkie poprzednie, oczekujące zlecenia limit dla tego symbolu.")
-        if not executor.cancel_all_open_orders_for_symbol(symbol):
-             logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się anulować poprzednich zleceň. Pomijam ten symbol w cyklu, aby uniknąć ryzyka.")
-             continue
-        
-        # --- KONIEC KRYTYCZNEJ POPRAWKI BEZPIECZEŃSTWA ---
-
-        try:
-            logger.info(f"--- Rozpoczynam przetwarzanie najnowszego alertu [{symbol}] ID: {alert_id} ---")
-            alert_model = AlertData.model_validate(alert_dict)
-
-            # Usunęliśmy stąd ponowne sprawdzanie pozycji, bo zrobiliśmy to już na początku.
-
-            if not _correct_and_validate_alert(alert_model):
-                logger.warning(f"[{symbol}] ODRZUCONO: Nowy alert nie przeszedł walidacji logicznej.")
-                continue
-
-            rule = instrument_rules.get(symbol)
-            if not rule or "tickSize" not in rule or "qtyStep" not in rule:
-                logger.warning(f"[{symbol}] ODRZUCONO (Brak Zasad): Nie znaleziono reguł dla instrumentu.")
-                continue
-            tick_size, qty_step = rule["tickSize"], rule["qtyStep"]
-
-            alert_tp_price_to_save = getattr(alert_model, "tp_3_0")
-
-            if alert_model.direction == 'LONG':
-                final_entry = round_price_by_tick(alert_model.entry, tick_size, 'down')
-                final_sl = round_price_by_tick(alert_model.sl, tick_size, 'up')
-            else: # SHORT
-                final_entry = round_price_by_tick(alert_model.entry, tick_size, 'up')
-                final_sl = round_price_by_tick(alert_model.sl, tick_size, 'down')
-
-            risk_usdt = float(os.getenv("RISK_PER_TRADE_USDT", "2.5"))
-            final_qty = calculate_position_size(
-                risk_per_trade_usdt=risk_usdt, entry_price=final_entry,
-                sl_price=final_sl, qty_step=qty_step
+        # Zlecenie jest bezpieczne, jeśli ma Stop Loss ORAZ (ma Take Profit LUB ma Trailing Stop)
+        if not has_stop_loss or not (has_take_profit or has_trailing_stop):
+            logger.critical(
+                f"[{symbol}] KRYTYCZNA PRÓBA WYSŁANIA ZLECENIA LIMIT BEZ ZABEZPIECZEŃ! Zlecenie zablokowane. Parametry: {params}"
             )
+            return None
 
-            if not final_qty or final_qty <= 0:
-                logger.warning(f"[{symbol}] ODRZUCONO (Qty=0): Obliczona wielkość pozycji wynosi zero lub jest ujemna.")
-                continue
-
-            risk_distance_1R = abs(final_entry - final_sl)
-            trailing_distance_2R = risk_distance_1R * 2
+    api_symbol = symbol.replace('.P', '')
+    payload = {"category": "linear", "symbol": api_symbol, "side": params['side'], "orderType": params['orderType'], "qty": str(params['qty'])}
+    
+    optional_params = [
+        "price", "takeProfit", "stopLoss", "tpTriggerBy", "slTriggerBy", 
+        "orderLinkId", "timeInForce", "trailingStop", "activePrice"
+    ]
+    
+    for param in optional_params:
+        if param in params:
+            payload[param] = str(params[param])
             
-            activation_price_raw = alert_model.tp_3_0
-            activation_price_final = round_price_by_tick(
-                activation_price_raw, 
-                tick_size, 
-                'down' if alert_model.direction == 'LONG' else 'up'
-            )
-
-            custom_order_link_id = f"bot_{alert_id.replace('-', '')[:20]}"
-            order_params = {
-                "symbol": symbol,
-                "side": "Buy" if alert_model.direction == "LONG" else "Sell",
-                "orderType": "Limit",
-                "qty": str(final_qty),
-                "price": str(final_entry),
-                "stopLoss": str(final_sl),
-                "slTriggerBy": "MarkPrice",
-                "trailingStop": str(trailing_distance_2R),
-                "activePrice": str(activation_price_final),
-                "orderLinkId": custom_order_link_id,
-                "timeInForce": "GTC"
-            }
-            
-            logger.info(f"[{symbol}] Przygotowano finalne zlecenie z Trailing Stop: {order_params}")
-            response = executor.place_order(order_params)
-            
-            if response and response.get('orderId'):
-                order_id = response.get('orderId')
-                logger.info(f"[{symbol}] SUKCES! Zlecenie zintegrowane pomyślnie złożone. Order ID: {order_id}")
-                
-                order_data_to_save = {
-                    "symbol": symbol, "limitOrderId": order_id, "orderLinkId": custom_order_link_id,
-                    "alert_id": alert_id, "direction": alert_model.direction,
-                    "planned_entry_price": final_entry, "planned_sl_price": final_sl, 
-                    "planned_tp_price": activation_price_final, 
-                    "planned_qty": final_qty,
-                    "alert_entry_price": alert_model.entry, "alert_sl_price": alert_model.sl,
-                    "alert_tp_price": alert_tp_price_to_save
-                }
-                state_manager.save_active_order(custom_order_link_id, order_data_to_save)
-                state_manager.mark_alert_as_processed(alert_id)
-            else:
-                logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się złożyć zlecenia (brak orderId w odpowiedzi).")
-
-        except ValidationError as e:
-            logger.error(f"Błąd walidacji danych dla alertu ID: {alert_id}. Dane: {alert_dict}. Błąd Pydantic: {e}")
-        except BybitAPIError as e:
-            logger.error(f"Błąd API Bybit podczas przetwarzania alertu {alert_id}: {e}", exc_info=False)
-        except Exception as e:
-            logger.error(f"Krytyczny błąd podczas przetwarzania alertu {alert_id}: {e}", exc_info=True)
+    logger.info(f"[{symbol}] Wysyłanie zlecenia do Bybit: {payload}")
+    try:
+        result = self._send_request("POST", "/v5/order/create", params=payload)
+        logger.info(f"[{symbol}] Odpowiedź Bybit na place_order: {result}")
+        order_id = result.get("orderId")
+        if order_id:
+            return result
+        logger.error(f"[{symbol}] API Bybit nie zwróciło orderId. Pełna odpowiedź 'result': {result}")
+        return None
+    except BybitAPIError as e:
+        raise
+    except Exception as e:
+        logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD podczas składania zlecenia. Błąd: {e}", exc_info=True)
+        raise
             
 def update_filled_orders(executor: BybitExecutor):
     logger.info("[ORDER_UPDATER] Rozpoczynam cykl aktualizacji aktywnych zleceň.")
