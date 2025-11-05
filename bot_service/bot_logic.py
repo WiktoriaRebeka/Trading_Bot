@@ -34,7 +34,9 @@ def process_new_alerts(executor: BybitExecutor):
     else:
         logger.info("Brak nowych alertów do przetworzenia.")
 
+# Lokalizacja: bot_service/bot_logic.py
 
+# ZASTĄP CAŁĄ TĘ FUNKCJĘ OSTATECZNĄ, BEZPIECZNĄ WERSJĄ:
 def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: BybitExecutor):
     instrument_rules = get_instrument_rules()
     if not instrument_rules:
@@ -59,19 +61,29 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
             logger.warning(f"[{symbol}] ODRZUCONO: Alert {alert_id} został już wcześniej przetworzony. Pomijam.")
             continue
 
-        logger.info(f"[{symbol}] Otrzymano nowy alert. Anuluję wszystkie poprzednie, oczekujące zlecenia limit dla tego symbolu.")
+        # --- POCZĄTEK KRYTYCZNEJ POPRAWKI BEZPIECZEŃSTWA ---
+        
+        # KROK 1: NAJPIERW sprawdzamy, czy istnieje otwarta pozycja.
+        open_position_side = executor.get_open_position_side(symbol)
+        if open_position_side and open_position_side != "ERROR":
+            logger.warning(f"[{symbol}] ODRZUCONO: Wykryto już otwartą pozycję ({open_position_side}). Nowy alert {alert_id} jest ignorowany, aby chronić istniejącą pozycję i jej zabezpieczenia.")
+            # Oznaczamy alert jako przetworzony, aby nie próbować go przetwarzać w nieskończoność.
+            state_manager.mark_alert_as_processed(alert_id)
+            continue # Przechodzimy do następnego symbolu, NIE wykonując żadnych dalszych akcji.
+
+        # KROK 2: TYLKO jeśli nie ma otwartej pozycji, możemy bezpiecznie anulować stare zlecenia LIMIT.
+        logger.info(f"[{symbol}] Brak otwartej pozycji. Anuluję wszystkie poprzednie, oczekujące zlecenia limit dla tego symbolu.")
         if not executor.cancel_all_open_orders_for_symbol(symbol):
              logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się anulować poprzednich zleceň. Pomijam ten symbol w cyklu, aby uniknąć ryzyka.")
              continue
+        
+        # --- KONIEC KRYTYCZNEJ POPRAWKI BEZPIECZEŃSTWA ---
 
         try:
             logger.info(f"--- Rozpoczynam przetwarzanie najnowszego alertu [{symbol}] ID: {alert_id} ---")
             alert_model = AlertData.model_validate(alert_dict)
 
-            open_position_side = executor.get_open_position_side(symbol)
-            if open_position_side and open_position_side != "ERROR":
-                logger.warning(f"[{symbol}] ODRZUCONO: Wykryto już otwartą pozycję ({open_position_side}).")
-                continue
+            # Usunęliśmy stąd ponowne sprawdzanie pozycji, bo zrobiliśmy to już na początku.
 
             if not _correct_and_validate_alert(alert_model):
                 logger.warning(f"[{symbol}] ODRZUCONO: Nowy alert nie przeszedł walidacji logicznej.")
@@ -102,8 +114,6 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
                 logger.warning(f"[{symbol}] ODRZUCONO (Qty=0): Obliczona wielkość pozycji wynosi zero lub jest ujemna.")
                 continue
 
-            # --- POCZĄTEK POPRAWIONEJ IMPLEMENTACJI TRAILING STOP ---
-            
             risk_distance_1R = abs(final_entry - final_sl)
             trailing_distance_2R = risk_distance_1R * 2
             
@@ -121,19 +131,13 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
                 "orderType": "Limit",
                 "qty": str(final_qty),
                 "price": str(final_entry),
-                
-                # Zostawiamy początkowy Stop Loss
                 "stopLoss": str(final_sl),
                 "slTriggerBy": "MarkPrice",
-                
-                # Dodajemy parametry Trailing Stop
                 "trailingStop": str(trailing_distance_2R),
                 "activePrice": str(activation_price_final),
-                
                 "orderLinkId": custom_order_link_id,
                 "timeInForce": "GTC"
             }
-            # --- KONIEC POPRAWIONEJ IMPLEMENTACJI ---
             
             logger.info(f"[{symbol}] Przygotowano finalne zlecenie z Trailing Stop: {order_params}")
             response = executor.place_order(order_params)
