@@ -72,6 +72,7 @@ class BybitExecutor:
         except Exception as e:
             logger.error(f"Nieoczekiwany błąd w _send_request: {e}", exc_info=True)
             raise
+  
 
 
     def place_order(self, params: Dict[str, Any]) -> Optional[Dict[str, str]]:
@@ -80,7 +81,6 @@ class BybitExecutor:
             logger.error("Brak 'symbol' w parametrach zlecenia.")
             return None
         
-        # --- POPRAWIONA LOGIKA ZABEZPIECZAJĄCA ---
         if params.get("orderType") == "Limit":
             has_stop_loss = params.get("stopLoss")
             has_take_profit = params.get("takeProfit")
@@ -92,7 +92,6 @@ class BybitExecutor:
                     f"[{symbol}] KRYTYCZNA PRÓBA WYSŁANIA ZLECENIA LIMIT BEZ ZABEZPIECZEŃ! Zlecenie zablokowane. Parametry: {params}"
                 )
                 return None
-        # --- KONIEC POPRAWIONEJ LOGIKI ---
 
         api_symbol = symbol.replace('.P', '')
         payload = {"category": "linear", "symbol": api_symbol, "side": params['side'], "orderType": params['orderType'], "qty": str(params['qty'])}
