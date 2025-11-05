@@ -34,7 +34,7 @@ def process_new_alerts(executor: BybitExecutor):
     else:
         logger.info("Brak nowych alertów do przetworzenia.")
 
-    
+
 def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: BybitExecutor):
     instrument_rules = get_instrument_rules()
     if not instrument_rules:
@@ -102,15 +102,11 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
                 logger.warning(f"[{symbol}] ODRZUCONO (Qty=0): Obliczona wielkość pozycji wynosi zero lub jest ujemna.")
                 continue
 
-            # --- POCZĄTEK IMPLEMENTACJI TRAILING STOP ---
+            # --- POCZĄTEK POPRAWIONEJ IMPLEMENTACJI TRAILING STOP ---
             
-            # 1. Obliczamy odległość 1R (ryzyko w punktach ceny)
             risk_distance_1R = abs(final_entry - final_sl)
-            
-            # 2. Ustawiamy szerokość Trailing Stopa na 2R
             trailing_distance_2R = risk_distance_1R * 2
             
-            # 3. Definiujemy cenę aktywacji na poziomie tp_3_0 z alertu
             activation_price_raw = alert_model.tp_3_0
             activation_price_final = round_price_by_tick(
                 activation_price_raw, 
@@ -126,16 +122,18 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
                 "qty": str(final_qty),
                 "price": str(final_entry),
                 
-                # --- ZMIANA: Usunięto 'stopLoss' i 'slTriggerBy' ---
-                # Zakładamy, że Trailing Stop jest jedynym wymaganym zabezpieczeniem.
+                # Zostawiamy początkowy Stop Loss
+                "stopLoss": str(final_sl),
+                "slTriggerBy": "MarkPrice",
                 
+                # Dodajemy parametry Trailing Stop
                 "trailingStop": str(trailing_distance_2R),
                 "activePrice": str(activation_price_final),
                 
                 "orderLinkId": custom_order_link_id,
                 "timeInForce": "GTC"
             }
-            # --- KONIEC IMPLEMENTACJI TRAILING STOP ---
+            # --- KONIEC POPRAWIONEJ IMPLEMENTACJI ---
             
             logger.info(f"[{symbol}] Przygotowano finalne zlecenie z Trailing Stop: {order_params}")
             response = executor.place_order(order_params)
@@ -164,7 +162,6 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
             logger.error(f"Błąd API Bybit podczas przetwarzania alertu {alert_id}: {e}", exc_info=False)
         except Exception as e:
             logger.error(f"Krytyczny błąd podczas przetwarzania alertu {alert_id}: {e}", exc_info=True)
-
             
 def update_filled_orders(executor: BybitExecutor):
     logger.info("[ORDER_UPDATER] Rozpoczynam cykl aktualizacji aktywnych zleceň.")

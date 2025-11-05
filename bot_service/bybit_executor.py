@@ -73,30 +73,30 @@ class BybitExecutor:
             logger.error(f"Nieoczekiwany błąd w _send_request: {e}", exc_info=True)
             raise
 
+
     def place_order(self, params: Dict[str, Any]) -> Optional[Dict[str, str]]:
         symbol = params.get('symbol')
         if not symbol:
             logger.error("Brak 'symbol' w parametrach zlecenia.")
             return None
         
-        # --- POCZĄTEK ZMIAN: Aktualizacja logiki zabezpieczającej ---
+        # --- POPRAWIONA LOGIKA ZABEZPIECZAJĄCA ---
         if params.get("orderType") == "Limit":
             has_stop_loss = params.get("stopLoss")
             has_take_profit = params.get("takeProfit")
             has_trailing_stop = params.get("trailingStop")
 
-            # Zlecenie jest bezpieczne, jeśli ma Stop Loss ORAZ (Take Profit LUB Trailing Stop)
+            # Zlecenie jest bezpieczne, jeśli ma Stop Loss ORAZ (ma Take Profit LUB ma Trailing Stop)
             if not has_stop_loss or not (has_take_profit or has_trailing_stop):
                 logger.critical(
                     f"[{symbol}] KRYTYCZNA PRÓBA WYSŁANIA ZLECENIA LIMIT BEZ ZABEZPIECZEŃ! Zlecenie zablokowane. Parametry: {params}"
                 )
                 return None
-        # --- KONIEC ZMIAN ---
+        # --- KONIEC POPRAWIONEJ LOGIKI ---
 
         api_symbol = symbol.replace('.P', '')
         payload = {"category": "linear", "symbol": api_symbol, "side": params['side'], "orderType": params['orderType'], "qty": str(params['qty'])}
         
-        # Zaktualizowana lista parametrów, które mogą być wysłane
         optional_params = [
             "price", "takeProfit", "stopLoss", "tpTriggerBy", "slTriggerBy", 
             "orderLinkId", "timeInForce", "trailingStop", "activePrice"
