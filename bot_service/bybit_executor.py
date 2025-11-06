@@ -310,3 +310,54 @@ class BybitExecutor:
         except Exception as e:
             logger.warning(f"[{symbol}] Nie udało się pobrać ID zleceň TP/SL: {e}")
             return None, None
+
+
+    def set_trailing_stop_for_position(self, symbol: str, trailing_stop: str, active_price: str) -> bool:
+        """Ustawia Trailing Stop dla istniejącej otwartej pozycji."""
+        api_symbol = symbol.replace('.P', '')
+        payload = {
+            "category": "linear",
+            "symbol": api_symbol,
+            "trailingStop": trailing_stop,
+            "activePrice": active_price,
+            "tpslMode": "Partial" # Ważne, aby nie nadpisać istniejącego SL
+        }
+        logger.info(f"[{symbol}] Wysyłanie zlecenia ustawiającego Trailing Stop: {payload}")
+        try:
+            self._send_request("POST", "/v5/position/set-tpsl", params=payload)
+            logger.info(f"[{symbol}] Pomyślnie wysłano zlecenie ustawienia Trailing Stop.")
+            return True
+        except BybitAPIError as e:
+            logger.error(f"[{symbol}] Błąd API podczas ustawiania Trailing Stop: {e}")
+            return False
+        except Exception as e:
+            logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD podczas ustawiania Trailing Stop: {e}", exc_info=True)
+            return False
+
+
+    def get_latest_prices(self, symbols: List[str]) -> Dict[str, Dict[str, Any]]:
+        """Pobiera najnowsze informacje (ticker) dla listy symboli."""
+        if not symbols:
+            return {}
+        
+        endpoint = "/v5/market/tickers"
+        params = {"category": "linear"}
+        
+        # Jeśli jest tylko jeden symbol, możemy go podać bezpośrednio
+        if len(symbols) == 1:
+            params["symbol"] = symbols[0].replace('.P', '')
+        
+        try:
+            result = self._send_request("GET", endpoint, params=params)
+            price_data = {}
+            if result and result.get('list'):
+                for ticker in result['list']:
+                    # Kluczem w naszej mapie jest symbol z ".P"
+                    full_symbol = f"{ticker.get('symbol')}.P"
+                    price_data[full_symbol] = ticker
+                logger.info(f"Pobrano aktualne ceny dla {len(price_data)}/{len(symbols)} symboli.")
+                return price_data
+            return {}
+        except Exception as e:
+            logger.error(f"Błąd podczas pobierania aktualnych cen: {e}")
+            return {}
