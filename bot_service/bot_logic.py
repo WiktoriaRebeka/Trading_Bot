@@ -109,8 +109,14 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
                 continue
 
             risk_distance_1R = abs(final_entry - final_sl)
-            trailing_distance_2R = risk_distance_1R * 2
+            trailing_distance_2R_raw = risk_distance_1R * 2
             
+            trailing_distance_final = round_price_by_tick(
+                trailing_distance_2R_raw,
+                tick_size,
+                'none' # Używamy standardowego zaokrąglania, kierunek nie ma znaczenia dla odległości
+            )
+
             activation_price_raw = alert_model.tp_3_0
             activation_price_final = round_price_by_tick(
                 activation_price_raw, 
@@ -127,8 +133,9 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
                 "price": str(final_entry),
                 "stopLoss": str(final_sl),
                 "slTriggerBy": "MarkPrice",
-                "trailingStop": str(trailing_distance_2R),
+                "trailingStop": str(trailing_distance_final), # Używamy sformatowanej wartości
                 "activePrice": str(activation_price_final),
+                "tpTriggerBy": "MarkPrice", # Dodajemy jako dodatkowe zabezpieczenie i dobrą praktykę
                 "orderLinkId": custom_order_link_id,
                 "timeInForce": "GTC"
             }
