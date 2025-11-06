@@ -34,6 +34,9 @@ def process_new_alerts(executor: BybitExecutor):
     else:
         logger.info("Brak nowych alertów do przetworzenia.")
 
+# Lokalizacja: bot_service/bot_logic.py
+# Wklej całą tę funkcję w miejsce istniejącej.
+
 def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: BybitExecutor):
     instrument_rules = get_instrument_rules()
     if not instrument_rules:
@@ -73,9 +76,10 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
             logger.info(f"--- Rozpoczynam przetwarzanie najnowszego alertu [{symbol}] ID: {alert_id} ---")
             alert_model = AlertData.model_validate(alert_dict)
 
+            # Błędy walidacji są permanentne - oznaczamy alert i przechodzimy dalej
             if not _correct_and_validate_alert(alert_model):
                 logger.warning(f"[{symbol}] ODRZUCONO: Nowy alert nie przeszedł walidacji logicznej.")
-                state_manager.mark_alert_as_processed(alert_id) # Oznaczamy jako przetworzony, by nie próbować ponownie
+                state_manager.mark_alert_as_processed(alert_id)
                 continue
 
             rule = instrument_rules.get(symbol)
@@ -98,6 +102,7 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
                 sl_price=final_sl, qty_step=qty_step
             )
 
+            # Błąd obliczenia Qty jest permanentny - oznaczamy i przechodzimy dalej
             if not final_qty or final_qty <= 0:
                 logger.warning(f"[{symbol}] ODRZUCONO (Qty=0): Obliczona wielkość pozycji wynosi zero lub jest ujemna.")
                 state_manager.mark_alert_as_processed(alert_id)
@@ -131,6 +136,8 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
             response = executor.place_order(order_params)
             
             if response and response.get('orderId'):
+                # --- SUKCES ---
+                # Tylko tutaj, po pomyślnym złożeniu zlecenia, oznaczamy alert jako przetworzony.
                 order_id = response.get('orderId')
                 logger.info(f"[{symbol}] SUKCES! Zlecenie wejścia pomyślnie złożone. Order ID: {order_id}")
                 
@@ -146,20 +153,26 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
                     "ts_status": "PENDING"
                 }
                 state_manager.save_active_order(custom_order_link_id, order_data_to_save)
-                state_manager.mark_alert_as_processed(alert_id)
+                state_manager.mark_alert_as_processed(alert_id) # <-- ZMIANA: Tylko w przypadku sukcesu
             else:
+                # --- BŁĄD TYMCZASOWY ---
+                # Nie udało się złożyć zlecenia. Logujemy błąd, ale NIE oznaczamy alertu jako przetworzony.
+                # System spróbuje ponownie w następnym cyklu.
                 logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się złożyć zlecenia wejścia (brak orderId w odpowiedzi).")
-                state_manager.mark_alert_as_processed(alert_id)
+                # state_manager.mark_alert_as_processed(alert_id) # <-- ZMIANA: USUNIĘTE
 
-        except ValidationError as e:
-            logger.error(f"Błąd walidacji danych dla alertu ID: {alert_id}. Dane: {alert_dict}. Błąd Pydantic: {e}")
-            state_manager.mark_alert_as_processed(alert_id)
-        except BybitAPIError as e:
-            logger.error(f"Błąd API Bybit podczas przetwarzania alertu {alert_id}: {e}", exc_info=False)
-            state_manager.mark_alert_as_processed(alert_id)
-        except Exception as e:
-            logger.error(f"Krytyczny błąd podczas przetwarzania alertu {alert_id}: {e}", exc_info=True)
-            state_manager.mark_alert_as_processed(alert_id)
+        except (ValidationError, BybitAPIError, Exception) as e:
+            # --- BŁĄD TYMCZASOWY LUB KRYTYCZNY ---
+            # W przypadku jakiegokolwiek błędu API lub innego, logujemy go, ale NIE oznaczamy alertu jako przetworzony.
+            # To pozwoli na ponowną próbę.
+            if isinstance(e, ValidationError):
+                 logger.error(f"Błąd walidacji danych dla alertu ID: {alert_id}. Dane: {alert_dict}. Błąd Pydantic: {e}")
+                 state_manager.mark_alert_as_processed(alert_id) # Błąd walidacji jest permanentny, więc tu zostawiamy
+            elif isinstance(e, BybitAPIError):
+                logger.error(f"Błąd API Bybit podczas przetwarzania alertu {alert_id}: {e}", exc_info=False)
+            else:
+                logger.error(f"Krytyczny błąd podczas przetwarzania alertu {alert_id}: {e}", exc_info=True)
+            # state_manager.mark_alert_as_processed(alert_id) # <-- ZMIANA: USUNIĘTE dla błędów API i ogólnych
             
 
 def update_filled_orders(executor: BybitExecutor):
