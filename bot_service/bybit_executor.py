@@ -83,15 +83,13 @@ class BybitExecutor:
         
         if params.get("orderType") == "Limit":
             has_stop_loss = params.get("stopLoss")
-            has_take_profit = params.get("takeProfit")
-            has_trailing_stop = params.get("trailingStop")
 
-            # Zlecenie jest bezpieczne, jeśli ma Stop Loss ORAZ (ma Take Profit LUB ma Trailing Stop)
-            if not has_stop_loss or not (has_take_profit or has_trailing_stop):
+            if not has_stop_loss:
                 logger.critical(
-                    f"[{symbol}] KRYTYCZNA PRÓBA WYSŁANIA ZLECENIA LIMIT BEZ ZABEZPIECZEŃ! Zlecenie zablokowane. Parametry: {params}"
+                    f"[{symbol}] KRYTYCZNA PRÓBA WYSŁANIA ZLECENIA LIMIT BEZ STOP LOSSA! Zlecenie zablokowane. Parametry: {params}"
                 )
                 return None
+        # --- KONIEC POPRAWKI ---
 
         api_symbol = symbol.replace('.P', '')
         payload = {"category": "linear", "symbol": api_symbol, "side": params['side'], "orderType": params['orderType'], "qty": str(params['qty'])}
@@ -115,6 +113,8 @@ class BybitExecutor:
             logger.error(f"[{symbol}] API Bybit nie zwróciło orderId. Pełna odpowiedź 'result': {result}")
             return None
         except BybitAPIError as e:
+            # Zmieniamy logikę, aby błędy API były rzucane dalej i łapane w bot_logic
+            logger.error(f"[{symbol}] Błąd API Bybit podczas składania zlecenia: {e}")
             raise
         except Exception as e:
             logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD podczas składania zlecenia. Błąd: {e}", exc_info=True)
