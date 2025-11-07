@@ -312,23 +312,30 @@ class BybitExecutor:
             return None, None
 
 
+
     def set_trailing_stop_for_position(self, symbol: str, trailing_stop: str, active_price: str) -> bool:
         """Ustawia Trailing Stop dla istniejącej otwartej pozycji."""
         api_symbol = symbol.replace('.P', '')
+        
+        # --- POCZĄTEK POPRAWKI ---
+        # Zmieniamy endpoint na prawidłowy dla Trailing Stop i usuwamy niepotrzebny parametr 'tpslMode'.
         payload = {
             "category": "linear",
             "symbol": api_symbol,
             "trailingStop": trailing_stop,
             "activePrice": active_price,
-            "tpslMode": "Partial" # Ważne, aby nie nadpisać istniejącego SL
         }
+        
         logger.info(f"[{symbol}] Wysyłanie zlecenia ustawiającego Trailing Stop: {payload}")
         try:
-            self._send_request("POST", "/v5/position/set-tpsl", params=payload)
+            # Używamy poprawnego endpointu: /v5/position/trading-stop
+            self._send_request("POST", "/v5/position/trading-stop", params=payload)
             logger.info(f"[{symbol}] Pomyślnie wysłano zlecenie ustawienia Trailing Stop.")
             return True
+        # --- KONIEC POPRAWKI ---
         except BybitAPIError as e:
-            logger.error(f"[{symbol}] Błąd API podczas ustawiania Trailing Stop: {e}")
+            # Dodajemy bardziej szczegółowe logowanie błędu API, aby zobaczyć komunikat od Bybit
+            logger.error(f"[{symbol}] Błąd API podczas ustawiania Trailing Stop: [Code: {e.ret_code}] {e.ret_msg}")
             return False
         except Exception as e:
             logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD podczas ustawiania Trailing Stop: {e}", exc_info=True)
