@@ -73,8 +73,6 @@ class BybitExecutor:
             logger.error(f"Nieoczekiwany błąd w _send_request: {e}", exc_info=True)
             raise
   
-
-
     def place_order(self, params: Dict[str, Any]) -> Optional[Dict[str, str]]:
         symbol = params.get('symbol')
         if not symbol:
@@ -82,22 +80,14 @@ class BybitExecutor:
             return None
         
         if params.get("orderType") == "Limit":
-            has_stop_loss = params.get("stopLoss")
-
-            if not has_stop_loss:
-                logger.critical(
-                    f"[{symbol}] KRYTYCZNA PRÓBA WYSŁANIA ZLECENIA LIMIT BEZ STOP LOSSA! Zlecenie zablokowane. Parametry: {params}"
-                )
+            if not params.get("stopLoss"):
+                logger.critical(f"[{symbol}] KRYTYCZNA PRÓBA WYSŁANIA ZLECENIA LIMIT BEZ STOP LOSSA! Zlecenie zablokowane.")
                 return None
-        # --- KONIEC POPRAWKI ---
 
         api_symbol = symbol.replace('.P', '')
         payload = {"category": "linear", "symbol": api_symbol, "side": params['side'], "orderType": params['orderType'], "qty": str(params['qty'])}
         
-        optional_params = [
-            "price", "takeProfit", "stopLoss", "tpTriggerBy", "slTriggerBy", 
-            "orderLinkId", "timeInForce", "trailingStop", "activePrice"
-        ]
+        optional_params = ["price", "stopLoss", "slTriggerBy", "orderLinkId", "timeInForce"]
         
         for param in optional_params:
             if param in params:
@@ -107,18 +97,49 @@ class BybitExecutor:
         try:
             result = self._send_request("POST", "/v5/order/create", params=payload)
             logger.info(f"[{symbol}] Odpowiedź Bybit na place_order: {result}")
-            order_id = result.get("orderId")
-            if order_id:
+            if result.get("orderId"):
                 return result
-            logger.error(f"[{symbol}] API Bybit nie zwróciło orderId. Pełna odpowiedź 'result': {result}")
             return None
         except BybitAPIError as e:
-            # Zmieniamy logikę, aby błędy API były rzucane dalej i łapane w bot_logic
             logger.error(f"[{symbol}] Błąd API Bybit podczas składania zlecenia: {e}")
             raise
         except Exception as e:
-            logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD podczas składania zlecenia. Błąd: {e}", exc_info=True)
+            logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD podczas składania zlecenia: {e}", exc_info=True)
             raise
+
+    def set_trailing_stop_for_position(self, symbol: str, trailing_stop: str) -> bool:
+        api_symbol = symbol.replace('.P', '')
+        payload = {
+            "category": "linear",
+            "symbol": api_symbol,
+            "trailingStop": trailing_stop,
+            "positionIdx": 0 
+        }
+        logger.info(f"[{symbol}] Wysyłanie finalnego zlecenia ustawiającego Trailing Stop: {payload}")
+        try:
+            self._send_request("POST", "/v5/position/trading-stop", params=payload)
+            logger.info(f"[{symbol}] SUKCES! Pomyślnie wysłano zlecenie ustawienia Trailing Stop.")
+            return True
+        except BybitAPIError as e:
+            logger.error(f"[{symbol}] Błąd API podczas ustawiania Trailing Stop: [Code: {e.ret_code}] {e.ret_msg}")
+            return False
+        except Exception as e:
+            logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD podczas ustawiania Trailing Stop: {e}", exc_info=True)
+            return False
+
+    def find_sl_order_id(self, symbol: str, order_data: Dict[str, Any]) -> Optional[str]:
+        try:
+            active_stop_orders = self.get_active_tp_sl_orders(symbol)
+            for stop_order in active_stop_orders:
+                trigger_price = float(stop_order.get('triggerPrice', 0))
+                if stop_order.get('stopOrderType') == 'StopLoss' and math.isclose(trigger_price, order_data.get('planned_sl_price')):
+                    sl_order_id = stop_order.get('orderId')
+                    logger.info(f"[{symbol}] Znaleziono pasujące zlecenie SL o ID: {sl_order_id}")
+                    return sl_order_id
+            return None
+        except Exception as e:
+            logger.warning(f"[{symbol}] Nie udało się pobrać ID zlecenia SL: {e}")
+            return None
 
     def get_closed_pnl_history(self, start_time_ms: int, limit: int = 100) -> List[Dict[str, Any]]:
         endpoint = "/v5/position/closed-pnl"
@@ -314,31 +335,6 @@ class BybitExecutor:
         except Exception as e:
             logger.warning(f"[{symbol}] Nie udało się pobrać ID zlecenia SL: {e}")
             return None
-
-
-    def set_trailing_stop_for_position(self, symbol: str, trailing_stop: str, active_price: str) -> bool:
-        """Ustawia Trailing Stop dla istniejącej otwartej pozycji."""
-        api_symbol = symbol.replace('.P', '')
-        
-        payload = {
-            "category": "linear",
-            "symbol": api_symbol,
-            "trailingStop": trailing_stop,
-            "positionIdx": 0 
-        }
-        
-        logger.info(f"[{symbol}] Wysyłanie finalnego zlecenia ustawiającego Trailing Stop: {payload}")
-        try:
-            self._send_request("POST", "/v5/position/trading-stop", params=payload)
-            logger.info(f"[{symbol}] SUKCES! Pomyślnie wysłano zlecenie ustawienia Trailing Stop.")
-            return True
-        # --- KONIEC OSTATECZNEJ POPRAWKI ---
-        except BybitAPIError as e:
-            logger.error(f"[{symbol}] Błąd API podczas ustawiania Trailing Stop: [Code: {e.ret_code}] {e.ret_msg}")
-            return False
-        except Exception as e:
-            logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD podczas ustawiania Trailing Stop: {e}", exc_info=True)
-            return False
 
 
     def get_latest_prices(self, symbols: List[str]) -> Dict[str, Dict[str, Any]]:

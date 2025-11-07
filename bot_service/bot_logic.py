@@ -34,13 +34,11 @@ def process_new_alerts(executor: BybitExecutor):
     else:
         logger.info("Brak nowych alertów do przetworzenia.")
 
-# Lokalizacja: bot_service/bot_logic.py
-# Wklej całą tę funkcję w miejsce istniejącej.
 
 def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: BybitExecutor):
     instrument_rules = get_instrument_rules()
     if not instrument_rules:
-        logger.error("Nie udało się wczytać zasad instrumentów z Firestore. Przerywam przetwarzanie alertów.")
+        logger.error("Nie udało się wczytać zasad instrumentów z Firestore.")
         return
 
     alerts.sort(key=lambda a: a.get('received_at', datetime.min.replace(tzinfo=timezone.utc)))
@@ -48,43 +46,32 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
     latest_alerts_per_symbol: Dict[str, Dict[str, Any]] = {}
     for alert_dict in alerts:
         symbol = alert_dict.get('symbol')
-        if symbol:
-            latest_alerts_per_symbol[symbol] = alert_dict
-        else:
-            alert_id = alert_dict.get('id', 'unknown_id')
-            logger.warning(f"Pominięto alert {alert_id} z powodu braku symbolu.")
+        if symbol: latest_alerts_per_symbol[symbol] = alert_dict
 
     for symbol, alert_dict in latest_alerts_per_symbol.items():
         alert_id = alert_dict.get('id', 'unknown_id')
         
         if state_manager.is_alert_processed(alert_id):
-            logger.warning(f"[{symbol}] ODRZUCONO: Alert {alert_id} został już wcześniej przetworzony. Pomijam.")
             continue
 
         open_position_side = executor.get_open_position_side(symbol)
         if open_position_side and open_position_side != "ERROR":
-            logger.warning(f"[{symbol}] ODRZUCONO: Wykryto już otwartą pozycję ({open_position_side}). Nowy alert {alert_id} jest ignorowany.")
             state_manager.mark_alert_as_processed(alert_id)
             continue
 
-        logger.info(f"[{symbol}] Brak otwartej pozycji. Anuluję wszystkie poprzednie, oczekujące zlecenia limit dla tego symbolu.")
         if not executor.cancel_all_open_orders_for_symbol(symbol):
-             logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się anulować poprzednich zleceń. Pomijam ten symbol w cyklu.")
+             logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się anulować poprzednich zleceń.")
              continue
         
         try:
-            logger.info(f"--- Rozpoczynam przetwarzanie najnowszego alertu [{symbol}] ID: {alert_id} ---")
             alert_model = AlertData.model_validate(alert_dict)
 
-            # Błędy walidacji są permanentne - oznaczamy alert i przechodzimy dalej
             if not _correct_and_validate_alert(alert_model):
-                logger.warning(f"[{symbol}] ODRZUCONO: Nowy alert nie przeszedł walidacji logicznej.")
                 state_manager.mark_alert_as_processed(alert_id)
                 continue
 
             rule = instrument_rules.get(symbol)
             if not rule or "tickSize" not in rule or "qtyStep" not in rule:
-                logger.warning(f"[{symbol}] ODRZUCONO (Brak Zasad): Nie znaleziono reguł dla instrumentu.")
                 state_manager.mark_alert_as_processed(alert_id)
                 continue
             tick_size, qty_step = rule["tickSize"], rule["qtyStep"]
@@ -92,173 +79,109 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
             if alert_model.direction == 'LONG':
                 final_entry = round_price_by_tick(alert_model.entry, tick_size, 'down')
                 final_sl = round_price_by_tick(alert_model.sl, tick_size, 'up')
-            else: # SHORT
+            else:
                 final_entry = round_price_by_tick(alert_model.entry, tick_size, 'up')
                 final_sl = round_price_by_tick(alert_model.sl, tick_size, 'down')
 
             risk_usdt = float(os.getenv("RISK_PER_TRADE_USDT", "2.5"))
-            final_qty = calculate_position_size(
-                risk_per_trade_usdt=risk_usdt, entry_price=final_entry,
-                sl_price=final_sl, qty_step=qty_step
-            )
+            final_qty = calculate_position_size(risk_per_trade_usdt=risk_usdt, entry_price=final_entry, sl_price=final_sl, qty_step=qty_step)
 
-            # Błąd obliczenia Qty jest permanentny - oznaczamy i przechodzimy dalej
             if not final_qty or final_qty <= 0:
-                logger.warning(f"[{symbol}] ODRZUCONO (Qty=0): Obliczona wielkość pozycji wynosi zero lub jest ujemna.")
                 state_manager.mark_alert_as_processed(alert_id)
                 continue
 
             risk_distance_1R = abs(final_entry - final_sl)
-            trailing_distance_2R_raw = risk_distance_1R * 2
-            trailing_distance_final = round_price_by_tick(
-                trailing_distance_2R_raw, tick_size, 'none'
-            )
-            activation_price_raw = alert_model.tp_3_0
-            activation_price_final = round_price_by_tick(
-                activation_price_raw, tick_size, 'down' if alert_model.direction == 'LONG' else 'up'
-            )
+            trailing_distance_final = round_price_by_tick(risk_distance_1R * 2, tick_size, 'none')
+            activation_price_final = round_price_by_tick(alert_model.tp_3_0, tick_size, 'down' if alert_model.direction == 'LONG' else 'up')
 
             custom_order_link_id = f"bot_{alert_id.replace('-', '')[:20]}"
-            
             order_params = {
-                "symbol": symbol,
-                "side": "Buy" if alert_model.direction == "LONG" else "Sell",
-                "orderType": "Limit",
-                "qty": str(final_qty),
-                "price": str(final_entry),
-                "stopLoss": str(final_sl),
-                "slTriggerBy": "MarkPrice",
-                "orderLinkId": custom_order_link_id,
-                "timeInForce": "GTC"
+                "symbol": symbol, "side": "Buy" if alert_model.direction == "LONG" else "Sell",
+                "orderType": "Limit", "qty": str(final_qty), "price": str(final_entry),
+                "stopLoss": str(final_sl), "slTriggerBy": "MarkPrice",
+                "orderLinkId": custom_order_link_id, "timeInForce": "GTC"
             }
             
-            logger.info(f"[{symbol}] Przygotowano zlecenie wejścia z SL: {order_params}")
             response = executor.place_order(order_params)
             
             if response and response.get('orderId'):
-                # --- SUKCES ---
-                # Tylko tutaj, po pomyślnym złożeniu zlecenia, oznaczamy alert jako przetworzony.
                 order_id = response.get('orderId')
-                logger.info(f"[{symbol}] SUKCES! Zlecenie wejścia pomyślnie złożone. Order ID: {order_id}")
-                
                 order_data_to_save = {
                     "symbol": symbol, "limitOrderId": order_id, "orderLinkId": custom_order_link_id,
                     "alert_id": alert_id, "direction": alert_model.direction,
                     "planned_entry_price": final_entry, "planned_sl_price": final_sl, 
-                    "planned_qty": final_qty,
-                    "alert_entry_price": alert_model.entry, "alert_sl_price": alert_model.sl,
-                    "alert_tp_price": getattr(alert_model, "tp_3_0"),
-                    "ts_activation_price": activation_price_final,
-                    "ts_distance": trailing_distance_final,
+                    "planned_qty": final_qty, "alert_entry_price": alert_model.entry, 
+                    "alert_sl_price": alert_model.sl, "alert_tp_price": getattr(alert_model, "tp_3_0"),
+                    "ts_activation_price": activation_price_final, "ts_distance": trailing_distance_final,
                     "ts_status": "PENDING"
                 }
                 state_manager.save_active_order(custom_order_link_id, order_data_to_save)
-                state_manager.mark_alert_as_processed(alert_id) # <-- ZMIANA: Tylko w przypadku sukcesu
+                state_manager.mark_alert_as_processed(alert_id)
             else:
-                # --- BŁĄD TYMCZASOWY ---
-                # Nie udało się złożyć zlecenia. Logujemy błąd, ale NIE oznaczamy alertu jako przetworzony.
-                # System spróbuje ponownie w następnym cyklu.
-                logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się złożyć zlecenia wejścia (brak orderId w odpowiedzi).")
-                # state_manager.mark_alert_as_processed(alert_id) # <-- ZMIANA: USUNIĘTE
+                logger.error(f"[{symbol}] BŁĄD: Nie udało się złożyć zlecenia wejścia.")
 
         except (ValidationError, BybitAPIError, Exception) as e:
-            # --- BŁĄD TYMCZASOWY LUB KRYTYCZNY ---
-            # W przypadku jakiegokolwiek błędu API lub innego, logujemy go, ale NIE oznaczamy alertu jako przetworzony.
-            # To pozwoli na ponowną próbę.
             if isinstance(e, ValidationError):
-                 logger.error(f"Błąd walidacji danych dla alertu ID: {alert_id}. Dane: {alert_dict}. Błąd Pydantic: {e}")
-                 state_manager.mark_alert_as_processed(alert_id) # Błąd walidacji jest permanentny, więc tu zostawiamy
+                 logger.error(f"Błąd walidacji danych dla alertu ID: {alert_id}: {e}")
+                 state_manager.mark_alert_as_processed(alert_id)
             elif isinstance(e, BybitAPIError):
                 logger.error(f"Błąd API Bybit podczas przetwarzania alertu {alert_id}: {e}", exc_info=False)
             else:
                 logger.error(f"Krytyczny błąd podczas przetwarzania alertu {alert_id}: {e}", exc_info=True)
-            # state_manager.mark_alert_as_processed(alert_id) # <-- ZMIANA: USUNIĘTE dla błędów API i ogólnych
-            
-
 
 def update_filled_orders(executor: BybitExecutor):
     logger.info("[ORDER_UPDATER] Rozpoczynam cykl aktualizacji.")
     
-    # --- CZĘŚĆ 1: Obsługa zleceń oczekujących na wejście (status PLACED lub brak statusu) ---
     placed_orders_docs = list(state_manager.get_orders_by_status('PLACED'))
     legacy_orders_docs = list(state_manager.get_orders_without_status())
     orders_to_check_entry = placed_orders_docs + legacy_orders_docs
 
     if orders_to_check_entry:
-        logger.info(f"[ORDER_UPDATER] Przetwarzam {len(orders_to_check_entry)} zleceń oczekujących na wejście.")
         for order_doc in orders_to_check_entry:
             order_data = order_doc.to_dict()
             order_link_id = order_doc.id
             symbol = order_data.get('symbol')
             log_prefix = f"[{symbol}|{order_link_id}]"
-
             try:
                 order_details = executor.get_open_order_by_id(order_link_id=order_link_id)
-                
+                if not order_details: order_details = executor.get_order_history_by_id(order_link_id=order_link_id)
                 if not order_details:
-                    order_details = executor.get_order_history_by_id(order_link_id=order_link_id)
-
-                if not order_details:
-                    logger.warning(f"{log_prefix} Nie można odnaleźć zlecenia. Oznaczam jako 'UNKNOWN'.")
                     state_manager.update_active_order(order_link_id, {'status': 'UNKNOWN'})
                     continue
 
                 order_status = order_details.get('orderStatus')
-
                 if order_status == 'Filled':
-                    logger.info(f"{log_prefix} Zlecenie otwierające zrealizowane! Weryfikuję pozycję...")
                     position_info = None
-                    for attempt in range(3):
+                    for _ in range(3):
                         position_info = executor.get_position_info(symbol)
                         if position_info: break
                         time.sleep(2)
 
                     if position_info:
-                        sl_set = position_info.get('stopLoss') and float(position_info.get('stopLoss')) > 0
-                        if sl_set:
-                            logger.info(f"{log_prefix} SUKCES! Pozycja zabezpieczona SL. Zmieniam status na 'OPEN'.")
-                            # --- POCZĄTEK POPRAWKI ---
-                            # Używamy nowej funkcji i zapisujemy tylko slOrderId
+                        if position_info.get('stopLoss') and float(position_info.get('stopLoss')) > 0:
                             sl_order_id = executor.find_sl_order_id(symbol, order_data)
-                            updates = {
-                                'status': 'OPEN',
-                                'slOrderId': sl_order_id,
-                                'position_opened_at': datetime.now(timezone.utc)
-                            }
-                            # --- KONIEC POPRAWKI ---
+                            updates = {'status': 'OPEN', 'slOrderId': sl_order_id, 'position_opened_at': datetime.now(timezone.utc)}
                             state_manager.update_active_order(order_link_id, updates)
                         else:
-                            logger.critical(f"{log_prefix} KRYTYCZNY BŁĄD: Pozycja otwarta BEZ STOP LOSSA! Awaryjne zamknięcie.")
-                            qty = float(position_info.get('size', 0))
-                            side = position_info.get('side')
+                            qty, side = float(position_info.get('size', 0)), position_info.get('side')
                             if qty > 0 and executor.close_position_market(symbol, qty, side):
                                 state_manager.update_active_order(order_link_id, {'status': 'CLOSED_EMERGENCY', 'reason': 'Missing SL.'})
                             else:
                                 state_manager.update_active_order(order_link_id, {'status': 'ERROR_NEEDS_MANUAL_CLOSURE'})
                     else:
-                        logger.error(f"{log_prefix} KRYTYCZNY BŁĄD: Nie udało się pobrać info o pozycji po realizacji zlecenia.")
                         state_manager.update_active_order(order_link_id, {'status': 'CLOSED_UNVERIFIED'})
-
                 elif order_status in ['Cancelled', 'Rejected']:
-                    logger.warning(f"{log_prefix} Zlecenie anulowane/odrzucone. Usuwam z aktywnych.")
                     state_manager.delete_active_order_by_id(order_link_id)
-                
-                elif order_status in ['New', 'PartiallyFilled']:
-                    if 'status' not in order_data:
-                        state_manager.update_active_order(order_link_id, {'status': 'PLACED'})
+                elif 'status' not in order_data:
+                    state_manager.update_active_order(order_link_id, {'status': 'PLACED'})
             except Exception as e:
                 logger.error(f"{log_prefix} Błąd podczas aktualizacji zlecenia PLACED: {e}", exc_info=True)
 
-    # --- CZĘŚĆ 2: Obsługa otwartych pozycji i aktywacja TS (pozostaje bez zmian) ---
     open_orders_docs = list(state_manager.get_orders_by_status('OPEN'))
-    if not open_orders_docs:
-        return
+    if not open_orders_docs: return
 
-    logger.info(f"[ORDER_UPDATER] Monitoruję {len(open_orders_docs)} otwartych pozycji pod kątem aktywacji TS.")
-    
     symbols_to_check = list({doc.to_dict().get('symbol') for doc in open_orders_docs if doc.to_dict().get('symbol')})
-    if not symbols_to_check:
-        return
+    if not symbols_to_check: return
         
     latest_prices = executor.get_latest_prices(symbols_to_check)
 
@@ -269,76 +192,54 @@ def update_filled_orders(executor: BybitExecutor):
             symbol = order_data.get('symbol')
             log_prefix = f"[{symbol}|{order_link_id}]"
 
-            if order_data.get("ts_status") != "PENDING":
-                continue
-
+            if order_data.get("ts_status") != "PENDING": continue
             current_price_info = latest_prices.get(symbol)
-            if not current_price_info:
-                continue
+            if not current_price_info: continue
             
             mark_price = float(current_price_info.get('markPrice', 0))
             activation_price = order_data.get("ts_activation_price")
             direction = order_data.get("direction")
 
-            if not all([mark_price > 0, activation_price, direction]):
-                continue
+            if not all([mark_price > 0, activation_price, direction]): continue
 
-            should_activate = (direction == 'LONG' and mark_price >= activation_price) or \
-                              (direction == 'SHORT' and mark_price <= activation_price)
+            should_activate = (direction == 'LONG' and mark_price >= activation_price) or (direction == 'SHORT' and mark_price <= activation_price)
 
             if should_activate:
-                logger.info(f"{log_prefix} WARUNEK SPEŁNIONY! Cena ({mark_price}) osiągnęła poziom aktywacji ({activation_price}). Ustawiam Trailing Stop.")
-                
                 ts_distance = str(order_data.get("ts_distance"))
-                ts_activation_price = str(order_data.get("ts_activation_price"))
-
-                if executor.set_trailing_stop_for_position(symbol, ts_distance, ts_activation_price):
-                    logger.info(f"{log_prefix} SUKCES! Trailing Stop został pomyślnie ustawiony przez API.")
+                if executor.set_trailing_stop_for_position(symbol, ts_distance):
                     state_manager.update_active_order(order_link_id, {'ts_status': 'ACTIVATED'})
                 else:
-                    logger.error(f"{log_prefix} BŁĄD! Nie udało się ustawić Trailing Stop przez API. Spróbuję ponownie.")
+                    logger.error(f"{log_prefix} BŁĄD! Nie udało się ustawić Trailing Stop przez API.")
         except Exception as e:
-            order_link_id_for_log = order_doc.id if 'order_doc' in locals() else "unknown_id"
-            logger.error(f"[ORDER_UPDATER] Błąd podczas przetwarzania otwartej pozycji {order_link_id_for_log}: {e}", exc_info=True)
-            
-# Lokalizacja: bot_service/bot_logic.py
-# ZASTĄP całą funkcję _find_matching_order tą wersją
+            logger.error(f"[ORDER_UPDATER] Błąd podczas przetwarzania otwartej pozycji {order_doc.id}: {e}", exc_info=True)
 
 def _find_matching_order(pnl_record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """
-    Ulepszona, hierarchiczna funkcja dopasowująca rekord PnL z Bybit do dokumentu w active_orders.
-    """
     symbol = pnl_record.get("symbol")
     pnl_order_link_id = pnl_record.get("orderLinkId")
     pnl_closing_order_id = pnl_record.get("orderId")
     log_prefix = f"[{symbol}|{pnl_closing_order_id}]"
 
-    # --- Metoda 1: Dopasowanie po orderLinkId (najbardziej niezawodna) ---
     if pnl_order_link_id:
-        logger.info(f"{log_prefix} Próba dopasowania (Metoda 1) po orderLinkId: {pnl_order_link_id}")
         matched_order = state_manager.get_active_order_by_id(pnl_order_link_id)
-        if matched_order:
-            logger.info(f"{log_prefix} ✅ MATCH FOUND (Metoda 1: PnL's Order Link ID).")
-            return matched_order
+        if matched_order: return matched_order
 
-    # --- Metoda 2: Dopasowanie po ID zlecenia zamykającego SL (Fallback dla Stop Loss) ---
     if pnl_closing_order_id:
-        logger.info(f"{log_prefix} Metoda 1 zawiodła. Próba dopasowania (Metoda 2) po ID zlecenia zamykającego (SL): {pnl_closing_order_id}")
         matched_order = state_manager.get_active_order_by_sl_order_id(pnl_closing_order_id)
-        if matched_order:
-            logger.info(f"{log_prefix} ✅ MATCH FOUND (Metoda 2: SL Order ID).")
-            return matched_order
+        if matched_order: return matched_order
 
-    # --- Metoda 3: Ostateczny fallback "Best Guess" (dla Trailing Stop i innych zamknięć) ---
-    logger.warning(f"{log_prefix} Metody 1 i 2 zawiodły. Próba dopasowania (Metoda 3) po ostatniej aktywnej pozycji dla symbolu.")
+    try:
+        side = "LONG" if pnl_record.get("side") == "Buy" else "SHORT"
+        qty = float(pnl_record.get("qty", 0.0))
+        avg_entry_price = float(pnl_record.get("avgEntryPrice", 0.0))
+        if symbol and side and qty > 0 and avg_entry_price > 0:
+            matched_order = state_manager.find_active_order_by_trade_details(symbol, side, qty, avg_entry_price)
+            if matched_order: return matched_order
+    except (ValueError, TypeError):
+        pass
+
     side = "LONG" if pnl_record.get("side") == "Buy" else "SHORT"
-    matched_order = state_manager.get_latest_active_order_for_symbol(symbol, side)
-    if matched_order:
-        logger.warning(f"{log_prefix} ✅ MATCH FOUND (Metoda 3: Best Guess). Dopasowano do najnowszej pozycji dla {symbol}/{side}.")
-        return matched_order
+    return state_manager.get_latest_active_order_for_symbol(symbol, side)
 
-    logger.error(f"{log_prefix} OSTATECZNIE nie znaleziono dopasowania dla rekordu PnL.")
-    return None
 
 def log_closed_positions_pnl(executor: BybitExecutor) -> int:
     logger.info("[PNL_LOGGER] Rozpoczynam cykl logowania zamkniętych pozycji.")
