@@ -145,28 +145,42 @@ def update_active_order(order_id: str, updates: Dict[str, Any]):
     except Exception as e:
         logger.error(f"Błąd podczas aktualizacji zlecenia {order_id}: {e}", exc_info=True)
 
-def get_active_order_by_tpsl_order_id(tpsl_order_id: str) -> Optional[Dict[str, Any]]:
+# Lokalizacja: bot_service/state_manager.py
+
+# Zmień nazwę funkcji get_active_order_by_tpsl_order_id na:
+def get_active_order_by_sl_order_id(sl_order_id: str) -> Optional[Dict[str, Any]]:
     try:
         db = _get_db()
-        query_tp = db.collection(constants.ACTIVE_ORDERS_COLLECTION).where('tpOrderId', '==', tpsl_order_id).limit(1)
-        docs_tp = list(query_tp.stream())
-        if docs_tp:
-            doc_snapshot = docs_tp[0]
-            data = doc_snapshot.to_dict()
-            data['id'] = doc_snapshot.id
-            return data
-
-        query_sl = db.collection(constants.ACTIVE_ORDERS_COLLECTION).where('slOrderId', '==', tpsl_order_id).limit(1)
+        # Usuwamy szukanie po tpOrderId
+        query_sl = db.collection(constants.ACTIVE_ORDERS_COLLECTION).where('slOrderId', '==', sl_order_id).limit(1)
         docs_sl = list(query_sl.stream())
         if docs_sl:
             doc_snapshot = docs_sl[0]
             data = doc_snapshot.to_dict()
             data['id'] = doc_snapshot.id
             return data
-            
         return None
     except Exception as e:
-        logger.error(f"Błąd podczas wyszukiwania zlecenia po tpsl_order_id {tpsl_order_id}: {e}", exc_info=True)
+        logger.error(f"Błąd podczas wyszukiwania zlecenia po sl_order_id {sl_order_id}: {e}", exc_info=True)
+        return None
+
+# Dodaj tę nową funkcję na końcu pliku:
+def get_latest_active_order_for_symbol(symbol: str, side: str) -> Optional[Dict[str, Any]]:
+    try:
+        db = _get_db()
+        query = db.collection(constants.ACTIVE_ORDERS_COLLECTION) \
+                  .where('symbol', '==', symbol) \
+                  .where('direction', '==', side) \
+                  .order_by('created_at', direction=firestore.Query.DESCENDING) \
+                  .limit(1)
+        docs = list(query.stream())
+        if docs:
+            data = docs[0].to_dict()
+            data['id'] = docs[0].id
+            return data
+        return None
+    except Exception as e:
+        logger.error(f"Błąd podczas awaryjnego dopasowania zlecenia dla {symbol}/{side}: {e}", exc_info=True)
         return None
 
 def get_all_active_orders() -> Iterable[DocumentSnapshot]:
@@ -199,20 +213,3 @@ def is_pnl_record_processed(order_id: str) -> bool:
         logger.error(f"Błąd podczas sprawdzania blokady PnL dla {order_id}: {e}", exc_info=True)
         return True # W razie błędu lepiej założyć, że był przetworzony, niż ryzykować 
         
-def get_latest_active_order_for_symbol(symbol: str, side: str) -> Optional[Dict[str, Any]]:
-    try:
-        db = _get_db()
-        query = db.collection(constants.ACTIVE_ORDERS_COLLECTION) \
-                  .where('symbol', '==', symbol) \
-                  .where('direction', '==', side) \
-                  .order_by('created_at', direction=firestore.Query.DESCENDING) \
-                  .limit(1)
-        docs = list(query.stream())
-        if docs:
-            data = docs[0].to_dict()
-            data['id'] = docs[0].id
-            return data
-        return None
-    except Exception as e:
-        logger.error(f"Błąd podczas awaryjnego dopasowania zlecenia dla {symbol}/{side}: {e}", exc_info=True)
-        return None

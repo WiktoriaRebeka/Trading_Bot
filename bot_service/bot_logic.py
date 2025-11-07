@@ -175,6 +175,7 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
             # state_manager.mark_alert_as_processed(alert_id) # <-- ZMIANA: USUNIĘTE dla błędów API i ogólnych
             
 
+
 def update_filled_orders(executor: BybitExecutor):
     logger.info("[ORDER_UPDATER] Rozpoczynam cykl aktualizacji.")
     
@@ -195,7 +196,6 @@ def update_filled_orders(executor: BybitExecutor):
                 order_details = executor.get_open_order_by_id(order_link_id=order_link_id)
                 
                 if not order_details:
-                    logger.info(f"{log_prefix} Zlecenie nie jest już aktywne. Sprawdzam historię...")
                     order_details = executor.get_order_history_by_id(order_link_id=order_link_id)
 
                 if not order_details:
@@ -214,14 +214,18 @@ def update_filled_orders(executor: BybitExecutor):
                         time.sleep(2)
 
                     if position_info:
-                        # --- WAŻNY FRAGMENT, KTÓRY ZOSTAŁ PRZYWRÓCONY ---
                         sl_set = position_info.get('stopLoss') and float(position_info.get('stopLoss')) > 0
                         if sl_set:
                             logger.info(f"{log_prefix} SUKCES! Pozycja zabezpieczona SL. Zmieniam status na 'OPEN'.")
+                            # --- POCZĄTEK POPRAWKI ---
+                            # Używamy nowej funkcji i zapisujemy tylko slOrderId
+                            sl_order_id = executor.find_sl_order_id(symbol, order_data)
                             updates = {
                                 'status': 'OPEN',
+                                'slOrderId': sl_order_id,
                                 'position_opened_at': datetime.now(timezone.utc)
                             }
+                            # --- KONIEC POPRAWKI ---
                             state_manager.update_active_order(order_link_id, updates)
                         else:
                             logger.critical(f"{log_prefix} KRYTYCZNY BŁĄD: Pozycja otwarta BEZ STOP LOSSA! Awaryjne zamknięcie.")
@@ -231,7 +235,6 @@ def update_filled_orders(executor: BybitExecutor):
                                 state_manager.update_active_order(order_link_id, {'status': 'CLOSED_EMERGENCY', 'reason': 'Missing SL.'})
                             else:
                                 state_manager.update_active_order(order_link_id, {'status': 'ERROR_NEEDS_MANUAL_CLOSURE'})
-                        # --- KONIEC WAŻNEGO FRAGMENTU ---
                     else:
                         logger.error(f"{log_prefix} KRYTYCZNY BŁĄD: Nie udało się pobrać info o pozycji po realizacji zlecenia.")
                         state_manager.update_active_order(order_link_id, {'status': 'CLOSED_UNVERIFIED'})
@@ -241,18 +244,14 @@ def update_filled_orders(executor: BybitExecutor):
                     state_manager.delete_active_order_by_id(order_link_id)
                 
                 elif order_status in ['New', 'PartiallyFilled']:
-                    logger.info(f"{log_prefix} Zlecenie wciąż aktywne (status: {order_status}).")
                     if 'status' not in order_data:
                         state_manager.update_active_order(order_link_id, {'status': 'PLACED'})
             except Exception as e:
                 logger.error(f"{log_prefix} Błąd podczas aktualizacji zlecenia PLACED: {e}", exc_info=True)
-    else:
-        logger.info("[ORDER_UPDATER] Brak zleceń oczekujących na wejście.")
 
-    # --- CZĘŚĆ 2: Obsługa otwartych pozycji i aktywacja TS ---
+    # --- CZĘŚĆ 2: Obsługa otwartych pozycji i aktywacja TS (pozostaje bez zmian) ---
     open_orders_docs = list(state_manager.get_orders_by_status('OPEN'))
     if not open_orders_docs:
-        logger.info("[ORDER_UPDATER] Brak otwartych pozycji do monitorowania TS.")
         return
 
     logger.info(f"[ORDER_UPDATER] Monitoruję {len(open_orders_docs)} otwartych pozycji pod kątem aktywacji TS.")
@@ -275,7 +274,6 @@ def update_filled_orders(executor: BybitExecutor):
 
             current_price_info = latest_prices.get(symbol)
             if not current_price_info:
-                logger.warning(f"{log_prefix} Brak aktualnej ceny dla symbolu. Spróbuję w następnym cyklu.")
                 continue
             
             mark_price = float(current_price_info.get('markPrice', 0))
@@ -283,7 +281,6 @@ def update_filled_orders(executor: BybitExecutor):
             direction = order_data.get("direction")
 
             if not all([mark_price > 0, activation_price, direction]):
-                logger.error(f"{log_prefix} Brak kluczowych danych do aktywacji TS. Dane: {order_data}")
                 continue
 
             should_activate = (direction == 'LONG' and mark_price >= activation_price) or \
@@ -304,6 +301,9 @@ def update_filled_orders(executor: BybitExecutor):
             order_link_id_for_log = order_doc.id if 'order_doc' in locals() else "unknown_id"
             logger.error(f"[ORDER_UPDATER] Błąd podczas przetwarzania otwartej pozycji {order_link_id_for_log}: {e}", exc_info=True)
             
+# Lokalizacja: bot_service/bot_logic.py
+# ZASTĄP całą funkcję _find_matching_order tą wersją
+
 def _find_matching_order(pnl_record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
     Ulepszona, hierarchiczna funkcja dopasowująca rekord PnL z Bybit do dokumentu w active_orders.
@@ -314,27 +314,30 @@ def _find_matching_order(pnl_record: Dict[str, Any]) -> Optional[Dict[str, Any]]
     log_prefix = f"[{symbol}|{pnl_closing_order_id}]"
 
     # --- Metoda 1: Dopasowanie po orderLinkId (najbardziej niezawodna) ---
-    # Rekord PnL z Bybit zawiera orderLinkId zlecenia OTWIERAJĄCEGO.
-    # Używamy go do bezpośredniego odnalezienia naszego dokumentu w Firestore.
     if pnl_order_link_id:
-        logger.info(f"{log_prefix} Próba dopasowania po orderLinkId z rekordu PnL: {pnl_order_link_id}")
-        # Odpytujemy bazę NA BIEŻĄCO, a nie z pamięci podręcznej
+        logger.info(f"{log_prefix} Próba dopasowania (Metoda 1) po orderLinkId: {pnl_order_link_id}")
         matched_order = state_manager.get_active_order_by_id(pnl_order_link_id)
         if matched_order:
-            logger.info(f"{log_prefix} ✅ MATCH FOUND (Method 1: PnL's Order Link ID).")
+            logger.info(f"{log_prefix} ✅ MATCH FOUND (Metoda 1: PnL's Order Link ID).")
             return matched_order
 
-    # --- Metoda 2: Dopasowanie po ID zlecenia zamykającego (Fallback dla TP/SL) ---
-    # Użyteczna, jeśli z jakiegoś powodu orderLinkId zniknie z odpowiedzi API.
+    # --- Metoda 2: Dopasowanie po ID zlecenia zamykającego SL (Fallback dla Stop Loss) ---
     if pnl_closing_order_id:
-        logger.info(f"{log_prefix} Metoda 1 zawiodła. Próba dopasowania po ID zlecenia zamykającego (TP/SL): {pnl_closing_order_id}")
-        # Odpytujemy bazę NA BIEŻĄCO
-        matched_order = state_manager.get_active_order_by_tpsl_order_id(pnl_closing_order_id)
+        logger.info(f"{log_prefix} Metoda 1 zawiodła. Próba dopasowania (Metoda 2) po ID zlecenia zamykającego (SL): {pnl_closing_order_id}")
+        matched_order = state_manager.get_active_order_by_sl_order_id(pnl_closing_order_id)
         if matched_order:
-            logger.info(f"{log_prefix} ✅ MATCH FOUND (Method 2: TP/SL Order ID).")
+            logger.info(f"{log_prefix} ✅ MATCH FOUND (Metoda 2: SL Order ID).")
             return matched_order
 
-    logger.warning(f"{log_prefix} OSTATECZNIE nie znaleziono dopasowania dla rekordu PnL.")
+    # --- Metoda 3: Ostateczny fallback "Best Guess" (dla Trailing Stop i innych zamknięć) ---
+    logger.warning(f"{log_prefix} Metody 1 i 2 zawiodły. Próba dopasowania (Metoda 3) po ostatniej aktywnej pozycji dla symbolu.")
+    side = "LONG" if pnl_record.get("side") == "Buy" else "SHORT"
+    matched_order = state_manager.get_latest_active_order_for_symbol(symbol, side)
+    if matched_order:
+        logger.warning(f"{log_prefix} ✅ MATCH FOUND (Metoda 3: Best Guess). Dopasowano do najnowszej pozycji dla {symbol}/{side}.")
+        return matched_order
+
+    logger.error(f"{log_prefix} OSTATECZNIE nie znaleziono dopasowania dla rekordu PnL.")
     return None
 
 def log_closed_positions_pnl(executor: BybitExecutor) -> int:

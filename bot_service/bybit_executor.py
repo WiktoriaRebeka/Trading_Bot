@@ -296,20 +296,24 @@ class BybitExecutor:
             logger.error(f"[{symbol}] Błąd podczas pobierania informacji o pozycji: {e}", exc_info=True)
             return None
 
-    def find_tpsl_order_ids(self, symbol: str, order_data: Dict[str, Any]) -> (Optional[str], Optional[str]):
-        tp_order_id, sl_order_id = None, None
+
+
+    def find_sl_order_id(self, symbol: str, order_data: Dict[str, Any]) -> Optional[str]:
+        """Znajduje ID aktywnego zlecenia Stop Loss pasującego do planowanej ceny."""
         try:
             active_stop_orders = self.get_active_tp_sl_orders(symbol)
             for stop_order in active_stop_orders:
                 trigger_price = float(stop_order.get('triggerPrice', 0))
-                if math.isclose(trigger_price, order_data.get('planned_tp_price')):
-                    tp_order_id = stop_order.get('orderId')
-                elif math.isclose(trigger_price, order_data.get('planned_sl_price')):
+                # Szukamy tylko zlecenia, które jest Stop Lossem
+                if stop_order.get('stopOrderType') == 'StopLoss' and math.isclose(trigger_price, order_data.get('planned_sl_price')):
                     sl_order_id = stop_order.get('orderId')
-            return tp_order_id, sl_order_id
+                    logger.info(f"[{symbol}] Znaleziono pasujące zlecenie SL o ID: {sl_order_id}")
+                    return sl_order_id
+            logger.warning(f"[{symbol}] Nie znaleziono aktywnego zlecenia SL pasującego do ceny {order_data.get('planned_sl_price')}.")
+            return None
         except Exception as e:
-            logger.warning(f"[{symbol}] Nie udało się pobrać ID zleceň TP/SL: {e}")
-            return None, None
+            logger.warning(f"[{symbol}] Nie udało się pobrać ID zlecenia SL: {e}")
+            return None
 
 
     def set_trailing_stop_for_position(self, symbol: str, trailing_stop: str, active_price: str) -> bool:
