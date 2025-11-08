@@ -228,32 +228,59 @@ def update_filled_orders(executor: BybitExecutor):
         except Exception as e:
             logger.error(f"[ORDER_UPDATER] Błąd podczas przetwarzania otwartej pozycji {order_doc.id}: {e}", exc_info=True)
 
+# Lokalizacja: bot_service/bot_logic.py
+# ZASTĄP TYLKO tę jedną funkcję w swoim pliku.
+
 def _find_matching_order(pnl_record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Ulepszona, 4-stopniowa, hierarchiczna funkcja dopasowująca rekord PnL.
+    """
     symbol = pnl_record.get("symbol")
     pnl_order_link_id = pnl_record.get("orderLinkId")
     pnl_closing_order_id = pnl_record.get("orderId")
     log_prefix = f"[{symbol}|{pnl_closing_order_id}]"
 
+    # --- Metoda 1: Dopasowanie po orderLinkId (Złoty Standard) ---
     if pnl_order_link_id:
+        logger.info(f"{log_prefix} Próba dopasowania (Metoda 1) po orderLinkId: {pnl_order_link_id}")
         matched_order = state_manager.get_active_order_by_id(pnl_order_link_id)
-        if matched_order: return matched_order
+        if matched_order:
+            logger.info(f"{log_prefix} ✅ MATCH FOUND (Metoda 1: PnL's Order Link ID).")
+            return matched_order
 
+    # --- Metoda 2: Dopasowanie po ID zlecenia zamykającego SL (Fallback dla Stop Loss) ---
     if pnl_closing_order_id:
+        logger.info(f"{log_prefix} Metoda 1 zawiodła. Próba dopasowania (Metoda 2) po ID zlecenia zamykającego (SL): {pnl_closing_order_id}")
         matched_order = state_manager.get_active_order_by_sl_order_id(pnl_closing_order_id)
-        if matched_order: return matched_order
+        if matched_order:
+            logger.info(f"{log_prefix} ✅ MATCH FOUND (Metoda 2: SL Order ID).")
+            return matched_order
 
+    # --- Metoda 3: Dopasowanie po "odcisku palca" transakcji (symbol, kierunek, ilość) ---
+    logger.warning(f"{log_prefix} Metody 1 i 2 zawiodły. Próba dopasowania (Metoda 3) po szczegółach transakcji.")
     try:
         side = "LONG" if pnl_record.get("side") == "Buy" else "SHORT"
         qty = float(pnl_record.get("qty", 0.0))
-        avg_entry_price = float(pnl_record.get("avgEntryPrice", 0.0))
-        if symbol and side and qty > 0 and avg_entry_price > 0:
-            matched_order = state_manager.find_active_order_by_trade_details(symbol, side, qty, avg_entry_price)
-            if matched_order: return matched_order
-    except (ValueError, TypeError):
-        pass
+        
+        if all([symbol, side, qty > 0]):
+            # Używamy nowej, bardziej niezawodnej funkcji, która nie sprawdza ceny
+            matched_order = state_manager.find_active_order_by_details(symbol, side, qty)
+            if matched_order:
+                logger.info(f"{log_prefix} ✅ MATCH FOUND (Metoda 3: Odcisk palca transakcji).")
+                return matched_order
+    except (ValueError, TypeError) as e:
+        logger.error(f"{log_prefix} Błąd podczas przygotowywania danych do dopasowania Metodą 3: {e}")
 
+    # --- Metoda 4: Ostateczny fallback "Best Guess" (działa dzięki indeksowi w Firestore) ---
+    logger.warning(f"{log_prefix} Metody 1, 2 i 3 zawiodły. Próba dopasowania (Metoda 4) po ostatniej aktywnej pozycji dla symbolu.")
     side = "LONG" if pnl_record.get("side") == "Buy" else "SHORT"
-    return state_manager.get_latest_active_order_for_symbol(symbol, side)
+    matched_order = state_manager.get_latest_active_order_for_symbol(symbol, side)
+    if matched_order:
+        logger.warning(f"{log_prefix} ✅ MATCH FOUND (Metoda 4: Best Guess). Dopasowano do najnowszej pozycji dla {symbol}/{side}.")
+        return matched_order
+
+    logger.error(f"{log_prefix} OSTATECZNIE nie znaleziono dopasowania dla rekordu PnL: {pnl_record}")
+    return None
 
 
 def log_closed_positions_pnl(executor: BybitExecutor) -> int:
