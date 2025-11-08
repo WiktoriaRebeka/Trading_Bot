@@ -129,9 +129,11 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
             else:
                 logger.error(f"Krytyczny błąd podczas przetwarzania alertu {alert_id}: {e}", exc_info=True)
 
+
 def update_filled_orders(executor: BybitExecutor):
     logger.info("[ORDER_UPDATER] Rozpoczynam cykl aktualizacji.")
     
+    # --- CZĘŚĆ 1: Obsługa zleceń oczekujących na wejście ---
     placed_orders_docs = list(state_manager.get_orders_by_status('PLACED'))
     legacy_orders_docs = list(state_manager.get_orders_without_status())
     orders_to_check_entry = placed_orders_docs + legacy_orders_docs
@@ -177,6 +179,7 @@ def update_filled_orders(executor: BybitExecutor):
             except Exception as e:
                 logger.error(f"{log_prefix} Błąd podczas aktualizacji zlecenia PLACED: {e}", exc_info=True)
 
+    # --- CZĘŚĆ 2: Obsługa otwartych pozycji i aktywacja TS ---
     open_orders_docs = list(state_manager.get_orders_by_status('OPEN'))
     if not open_orders_docs: return
 
@@ -205,6 +208,18 @@ def update_filled_orders(executor: BybitExecutor):
             should_activate = (direction == 'LONG' and mark_price >= activation_price) or (direction == 'SHORT' and mark_price <= activation_price)
 
             if should_activate:
+                logger.info(f"{log_prefix} WARUNEK SPEŁNIONY! Cena ({mark_price}) osiągnęła poziom aktywacji ({activation_price}).")
+                
+                # --- POCZĄTEK POPRAWKI: Finalne sprawdzenie przed wysłaniem ---
+                logger.info(f"{log_prefix} Wykonuję finalne sprawdzenie, czy pozycja wciąż istnieje przed ustawieniem TS...")
+                if not executor.get_position_info(symbol):
+                    logger.warning(f"{log_prefix} Pozycja została zamknięta przed aktywacją TS. Anuluję ustawianie TS.")
+                    # Oznaczamy jako 'CANCELLED', aby bot nie próbował ponownie
+                    state_manager.update_active_order(order_link_id, {'ts_status': 'CANCELLED'})
+                    continue
+                # --- KONIEC POPRAWKI ---
+
+                logger.info(f"{log_prefix} Pozycja wciąż istnieje. Ustawiam Trailing Stop.")
                 ts_distance = str(order_data.get("ts_distance"))
                 if executor.set_trailing_stop_for_position(symbol, ts_distance):
                     state_manager.update_active_order(order_link_id, {'ts_status': 'ACTIVATED'})
