@@ -70,19 +70,28 @@ def get_active_order_by_sl_order_id(sl_order_id: str) -> Optional[Dict[str, Any]
         logger.error(f"Błąd podczas wyszukiwania zlecenia po sl_order_id {sl_order_id}: {e}", exc_info=True)
         return None
 
-def find_active_order_by_trade_details(symbol: str, side: str, qty: float, entry_price: float) -> Optional[Dict[str, Any]]:
+
+def find_active_order_by_details(symbol: str, side: str, qty: float) -> Optional[Dict[str, Any]]:
+    """Wyszukuje aktywne zlecenie na podstawie symbolu, kierunku i ilości z tolerancją."""
     try:
         docs = _get_db().collection(constants.ACTIVE_ORDERS_COLLECTION) \
             .where('symbol', '==', symbol) \
             .where('direction', '==', side) \
             .stream()
         
+        # Definiujemy małą tolerancję, np. 0.1% wielkości pozycji
+        QTY_TOLERANCE_PERCENT = 0.001 
+
         for doc in docs:
             order_data = doc.to_dict()
-            qty_matches = math.isclose(order_data.get('planned_qty', 0.0), qty)
-            price_matches = math.isclose(order_data.get('planned_entry_price', 0.0), entry_price)
+            planned_qty = order_data.get('planned_qty', 0.0)
             
-            if qty_matches and price_matches:
+            # Obliczamy dopuszczalną różnicę
+            tolerance = planned_qty * QTY_TOLERANCE_PERCENT
+            
+            # Sprawdzamy, czy różnica mieści się w tolerancji
+            if abs(planned_qty - qty) <= tolerance:
+                logger.info(f"Znaleziono dopasowanie po szczegółach (z tolerancją) dla {symbol}. Planowane Qty: {planned_qty}, Rzeczywiste Qty: {qty}")
                 order_data['id'] = doc.id
                 return order_data
         return None
