@@ -91,7 +91,7 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
                 continue
 
             risk_distance_1R = abs(final_entry - final_sl)
-            trailing_distance_final = round_price_by_tick(risk_distance_1R * 1, tick_size, 'none')
+            trailing_distance_final = round_price_by_tick(risk_distance_1R * 2, tick_size, 'none')
             activation_price_final = round_price_by_tick(alert_model.tp_3_0, tick_size, 'down' if alert_model.direction == 'LONG' else 'up')
 
             custom_order_link_id = f"bot_{alert_id.replace('-', '')[:20]}"
@@ -370,7 +370,7 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
         logger.warning(f"Odrzucono alert [{alert.symbol}]: Nielogiczna pozycja. Kierunek: {alert.direction}, Wejście: {alert.entry}, SL: {alert.sl}.")
         return False
     risk_perc = _calculate_risk_percentage(alert.entry, alert.sl)
-    if risk_perc is None or risk_perc < 0.43:
+    if risk_perc is None or risk_perc < 0.25:
         logger.warning(f"Odrzucono alert [{alert.symbol}]: Ryzyko poniżej minimum 0.43%. Obliczone ryzyko: {risk_perc}% (Wejście: {alert.entry}, SL: {alert.sl}).")
         return False
     logger.info(f"Alert [{alert.symbol}] przeszedł walidację. Kierunek: {alert.direction}, Ryzyko: {risk_perc}%.")
