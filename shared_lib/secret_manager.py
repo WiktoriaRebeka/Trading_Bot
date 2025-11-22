@@ -20,7 +20,7 @@ def get_secret(secret_id: str, project_id: str) -> Optional[str]:
     try:
         client = secretmanager.SecretManagerServiceClient()
         # Budujemy pełną ścieżkę do najnowszej wersji sekretu
-        name = f"projects/{project_id}/secrets/{secret_id}/versions/latest"
+        name = f"projects/{project_id}/secrets/{secret_id}/versions/2"
         
         logger.info(f"Pobieranie sekretu: {secret_id}...")
         response = client.access_secret_version(request={"name": name})
