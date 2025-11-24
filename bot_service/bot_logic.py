@@ -360,19 +360,44 @@ def _calculate_risk_percentage(entry_price: float, sl_price: float) -> Optional[
     risk_distance = abs(entry_price - sl_price)
     return round((risk_distance / entry_price) * 100, 4)
 
+# Lokalizacja: bot_service/bot_logic.py
+# ZASTĄP całą tę funkcję w swoim pliku.
+
 def _correct_and_validate_alert(alert: AlertData) -> bool:
+    # Sprawdzenie 1: Poprawny kierunek
     if not alert.direction or alert.direction not in ["LONG", "SHORT"]:
-        logger.warning(f"Odrzucono alert [{alert.symbol}]: Brak lub nieprawidłowy kierunek ('{alert.direction}'). Oryginalny directionCode: {alert.direction_code}.")
+        logger.warning(f"Odrzucono alert [{alert.symbol}]: Brak lub nieprawidłowy kierunek.")
         return False
+        
+    # Sprawdzenie 2: Logiczna pozycja SL względem wejścia
     is_long_ok = (alert.direction == 'LONG' and alert.sl < alert.entry)
     is_short_ok = (alert.direction == 'SHORT' and alert.sl > alert.entry)
     if not (is_long_ok or is_short_ok):
-        logger.warning(f"Odrzucono alert [{alert.symbol}]: Nielogiczna pozycja. Kierunek: {alert.direction}, Wejście: {alert.entry}, SL: {alert.sl}.")
+        logger.warning(f"Odrzucono alert [{alert.symbol}]: Nielogiczna pozycja SL. Kierunek: {alert.direction}, Wejście: {alert.entry}, SL: {alert.sl}.")
         return False
+        
+    # Sprawdzenie 3: Obliczenie ryzyka procentowego
     risk_perc = _calculate_risk_percentage(alert.entry, alert.sl)
-    if risk_perc is None or risk_perc < 0.43:
-        logger.warning(f"Odrzucono alert [{alert.symbol}]: Ryzyko poniżej minimum 0.43%. Obliczone ryzyko: {risk_perc}% (Wejście: {alert.entry}, SL: {alert.sl}).")
+    if risk_perc is None:
         return False
+
+    # ================================================================= #
+    # === TUTAJ SĄ NASZE NOWE FILTRY ===
+    # ================================================================= #
+    MIN_RISK_PERC = 0.25  # Nasz nowy, niższy próg
+    MAX_RISK_PERC = 2.0   # Nasz nowy, górny próg
+
+    # Sprawdzenie 4: Ryzyko nie jest zbyt małe
+    if risk_perc < MIN_RISK_PERC:
+        logger.warning(f"Odrzucono alert [{alert.symbol}]: Ryzyko poniżej minimum {MIN_RISK_PERC}%. Obliczone ryzyko: {risk_perc}%.")
+        return False
+        
+    # Sprawdzenie 5: Ryzyko nie jest zbyt duże
+    if risk_perc > MAX_RISK_PERC:
+        logger.warning(f"Odrzucono alert [{alert.symbol}]: Ryzyko powyżej maksimum {MAX_RISK_PERC}%. Obliczone ryzyko: {risk_perc}%.")
+        return False
+    # ================================================================= #
+
     logger.info(f"Alert [{alert.symbol}] przeszedł walidację. Kierunek: {alert.direction}, Ryzyko: {risk_perc}%.")
     return True
 
