@@ -385,7 +385,7 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
     # === TUTAJ SĄ NASZE NOWE FILTRY ===
     # ================================================================= #
     MIN_RISK_PERC = 0.43  # Nasz nowy, niższy próg
-    MAX_RISK_PERC = 2.5   # Nasz nowy, górny próg
+    MAX_RISK_PERC = 2   # Nasz nowy, górny próg
 
     # Sprawdzenie 4: Ryzyko nie jest zbyt małe
     if risk_perc < MIN_RISK_PERC:
