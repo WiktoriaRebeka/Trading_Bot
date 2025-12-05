@@ -16,7 +16,7 @@ async def _fetch_kline_for_symbol(session: aiohttp.ClientSession, symbol: str, c
     Pobiera najnowszą świecę dla danego symbolu, z ulepszonym logowaniem błędów.
     """
     api_symbol = symbol.replace('.P', '')
-    params = {"category": "linear", "symbol": api_symbol, "interval": "1", "limit": 2}
+    params = {"category": "linear", "symbol": api_symbol, "interval": "5", "limit": 2}
     max_retries = 3
     
     log_extra = {"json_fields": {"cycle_id": cycle_id, "symbol": symbol}}
