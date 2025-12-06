@@ -28,7 +28,7 @@ def round_quantity_by_step(quantity: float, qty_step: str) -> float:
 
 
 def calculate_position_size(
-    risk_per_trade_usdt: float,
+    risk_usdt: float,
     entry_price: float,
     sl_price: float,
     qty_step: str
