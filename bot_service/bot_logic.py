@@ -128,27 +128,24 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
                 logger.error(f"Krytyczny błąd podczas przetwarzania alertu {alert_id}: {e}", exc_info=True)
 
 
+
 def update_filled_orders(executor: BybitExecutor):
     logger.info("[ORDER_UPDATER] Rozpoczynam cykl aktualizacji.")
     
-    # --- CZĘŚĆ 1: Obsługa zleceń oczekujących na wejście ---
+    # --- CZĘŚĆ 1: Obsługa zleceń oczekujących na wejście (bez zmian) ---
     placed_orders_docs = list(state_manager.get_orders_by_status('PLACED'))
     legacy_orders_docs = list(state_manager.get_orders_without_status())
     orders_to_check_entry = placed_orders_docs + legacy_orders_docs
 
     if orders_to_check_entry:
         for order_doc in orders_to_check_entry:
-            order_data = order_doc.to_dict()
-            order_link_id = order_doc.id
-            symbol = order_data.get('symbol')
+            order_data, order_link_id, symbol = order_doc.to_dict(), order_doc.id, order_doc.to_dict().get('symbol')
             log_prefix = f"[{symbol}|{order_link_id}]"
             try:
-                order_details = executor.get_open_order_by_id(order_link_id=order_link_id)
-                if not order_details: order_details = executor.get_order_history_by_id(order_link_id=order_link_id)
+                order_details = executor.get_open_order_by_id(order_link_id) or executor.get_order_history_by_id(order_link_id)
                 if not order_details:
                     state_manager.update_active_order(order_link_id, {'status': 'UNKNOWN'})
                     continue
-
                 order_status = order_details.get('orderStatus')
                 if order_status == 'Filled':
                     position_info = None
@@ -156,18 +153,15 @@ def update_filled_orders(executor: BybitExecutor):
                         position_info = executor.get_position_info(symbol)
                         if position_info: break
                         time.sleep(2)
-
-                    if position_info:
-                        if position_info.get('stopLoss') and float(position_info.get('stopLoss')) > 0:
-                            sl_order_id = executor.find_sl_order_id(symbol, order_data)
-                            updates = {'status': 'OPEN', 'slOrderId': sl_order_id, 'position_opened_at': datetime.now(timezone.utc)}
-                            state_manager.update_active_order(order_link_id, updates)
+                    if position_info and position_info.get('stopLoss') and float(position_info.get('stopLoss')) > 0:
+                        sl_order_id = executor.find_sl_order_id(symbol, order_data)
+                        state_manager.update_active_order(order_link_id, {'status': 'OPEN', 'slOrderId': sl_order_id, 'position_opened_at': datetime.now(timezone.utc)})
+                    elif position_info:
+                        qty, side = float(position_info.get('size', 0)), position_info.get('side')
+                        if qty > 0 and executor.close_position_market(symbol, qty, side):
+                            state_manager.update_active_order(order_link_id, {'status': 'CLOSED_EMERGENCY', 'reason': 'Missing SL.'})
                         else:
-                            qty, side = float(position_info.get('size', 0)), position_info.get('side')
-                            if qty > 0 and executor.close_position_market(symbol, qty, side):
-                                state_manager.update_active_order(order_link_id, {'status': 'CLOSED_EMERGENCY', 'reason': 'Missing SL.'})
-                            else:
-                                state_manager.update_active_order(order_link_id, {'status': 'ERROR_NEEDS_MANUAL_CLOSURE'})
+                            state_manager.update_active_order(order_link_id, {'status': 'ERROR_NEEDS_MANUAL_CLOSURE'})
                     else:
                         state_manager.update_active_order(order_link_id, {'status': 'CLOSED_UNVERIFIED'})
                 elif order_status in ['Cancelled', 'Rejected']:
@@ -179,12 +173,19 @@ def update_filled_orders(executor: BybitExecutor):
 
     # --- CZĘŚĆ 2: Obsługa otwartych pozycji i aktywacja TS ---
     open_orders_docs = list(state_manager.get_orders_by_status('OPEN'))
-    if not open_orders_docs: return
+    if not open_orders_docs: 
+        logger.info("[ORDER_UPDATER] Brak otwartych pozycji do monitorowania TS.")
+        return
 
+    logger.info(f"[ORDER_UPDATER] Monitoruję {len(open_orders_docs)} otwartych pozycji pod kątem aktywacji TS.")
+    
     symbols_to_check = list({doc.to_dict().get('symbol') for doc in open_orders_docs if doc.to_dict().get('symbol')})
     if not symbols_to_check: return
         
     latest_prices = executor.get_latest_prices(symbols_to_check)
+    if not latest_prices:
+        logger.warning("[ORDER_UPDATER] Nie udało się pobrać aktualnych cen rynkowych w tym cyklu.")
+        return
 
     for order_doc in open_orders_docs:
         try:
@@ -193,31 +194,40 @@ def update_filled_orders(executor: BybitExecutor):
             symbol = order_data.get('symbol')
             log_prefix = f"[{symbol}|{order_link_id}]"
 
-            if order_data.get("ts_status") != "PENDING": continue
+            if order_data.get("ts_status") != "PENDING": 
+                continue
+
             current_price_info = latest_prices.get(symbol)
-            if not current_price_info: continue
+            if not current_price_info: 
+                logger.warning(f"{log_prefix} Brak danych o cenie dla tego symbolu w tym cyklu.")
+                continue
             
+            # --- POCZĄTEK POPRAWKI ---
             mark_price = float(current_price_info.get('markPrice', 0))
-            activation_price = order_data.get("ts_activation_price")
+            # Używamy poprawnej nazwy pola: 'planned_tp_price'
+            activation_price = float(order_data.get("planned_tp_price", 0.0)) 
             direction = order_data.get("direction")
+            # --- KONIEC POPRAWKI ---
 
-            if not all([mark_price > 0, activation_price, direction]): continue
+            logger.info(f"{log_prefix} Porównuję: Mark Price={mark_price}, Activation Price={activation_price}, Direction={direction}")
 
-            should_activate = (direction == 'LONG' and mark_price >= activation_price) or (direction == 'SHORT' and mark_price <= activation_price)
+            if not all([mark_price > 0, activation_price > 0, direction]): 
+                logger.warning(f"{log_prefix} Brak kompletnych danych do sprawdzenia warunku TS.")
+                continue
+
+            should_activate = (direction == 'LONG' and mark_price >= activation_price) or \
+                              (direction == 'SHORT' and mark_price <= activation_price)
+
+            logger.info(f"{log_prefix} Wynik sprawdzenia warunku aktywacji: {should_activate}")
 
             if should_activate:
-                logger.info(f"{log_prefix} WARUNEK SPEŁNIONY! Cena ({mark_price}) osiągnęła poziom aktywacji ({activation_price}).")
+                logger.info(f"{log_prefix} WARUNEK SPEŁNIONY! Ustawiam Trailing Stop.")
                 
-                # --- POCZĄTEK POPRAWKI: Finalne sprawdzenie przed wysłaniem ---
-                logger.info(f"{log_prefix} Wykonuję finalne sprawdzenie, czy pozycja wciąż istnieje przed ustawieniem TS...")
                 if not executor.get_position_info(symbol):
-                    logger.warning(f"{log_prefix} Pozycja została zamknięta przed aktywacją TS. Anuluję ustawianie TS.")
-                    # Oznaczamy jako 'CANCELLED', aby bot nie próbował ponownie
+                    logger.warning(f"{log_prefix} Pozycja została zamknięta przed aktywacją TS. Anuluję.")
                     state_manager.update_active_order(order_link_id, {'ts_status': 'CANCELLED'})
                     continue
-                # --- KONIEC POPRAWKI ---
-
-                logger.info(f"{log_prefix} Pozycja wciąż istnieje. Ustawiam Trailing Stop.")
+                
                 ts_distance = str(order_data.get("ts_distance"))
                 if executor.set_trailing_stop_for_position(symbol, ts_distance):
                     state_manager.update_active_order(order_link_id, {'ts_status': 'ACTIVATED'})
@@ -225,9 +235,6 @@ def update_filled_orders(executor: BybitExecutor):
                     logger.error(f"{log_prefix} BŁĄD! Nie udało się ustawić Trailing Stop przez API.")
         except Exception as e:
             logger.error(f"[ORDER_UPDATER] Błąd podczas przetwarzania otwartej pozycji {order_doc.id}: {e}", exc_info=True)
-
-# Lokalizacja: bot_service/bot_logic.py
-# ZASTĄP TYLKO tę jedną funkcję w swoim pliku.
 
 def _find_matching_order(pnl_record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
