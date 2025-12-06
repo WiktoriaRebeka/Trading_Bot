@@ -11,19 +11,12 @@ from datetime import datetime, timezone
 
 class AlertData(BaseModel):
     id: Optional[str] = None
-    received_at: Optional[datetime] = None
     symbol: str
     direction_code: int = Field(alias='directionCode')
     entry: float
     sl: float
     tp: float
     timestamp: str
-    tp_1_0: float
-    tp_1_5: float
-    tp_2_0: float
-    tp_3_0: float
-    tp_4_0: float
-    tp_5_0: float
 
     model_config = ConfigDict(
         populate_by_name=True,

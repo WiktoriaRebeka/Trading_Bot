@@ -60,7 +60,7 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
             continue
 
         if not executor.cancel_all_open_orders_for_symbol(symbol):
-             logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się anulować poprzednich zleceń.")
+             logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się anulować poprzednich zleceň.")
              continue
         
         try:
@@ -76,46 +76,44 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
                 continue
             tick_size, qty_step = rule["tickSize"], rule["qtyStep"]
 
-            if alert_model.direction == 'LONG':
-                final_entry = round_price_by_tick(alert_model.entry, tick_size, 'down')
-                final_sl = round_price_by_tick(alert_model.sl, tick_size, 'up')
-            else:
-                final_entry = round_price_by_tick(alert_model.entry, tick_size, 'up')
-                final_sl = round_price_by_tick(alert_model.sl, tick_size, 'down')
+            is_long = alert_model.direction == 'LONG'
+            final_entry = round_price_by_tick(alert_model.entry, tick_size, 'down' if is_long else 'up')
+            final_sl = round_price_by_tick(alert_model.sl, tick_size, 'up' if is_long else 'down')
 
-            risk_usdt = float(os.getenv("RISK_PER_TRADE_USDT", "2.5"))
-            final_qty = calculate_position_size(risk_per_trade_usdt=risk_usdt, entry_price=final_entry, sl_price=final_sl, qty_step=qty_step)
-
+            final_qty = calculate_position_size(risk_usdt=float(os.getenv("RISK_PER_TRADE_USDT", "2.5")), entry_price=final_entry, sl_price=final_sl, qty_step=qty_step)
             if not final_qty or final_qty <= 0:
                 state_manager.mark_alert_as_processed(alert_id)
                 continue
 
             risk_distance_1R = abs(final_entry - final_sl)
-            trailing_distance_final = round_price_by_tick(risk_distance_1R * 1, tick_size, 'none')
-            activation_price_final = round_price_by_tick(alert_model.tp_3_0, tick_size, 'down' if alert_model.direction == 'LONG' else 'up')
+            trailing_distance_final = round_price_by_tick(risk_distance_1R * 2, tick_size, 'none')
+            activation_price_raw = alert_model.tp 
+            activation_price_final = round_price_by_tick(activation_price_raw, tick_size, 'down' if is_long else 'up')
 
-            custom_order_link_id = f"bot_{alert_id.replace('-', '')[:20]}"
             order_params = {
-                "symbol": symbol, "side": "Buy" if alert_model.direction == "LONG" else "Sell",
-                "orderType": "Limit", "qty": str(final_qty), "price": str(final_entry),
-                "stopLoss": str(final_sl), "slTriggerBy": "MarkPrice",
-                "orderLinkId": custom_order_link_id, "timeInForce": "GTC"
+                "symbol": symbol, "side": "Buy" if is_long else "Sell", "orderType": "Limit", 
+                "qty": str(final_qty), "price": str(final_entry), "stopLoss": str(final_sl), 
+                "slTriggerBy": "MarkPrice", "orderLinkId": f"bot_{alert_id.replace('-', '')[:20]}", "timeInForce": "GTC"
             }
             
             response = executor.place_order(order_params)
-            
             if response and response.get('orderId'):
-                order_id = response.get('orderId')
                 order_data_to_save = {
-                    "symbol": symbol, "limitOrderId": order_id, "orderLinkId": custom_order_link_id,
+                    "symbol": symbol, "limitOrderId": response.get('orderId'), "orderLinkId": order_params["orderLinkId"],
                     "alert_id": alert_id, "direction": alert_model.direction,
                     "planned_entry_price": final_entry, "planned_sl_price": final_sl, 
                     "planned_qty": final_qty, "alert_entry_price": alert_model.entry, 
-                    "alert_sl_price": alert_model.sl, "alert_tp_price": getattr(alert_model, "tp_3_0"),
-                    "ts_activation_price": activation_price_final, "ts_distance": trailing_distance_final,
+                    "alert_sl_price": alert_model.sl,
+                    "alert_tp_price": alert_model.tp,
+                    
+                    # --- POCZĄTEK POPRAWKI: Używamy spójnej nazwy ---
+                    "planned_tp_price": activation_price_final, # Zamiast 'ts_activation_price'
+                    # --- KONIEC POPRAWKI ---
+                    
+                    "ts_distance": trailing_distance_final,
                     "ts_status": "PENDING"
                 }
-                state_manager.save_active_order(custom_order_link_id, order_data_to_save)
+                state_manager.save_active_order(order_params["orderLinkId"], order_data_to_save)
                 state_manager.mark_alert_as_processed(alert_id)
             else:
                 logger.error(f"[{symbol}] BŁĄD: Nie udało się złożyć zlecenia wejścia.")
