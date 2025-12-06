@@ -358,8 +358,6 @@ def _calculate_risk_percentage(entry_price: float, sl_price: float) -> Optional[
     risk_distance = abs(entry_price - sl_price)
     return round((risk_distance / entry_price) * 100, 4)
 
-# Lokalizacja: bot_service/bot_logic.py
-# ZASTĄP całą tę funkcję w swoim pliku.
 
 def _correct_and_validate_alert(alert: AlertData) -> bool:
     # Sprawdzenie 1: Poprawny kierunek
@@ -374,27 +372,11 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
         logger.warning(f"Odrzucono alert [{alert.symbol}]: Nielogiczna pozycja SL. Kierunek: {alert.direction}, Wejście: {alert.entry}, SL: {alert.sl}.")
         return False
         
-    # Sprawdzenie 3: Obliczenie ryzyka procentowego
+    # Sprawdzenie 3: Obliczenie ryzyka procentowego (tylko do logowania)
     risk_perc = _calculate_risk_percentage(alert.entry, alert.sl)
     if risk_perc is None:
+        # Ten warunek jest mało prawdopodobny, ale zostawiamy jako zabezpieczenie
         return False
-
-    # ================================================================= #
-    # === TUTAJ SĄ NASZE NOWE FILTRY ===
-    # ================================================================= #
-    MIN_RISK_PERC = 0.25  # Nasz nowy, niższy próg
-    MAX_RISK_PERC = 2   # Nasz nowy, górny próg
-
-    # Sprawdzenie 4: Ryzyko nie jest zbyt małe
-    if risk_perc < MIN_RISK_PERC:
-        logger.warning(f"Odrzucono alert [{alert.symbol}]: Ryzyko poniżej minimum {MIN_RISK_PERC}%. Obliczone ryzyko: {risk_perc}%.")
-        return False
-        
-    # Sprawdzenie 5: Ryzyko nie jest zbyt duże
-    if risk_perc > MAX_RISK_PERC:
-        logger.warning(f"Odrzucono alert [{alert.symbol}]: Ryzyko powyżej maksimum {MAX_RISK_PERC}%. Obliczone ryzyko: {risk_perc}%.")
-        return False
-    # ================================================================= #
 
     logger.info(f"Alert [{alert.symbol}] przeszedł walidację. Kierunek: {alert.direction}, Ryzyko: {risk_perc}%.")
     return True
