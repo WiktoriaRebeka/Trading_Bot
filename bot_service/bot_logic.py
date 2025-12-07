@@ -35,6 +35,7 @@ def process_new_alerts(executor: BybitExecutor):
         logger.info("Brak nowych alertów do przetworzenia.")
 
 
+
 def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: BybitExecutor):
     instrument_rules = get_instrument_rules()
     if not instrument_rules:
@@ -86,10 +87,15 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
                 continue
 
             risk_distance_1R = abs(final_entry - final_sl)
-            trailing_distance_final = round_price_by_tick(risk_distance_1R * 1, tick_size, 'none') # Ustawione na 1R
+            trailing_distance_final = round_price_by_tick(risk_distance_1R * 1, tick_size, 'none')
             
-            # Używamy tp_3_0 jako źródła ceny aktywacji
-            activation_price_raw = alert_model.tp_3_0
+            # ================================================================= #
+            # === TUTAJ JEST KLUCZOWA ZMIANA ===
+            # ================================================================= #
+            # Zmieniamy źródło ceny aktywacji z `tp_3_0` na `tp`, które zawsze istnieje.
+            activation_price_raw = alert_model.tp
+            # ================================================================= #
+            
             activation_price_final = round_price_by_tick(activation_price_raw, tick_size, 'down' if is_long else 'up')
 
             order_params = {
@@ -105,11 +111,7 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
                     "alert_id": alert_id, "direction": alert_model.direction,
                     "planned_entry_price": final_entry, "planned_sl_price": final_sl, 
                     "planned_qty": final_qty,
-                    
-                    # --- POCZĄTEK POPRAWKI: Używamy spójnej nazwy ---
                     "ts_activation_price": activation_price_final,
-                    # --- KONIEC POPRAWKI ---
-                    
                     "ts_distance": trailing_distance_final,
                     "ts_status": "PENDING"
                 }
@@ -126,10 +128,6 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
                 logger.error(f"Błąd API Bybit podczas przetwarzania alertu {alert_id}: {e}", exc_info=False)
             else:
                 logger.error(f"Krytyczny błąd podczas przetwarzania alertu {alert_id}: {e}", exc_info=True)
-
-
-# Lokalizacja: bot_service/bot_logic.py
-# ZASTĄP całą tę funkcję w swoim pliku.
 
 def update_filled_orders(executor: BybitExecutor):
     logger.info("[ORDER_UPDATER] Rozpoczynam cykl aktualizacji.")
