@@ -60,7 +60,7 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
             continue
 
         if not executor.cancel_all_open_orders_for_symbol(symbol):
-             logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się anulować poprzednich zleceň.")
+             logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się anulować poprzednich zleceń.")
              continue
         
         try:
@@ -86,8 +86,10 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
                 continue
 
             risk_distance_1R = abs(final_entry - final_sl)
-            trailing_distance_final = round_price_by_tick(risk_distance_1R * 2, tick_size, 'none')
-            activation_price_raw = alert_model.tp 
+            trailing_distance_final = round_price_by_tick(risk_distance_1R * 1, tick_size, 'none') # Ustawione na 1R
+            
+            # Używamy tp_3_0 jako źródła ceny aktywacji
+            activation_price_raw = alert_model.tp_3_0
             activation_price_final = round_price_by_tick(activation_price_raw, tick_size, 'down' if is_long else 'up')
 
             order_params = {
@@ -102,12 +104,10 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
                     "symbol": symbol, "limitOrderId": response.get('orderId'), "orderLinkId": order_params["orderLinkId"],
                     "alert_id": alert_id, "direction": alert_model.direction,
                     "planned_entry_price": final_entry, "planned_sl_price": final_sl, 
-                    "planned_qty": final_qty, "alert_entry_price": alert_model.entry, 
-                    "alert_sl_price": alert_model.sl,
-                    "alert_tp_price": alert_model.tp,
+                    "planned_qty": final_qty,
                     
                     # --- POCZĄTEK POPRAWKI: Używamy spójnej nazwy ---
-                    "planned_tp_price": activation_price_final, # Zamiast 'ts_activation_price'
+                    "ts_activation_price": activation_price_final,
                     # --- KONIEC POPRAWKI ---
                     
                     "ts_distance": trailing_distance_final,
@@ -128,6 +128,8 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
                 logger.error(f"Krytyczny błąd podczas przetwarzania alertu {alert_id}: {e}", exc_info=True)
 
 
+# Lokalizacja: bot_service/bot_logic.py
+# ZASTĄP całą tę funkcję w swoim pliku.
 
 def update_filled_orders(executor: BybitExecutor):
     logger.info("[ORDER_UPDATER] Rozpoczynam cykl aktualizacji.")
@@ -174,17 +176,13 @@ def update_filled_orders(executor: BybitExecutor):
     # --- CZĘŚĆ 2: Obsługa otwartych pozycji i aktywacja TS ---
     open_orders_docs = list(state_manager.get_orders_by_status('OPEN'))
     if not open_orders_docs: 
-        logger.info("[ORDER_UPDATER] Brak otwartych pozycji do monitorowania TS.")
         return
 
-    logger.info(f"[ORDER_UPDATER] Monitoruję {len(open_orders_docs)} otwartych pozycji pod kątem aktywacji TS.")
-    
     symbols_to_check = list({doc.to_dict().get('symbol') for doc in open_orders_docs if doc.to_dict().get('symbol')})
     if not symbols_to_check: return
         
     latest_prices = executor.get_latest_prices(symbols_to_check)
     if not latest_prices:
-        logger.warning("[ORDER_UPDATER] Nie udało się pobrać aktualnych cen rynkowych w tym cyklu.")
         return
 
     for order_doc in open_orders_docs:
@@ -199,35 +197,31 @@ def update_filled_orders(executor: BybitExecutor):
 
             current_price_info = latest_prices.get(symbol)
             if not current_price_info: 
-                logger.warning(f"{log_prefix} Brak danych o cenie dla tego symbolu w tym cyklu.")
                 continue
             
-            # --- POCZĄTEK POPRAWKI ---
             mark_price = float(current_price_info.get('markPrice', 0))
-            # Używamy poprawnej nazwy pola: 'planned_tp_price'
-            activation_price = float(order_data.get("planned_tp_price", 0.0)) 
-            direction = order_data.get("direction")
+            
+            # --- POCZĄTEK POPRAWKI: Używamy poprawnej nazwy pola ---
+            activation_price = float(order_data.get("ts_activation_price", 0.0)) 
             # --- KONIEC POPRAWKI ---
-
-            logger.info(f"{log_prefix} Porównuję: Mark Price={mark_price}, Activation Price={activation_price}, Direction={direction}")
+            
+            direction = order_data.get("direction")
 
             if not all([mark_price > 0, activation_price > 0, direction]): 
-                logger.warning(f"{log_prefix} Brak kompletnych danych do sprawdzenia warunku TS.")
                 continue
 
             should_activate = (direction == 'LONG' and mark_price >= activation_price) or \
                               (direction == 'SHORT' and mark_price <= activation_price)
 
-            logger.info(f"{log_prefix} Wynik sprawdzenia warunku aktywacji: {should_activate}")
-
             if should_activate:
-                logger.info(f"{log_prefix} WARUNEK SPEŁNIONY! Ustawiam Trailing Stop.")
+                logger.info(f"{log_prefix} WARUNEK SPEŁNIONY! Cena ({mark_price}) osiągnęła poziom aktywacji ({activation_price}).")
                 
                 if not executor.get_position_info(symbol):
                     logger.warning(f"{log_prefix} Pozycja została zamknięta przed aktywacją TS. Anuluję.")
                     state_manager.update_active_order(order_link_id, {'ts_status': 'CANCELLED'})
                     continue
                 
+                logger.info(f"{log_prefix} Pozycja wciąż istnieje. Ustawiam Trailing Stop.")
                 ts_distance = str(order_data.get("ts_distance"))
                 if executor.set_trailing_stop_for_position(symbol, ts_distance):
                     state_manager.update_active_order(order_link_id, {'ts_status': 'ACTIVATED'})
