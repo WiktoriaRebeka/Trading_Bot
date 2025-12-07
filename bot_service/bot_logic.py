@@ -35,7 +35,6 @@ def process_new_alerts(executor: BybitExecutor):
         logger.info("Brak nowych alertów do przetworzenia.")
 
 
-
 def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: BybitExecutor):
     instrument_rules = get_instrument_rules()
     if not instrument_rules:
@@ -90,9 +89,9 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
             trailing_distance_final = round_price_by_tick(risk_distance_1R * 1, tick_size, 'none')
             
             # ================================================================= #
-            # === TUTAJ JEST KLUCZOWA ZMIANA ===
+            # === OSTATECZNA POPRAWKA BŁĘDU ===
             # ================================================================= #
-            # Zmieniamy źródło ceny aktywacji z `tp_3_0` na `tp`, które zawsze istnieje.
+            # Zmieniamy źródło ceny aktywacji z `tp_3_0` na `tp`, które zawsze istnieje w nowym modelu alertu.
             activation_price_raw = alert_model.tp
             # ================================================================= #
             
