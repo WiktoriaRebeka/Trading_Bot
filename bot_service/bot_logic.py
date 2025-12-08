@@ -76,45 +76,46 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
                 continue
             tick_size, qty_step = rule["tickSize"], rule["qtyStep"]
 
-            is_long = alert_model.direction == 'LONG'
-            final_entry = round_price_by_tick(alert_model.entry, tick_size, 'down' if is_long else 'up')
-            final_sl = round_price_by_tick(alert_model.sl, tick_size, 'up' if is_long else 'down')
+            if alert_model.direction == 'LONG':
+                final_entry = round_price_by_tick(alert_model.entry, tick_size, 'down')
+                final_sl = round_price_by_tick(alert_model.sl, tick_size, 'up')
+            else:
+                final_entry = round_price_by_tick(alert_model.entry, tick_size, 'up')
+                final_sl = round_price_by_tick(alert_model.sl, tick_size, 'down')
 
-            final_qty = calculate_position_size(risk_usdt=float(os.getenv("RISK_PER_TRADE_USDT", "2.5")), entry_price=final_entry, sl_price=final_sl, qty_step=qty_step)
+            risk_usdt = float(os.getenv("RISK_PER_TRADE_USDT", "2.5"))
+            final_qty = calculate_position_size(risk_per_trade_usdt=risk_usdt, entry_price=final_entry, sl_price=final_sl, qty_step=qty_step)
+
             if not final_qty or final_qty <= 0:
                 state_manager.mark_alert_as_processed(alert_id)
                 continue
 
             risk_distance_1R = abs(final_entry - final_sl)
             trailing_distance_final = round_price_by_tick(risk_distance_1R * 1, tick_size, 'none')
-            
-            # ================================================================= #
-            # === OSTATECZNA POPRAWKA BŁĘDU ===
-            # ================================================================= #
-            # Zmieniamy źródło ceny aktywacji z `tp_3_0` na `tp`, które zawsze istnieje w nowym modelu alertu.
-            activation_price_raw = alert_model.tp
-            # ================================================================= #
-            
-            activation_price_final = round_price_by_tick(activation_price_raw, tick_size, 'down' if is_long else 'up')
+            activation_price_final = round_price_by_tick(alert_model.tp_3_0, tick_size, 'down' if alert_model.direction == 'LONG' else 'up')
 
+            custom_order_link_id = f"bot_{alert_id.replace('-', '')[:20]}"
             order_params = {
-                "symbol": symbol, "side": "Buy" if is_long else "Sell", "orderType": "Limit", 
-                "qty": str(final_qty), "price": str(final_entry), "stopLoss": str(final_sl), 
-                "slTriggerBy": "MarkPrice", "orderLinkId": f"bot_{alert_id.replace('-', '')[:20]}", "timeInForce": "GTC"
+                "symbol": symbol, "side": "Buy" if alert_model.direction == "LONG" else "Sell",
+                "orderType": "Limit", "qty": str(final_qty), "price": str(final_entry),
+                "stopLoss": str(final_sl), "slTriggerBy": "MarkPrice",
+                "orderLinkId": custom_order_link_id, "timeInForce": "GTC"
             }
             
             response = executor.place_order(order_params)
+            
             if response and response.get('orderId'):
+                order_id = response.get('orderId')
                 order_data_to_save = {
-                    "symbol": symbol, "limitOrderId": response.get('orderId'), "orderLinkId": order_params["orderLinkId"],
+                    "symbol": symbol, "limitOrderId": order_id, "orderLinkId": custom_order_link_id,
                     "alert_id": alert_id, "direction": alert_model.direction,
                     "planned_entry_price": final_entry, "planned_sl_price": final_sl, 
-                    "planned_qty": final_qty,
-                    "ts_activation_price": activation_price_final,
-                    "ts_distance": trailing_distance_final,
+                    "planned_qty": final_qty, "alert_entry_price": alert_model.entry, 
+                    "alert_sl_price": alert_model.sl, "alert_tp_price": getattr(alert_model, "tp_3_0"),
+                    "ts_activation_price": activation_price_final, "ts_distance": trailing_distance_final,
                     "ts_status": "PENDING"
                 }
-                state_manager.save_active_order(order_params["orderLinkId"], order_data_to_save)
+                state_manager.save_active_order(custom_order_link_id, order_data_to_save)
                 state_manager.mark_alert_as_processed(alert_id)
             else:
                 logger.error(f"[{symbol}] BŁĄD: Nie udało się złożyć zlecenia wejścia.")
@@ -128,25 +129,28 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
             else:
                 logger.error(f"Krytyczny błąd podczas przetwarzania alertu {alert_id}: {e}", exc_info=True)
 
-# Lokalizacja: bot_service/bot_logic.py
 
 def update_filled_orders(executor: BybitExecutor):
     logger.info("[ORDER_UPDATER] Rozpoczynam cykl aktualizacji.")
     
-    # --- CZĘŚĆ 1: Obsługa zleceń oczekujących na wejście (bez zmian) ---
+    # --- CZĘŚĆ 1: Obsługa zleceń oczekujących na wejście ---
     placed_orders_docs = list(state_manager.get_orders_by_status('PLACED'))
     legacy_orders_docs = list(state_manager.get_orders_without_status())
     orders_to_check_entry = placed_orders_docs + legacy_orders_docs
 
     if orders_to_check_entry:
         for order_doc in orders_to_check_entry:
-            order_data, order_link_id, symbol = order_doc.to_dict(), order_doc.id, order_doc.to_dict().get('symbol')
+            order_data = order_doc.to_dict()
+            order_link_id = order_doc.id
+            symbol = order_data.get('symbol')
             log_prefix = f"[{symbol}|{order_link_id}]"
             try:
-                order_details = executor.get_open_order_by_id(order_link_id) or executor.get_order_history_by_id(order_link_id)
+                order_details = executor.get_open_order_by_id(order_link_id=order_link_id)
+                if not order_details: order_details = executor.get_order_history_by_id(order_link_id=order_link_id)
                 if not order_details:
                     state_manager.update_active_order(order_link_id, {'status': 'UNKNOWN'})
                     continue
+
                 order_status = order_details.get('orderStatus')
                 if order_status == 'Filled':
                     position_info = None
@@ -154,15 +158,18 @@ def update_filled_orders(executor: BybitExecutor):
                         position_info = executor.get_position_info(symbol)
                         if position_info: break
                         time.sleep(2)
-                    if position_info and position_info.get('stopLoss') and float(position_info.get('stopLoss')) > 0:
-                        sl_order_id = executor.find_sl_order_id(symbol, order_data)
-                        state_manager.update_active_order(order_link_id, {'status': 'OPEN', 'slOrderId': sl_order_id, 'position_opened_at': datetime.now(timezone.utc)})
-                    elif position_info:
-                        qty, side = float(position_info.get('size', 0)), position_info.get('side')
-                        if qty > 0 and executor.close_position_market(symbol, qty, side):
-                            state_manager.update_active_order(order_link_id, {'status': 'CLOSED_EMERGENCY', 'reason': 'Missing SL.'})
+
+                    if position_info:
+                        if position_info.get('stopLoss') and float(position_info.get('stopLoss')) > 0:
+                            sl_order_id = executor.find_sl_order_id(symbol, order_data)
+                            updates = {'status': 'OPEN', 'slOrderId': sl_order_id, 'position_opened_at': datetime.now(timezone.utc)}
+                            state_manager.update_active_order(order_link_id, updates)
                         else:
-                            state_manager.update_active_order(order_link_id, {'status': 'ERROR_NEEDS_MANUAL_CLOSURE'})
+                            qty, side = float(position_info.get('size', 0)), position_info.get('side')
+                            if qty > 0 and executor.close_position_market(symbol, qty, side):
+                                state_manager.update_active_order(order_link_id, {'status': 'CLOSED_EMERGENCY', 'reason': 'Missing SL.'})
+                            else:
+                                state_manager.update_active_order(order_link_id, {'status': 'ERROR_NEEDS_MANUAL_CLOSURE'})
                     else:
                         state_manager.update_active_order(order_link_id, {'status': 'CLOSED_UNVERIFIED'})
                 elif order_status in ['Cancelled', 'Rejected']:
@@ -174,15 +181,12 @@ def update_filled_orders(executor: BybitExecutor):
 
     # --- CZĘŚĆ 2: Obsługa otwartych pozycji i aktywacja TS ---
     open_orders_docs = list(state_manager.get_orders_by_status('OPEN'))
-    if not open_orders_docs: 
-        return
+    if not open_orders_docs: return
 
     symbols_to_check = list({doc.to_dict().get('symbol') for doc in open_orders_docs if doc.to_dict().get('symbol')})
     if not symbols_to_check: return
         
     latest_prices = executor.get_latest_prices(symbols_to_check)
-    if not latest_prices:
-        return
 
     for order_doc in open_orders_docs:
         try:
@@ -191,54 +195,41 @@ def update_filled_orders(executor: BybitExecutor):
             symbol = order_data.get('symbol')
             log_prefix = f"[{symbol}|{order_link_id}]"
 
-            if order_data.get("ts_status") != "PENDING": 
-                continue
-
+            if order_data.get("ts_status") != "PENDING": continue
             current_price_info = latest_prices.get(symbol)
-            if not current_price_info: 
-                continue
+            if not current_price_info: continue
             
             mark_price = float(current_price_info.get('markPrice', 0))
-            activation_price = float(order_data.get("ts_activation_price", 0.0)) 
+            activation_price = order_data.get("ts_activation_price")
             direction = order_data.get("direction")
 
-            # <<< KLUCZOWY LOG DIAGNOSTYCZNY 1 >>>
-            logger.info(
-                f"{log_prefix} Oczekuję na aktywację Trailing Stop. "
-                f"Kierunek: {direction}, Aktualna cena (Mark): {mark_price}, "
-                f"Cena aktywacji: {activation_price}"
-            )
+            if not all([mark_price > 0, activation_price, direction]): continue
 
-            if not all([mark_price > 0, activation_price > 0, direction]): 
-                logger.warning(f"{log_prefix} Pomijam sprawdzanie TS z powodu niekompletnych danych (cena lub kierunek = 0/None).")
-                continue
-
-            should_activate = (direction == 'LONG' and mark_price >= activation_price) or \
-                              (direction == 'SHORT' and mark_price <= activation_price)
+            should_activate = (direction == 'LONG' and mark_price >= activation_price) or (direction == 'SHORT' and mark_price <= activation_price)
 
             if should_activate:
-                # <<< KLUCZOWY LOG DIAGNOSTYCZNY 2 >>>
-                logger.info(f"{log_prefix} WARUNEK SPEŁNIONY! Cena ({mark_price}) osiągnęła poziom aktywacji ({activation_price}). Próbuję ustawić Trailing Stop.")
+                logger.info(f"{log_prefix} WARUNEK SPEŁNIONY! Cena ({mark_price}) osiągnęła poziom aktywacji ({activation_price}).")
                 
+                # --- POCZĄTEK POPRAWKI: Finalne sprawdzenie przed wysłaniem ---
+                logger.info(f"{log_prefix} Wykonuję finalne sprawdzenie, czy pozycja wciąż istnieje przed ustawieniem TS...")
                 if not executor.get_position_info(symbol):
-                    logger.warning(f"{log_prefix} Pozycja została zamknięta przed aktywacją TS. Anuluję.")
+                    logger.warning(f"{log_prefix} Pozycja została zamknięta przed aktywacją TS. Anuluję ustawianie TS.")
+                    # Oznaczamy jako 'CANCELLED', aby bot nie próbował ponownie
                     state_manager.update_active_order(order_link_id, {'ts_status': 'CANCELLED'})
                     continue
-                
+                # --- KONIEC POPRAWKI ---
+
+                logger.info(f"{log_prefix} Pozycja wciąż istnieje. Ustawiam Trailing Stop.")
                 ts_distance = str(order_data.get("ts_distance"))
-                
-                # <<< KLUCZOWY LOG DIAGNOSTYCZNY 3 >>>
-                logger.info(f"{log_prefix} Pozycja wciąż istnieje. Wysyłam polecenie ustawienia Trailing Stop z odległością: {ts_distance}.")
-                
                 if executor.set_trailing_stop_for_position(symbol, ts_distance):
-                    # <<< KLUCZOWY LOG DIAGNOSTYCZNY 4 (SUKCES) >>>
-                    logger.info(f"{log_prefix} SUKCES! Trailing Stop został aktywowany. Zmieniam status na 'ACTIVATED'.")
                     state_manager.update_active_order(order_link_id, {'ts_status': 'ACTIVATED'})
                 else:
-                    # <<< KLUCZOWY LOG DIAGNOSTYCZNY 4 (BŁĄD) >>>
-                    logger.error(f"{log_prefix} BŁĄD! Nie udało się ustawić Trailing Stop przez API. Status pozostaje 'PENDING', spróbuję ponownie w następnym cyklu.")
+                    logger.error(f"{log_prefix} BŁĄD! Nie udało się ustawić Trailing Stop przez API.")
         except Exception as e:
             logger.error(f"[ORDER_UPDATER] Błąd podczas przetwarzania otwartej pozycji {order_doc.id}: {e}", exc_info=True)
+
+# Lokalizacja: bot_service/bot_logic.py
+# ZASTĄP TYLKO tę jedną funkcję w swoim pliku.
 
 def _find_matching_order(pnl_record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
@@ -369,6 +360,8 @@ def _calculate_risk_percentage(entry_price: float, sl_price: float) -> Optional[
     risk_distance = abs(entry_price - sl_price)
     return round((risk_distance / entry_price) * 100, 4)
 
+# Lokalizacja: bot_service/bot_logic.py
+# ZASTĄP całą tę funkcję w swoim pliku.
 
 def _correct_and_validate_alert(alert: AlertData) -> bool:
     # Sprawdzenie 1: Poprawny kierunek
@@ -383,11 +376,27 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
         logger.warning(f"Odrzucono alert [{alert.symbol}]: Nielogiczna pozycja SL. Kierunek: {alert.direction}, Wejście: {alert.entry}, SL: {alert.sl}.")
         return False
         
-    # Sprawdzenie 3: Obliczenie ryzyka procentowego (tylko do logowania)
+    # Sprawdzenie 3: Obliczenie ryzyka procentowego
     risk_perc = _calculate_risk_percentage(alert.entry, alert.sl)
     if risk_perc is None:
-        # Ten warunek jest mało prawdopodobny, ale zostawiamy jako zabezpieczenie
         return False
+
+    # ================================================================= #
+    # === TUTAJ SĄ NASZE NOWE FILTRY ===
+    # ================================================================= #
+    MIN_RISK_PERC = 0.25  # Nasz nowy, niższy próg
+    MAX_RISK_PERC = 2   # Nasz nowy, górny próg
+
+    # Sprawdzenie 4: Ryzyko nie jest zbyt małe
+    if risk_perc < MIN_RISK_PERC:
+        logger.warning(f"Odrzucono alert [{alert.symbol}]: Ryzyko poniżej minimum {MIN_RISK_PERC}%. Obliczone ryzyko: {risk_perc}%.")
+        return False
+        
+    # Sprawdzenie 5: Ryzyko nie jest zbyt duże
+    if risk_perc > MAX_RISK_PERC:
+        logger.warning(f"Odrzucono alert [{alert.symbol}]: Ryzyko powyżej maksimum {MAX_RISK_PERC}%. Obliczone ryzyko: {risk_perc}%.")
+        return False
+    # ================================================================= #
 
     logger.info(f"Alert [{alert.symbol}] przeszedł walidację. Kierunek: {alert.direction}, Ryzyko: {risk_perc}%.")
     return True

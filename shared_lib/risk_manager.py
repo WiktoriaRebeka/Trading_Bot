@@ -1,4 +1,4 @@
-# Lokalizacja: shared_lib/risk_manager.py
+# shared_lib/risk_manager.py
 
 import logging
 from decimal import Decimal, ROUND_DOWN
@@ -28,7 +28,7 @@ def round_quantity_by_step(quantity: float, qty_step: str) -> float:
 
 
 def calculate_position_size(
-    risk_usdt: float, # <-- POPRAWNA NAZWA
+    risk_per_trade_usdt: float,
     entry_price: float,
     sl_price: float,
     qty_step: str
@@ -40,19 +40,27 @@ def calculate_position_size(
         logger.warning("Cena wejścia i SL muszą być dodatnie.")
         return None
 
+    # 1. Oblicz nominalne ryzyko z ruchu ceny w procentach
     nominal_risk_perc = abs(entry_price - sl_price) / entry_price
+    
+    # 2. Dodaj opłaty ORAZ bufor na poślizg, aby uzyskać całkowite, konserwatywne ryzyko
     total_risk_perc = nominal_risk_perc + TOTAL_FEE_PERCENT + SLIPPAGE_BUFFER_PERCENT
     
     if total_risk_perc == 0:
         logger.warning("Całkowite ryzyko procentowe wynosi zero, nie można obliczyć wielkości pozycji.")
         return None
 
-    position_value_usdt = risk_usdt / total_risk_perc # <-- POPRAWNA NAZWA
+    # 3. Oblicz docelową wartość pozycji w USDT
+    position_value_usdt = risk_per_trade_usdt / total_risk_perc
+    
+    # 4. Przelicz wartość w USDT na idealną ilość kryptowaluty
     ideal_qty = position_value_usdt / entry_price
+    
+    # 5. Zaokrąglij ilość w dół do najbliższego dozwolonego kroku
     final_qty = round_quantity_by_step(ideal_qty, qty_step)
     
     logger.info(
-        f"Obliczanie wielkości pozycji (z buforem na poślizg): Ryzyko={risk_usdt} USDT, " # <-- POPRAWNA NAZWA
+        f"Obliczanie wielkości pozycji (z buforem na poślizg): Ryzyko={risk_per_trade_usdt} USDT, "
         f"Entry={entry_price}, SL={sl_price}, "
         f"Całkowite ryzyko % (cena+opłaty+poślizg)={total_risk_perc:.4f}, "
         f"Wartość pozycji={position_value_usdt:.2f} USDT, "
