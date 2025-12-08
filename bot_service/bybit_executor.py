@@ -107,6 +107,7 @@ class BybitExecutor:
             logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD podczas składania zlecenia: {e}", exc_info=True)
             raise
 
+
     def set_trailing_stop_for_position(self, symbol: str, trailing_stop: str) -> bool:
         api_symbol = symbol.replace('.P', '')
         payload = {
@@ -115,15 +116,20 @@ class BybitExecutor:
             "trailingStop": trailing_stop,
             "positionIdx": 0 
         }
-        logger.info(f"[{symbol}] Wysyłanie finalnego zlecenia ustawiającego Trailing Stop: {payload}")
+        # <<< LOG DIAGNOSTYCZNY 5 >>>
+        logger.info(f"[{symbol}] Wysyłanie żądania do Bybit w celu ustawienia Trailing Stop. Payload: {payload}")
         try:
-            self._send_request("POST", "/v5/position/trading-stop", params=payload)
-            logger.info(f"[{symbol}] SUKCES! Pomyślnie wysłano zlecenie ustawienia Trailing Stop.")
+            result = self._send_request("POST", "/v5/position/trading-stop", params=payload)
+            # <<< LOG DIAGNOSTYCZNY 6 >>>
+            logger.info(f"[{symbol}] Otrzymano odpowiedź od Bybit na ustawienie Trailing Stop: {result}")
+            # Bybit zwraca pusty obiekt {} w przypadku sukcesu dla tego endpointu
             return True
         except BybitAPIError as e:
+            # Logowanie błędu jest już tutaj, więc jest OK
             logger.error(f"[{symbol}] Błąd API podczas ustawiania Trailing Stop: [Code: {e.ret_code}] {e.ret_msg}")
             return False
         except Exception as e:
+            # Logowanie błędu jest już tutaj, więc jest OK
             logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD podczas ustawiania Trailing Stop: {e}", exc_info=True)
             return False
 

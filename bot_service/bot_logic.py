@@ -128,6 +128,8 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
             else:
                 logger.error(f"Krytyczny błąd podczas przetwarzania alertu {alert_id}: {e}", exc_info=True)
 
+# Lokalizacja: bot_service/bot_logic.py
+
 def update_filled_orders(executor: BybitExecutor):
     logger.info("[ORDER_UPDATER] Rozpoczynam cykl aktualizacji.")
     
@@ -197,33 +199,44 @@ def update_filled_orders(executor: BybitExecutor):
                 continue
             
             mark_price = float(current_price_info.get('markPrice', 0))
-            
-            # --- POCZĄTEK POPRAWKI: Używamy poprawnej nazwy pola ---
             activation_price = float(order_data.get("ts_activation_price", 0.0)) 
-            # --- KONIEC POPRAWKI ---
-            
             direction = order_data.get("direction")
 
+            # <<< KLUCZOWY LOG DIAGNOSTYCZNY 1 >>>
+            logger.info(
+                f"{log_prefix} Oczekuję na aktywację Trailing Stop. "
+                f"Kierunek: {direction}, Aktualna cena (Mark): {mark_price}, "
+                f"Cena aktywacji: {activation_price}"
+            )
+
             if not all([mark_price > 0, activation_price > 0, direction]): 
+                logger.warning(f"{log_prefix} Pomijam sprawdzanie TS z powodu niekompletnych danych (cena lub kierunek = 0/None).")
                 continue
 
             should_activate = (direction == 'LONG' and mark_price >= activation_price) or \
                               (direction == 'SHORT' and mark_price <= activation_price)
 
             if should_activate:
-                logger.info(f"{log_prefix} WARUNEK SPEŁNIONY! Cena ({mark_price}) osiągnęła poziom aktywacji ({activation_price}).")
+                # <<< KLUCZOWY LOG DIAGNOSTYCZNY 2 >>>
+                logger.info(f"{log_prefix} WARUNEK SPEŁNIONY! Cena ({mark_price}) osiągnęła poziom aktywacji ({activation_price}). Próbuję ustawić Trailing Stop.")
                 
                 if not executor.get_position_info(symbol):
                     logger.warning(f"{log_prefix} Pozycja została zamknięta przed aktywacją TS. Anuluję.")
                     state_manager.update_active_order(order_link_id, {'ts_status': 'CANCELLED'})
                     continue
                 
-                logger.info(f"{log_prefix} Pozycja wciąż istnieje. Ustawiam Trailing Stop.")
                 ts_distance = str(order_data.get("ts_distance"))
+                
+                # <<< KLUCZOWY LOG DIAGNOSTYCZNY 3 >>>
+                logger.info(f"{log_prefix} Pozycja wciąż istnieje. Wysyłam polecenie ustawienia Trailing Stop z odległością: {ts_distance}.")
+                
                 if executor.set_trailing_stop_for_position(symbol, ts_distance):
+                    # <<< KLUCZOWY LOG DIAGNOSTYCZNY 4 (SUKCES) >>>
+                    logger.info(f"{log_prefix} SUKCES! Trailing Stop został aktywowany. Zmieniam status na 'ACTIVATED'.")
                     state_manager.update_active_order(order_link_id, {'ts_status': 'ACTIVATED'})
                 else:
-                    logger.error(f"{log_prefix} BŁĄD! Nie udało się ustawić Trailing Stop przez API.")
+                    # <<< KLUCZOWY LOG DIAGNOSTYCZNY 4 (BŁĄD) >>>
+                    logger.error(f"{log_prefix} BŁĄD! Nie udało się ustawić Trailing Stop przez API. Status pozostaje 'PENDING', spróbuję ponownie w następnym cyklu.")
         except Exception as e:
             logger.error(f"[ORDER_UPDATER] Błąd podczas przetwarzania otwartej pozycji {order_doc.id}: {e}", exc_info=True)
 
