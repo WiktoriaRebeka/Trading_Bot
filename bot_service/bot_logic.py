@@ -91,7 +91,7 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
             final_entry = round_price_by_tick(alert_model.entry, tick_size, 'down' if is_long else 'up')
             final_sl = round_price_by_tick(alert_model.sl, tick_size, 'up' if is_long else 'down')
 
-            final_qty = calculate_position_size(risk_usdt=float(os.getenv("RISK_PER_TRADE_USDT", "2.5")), entry_price=final_entry, sl_price=final_sl, qty_step=qty_step)
+            final_qty = calculate_position_size(risk_per_trade_usdt=float(os.getenv("RISK_PER_TRADE_USDT", "2.5")), entry_price=final_entry, sl_price=final_sl, qty_step=qty_step)
             if not final_qty or final_qty <= 0:
                 logger.error(f"[{symbol}] Odrzucono alert: Obliczona wielkość pozycji jest zerowa lub ujemna.")
                 state_manager.mark_alert_as_processed(alert_id)
