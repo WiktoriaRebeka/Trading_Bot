@@ -92,7 +92,7 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
 
             risk_distance_1R = abs(final_entry - final_sl)
             trailing_distance_final = round_price_by_tick(risk_distance_1R * 1, tick_size, 'none')
-            activation_price_final = round_price_by_tick(alert_model.tp_3_0, tick_size, 'down' if alert_model.direction == 'LONG' else 'up')
+            activation_price_final = round_price_by_tick(alert_model.tp_2_0, tick_size, 'down' if alert_model.direction == 'LONG' else 'up')
 
             custom_order_link_id = f"bot_{alert_id.replace('-', '')[:20]}"
             order_params = {
@@ -111,7 +111,7 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
                     "alert_id": alert_id, "direction": alert_model.direction,
                     "planned_entry_price": final_entry, "planned_sl_price": final_sl, 
                     "planned_qty": final_qty, "alert_entry_price": alert_model.entry, 
-                    "alert_sl_price": alert_model.sl, "alert_tp_price": getattr(alert_model, "tp_3_0"),
+                    "alert_sl_price": alert_model.sl, "alert_tp_price": getattr(alert_model, "tp_2_0"),
                     "ts_activation_price": activation_price_final, "ts_distance": trailing_distance_final,
                     "ts_status": "PENDING"
                 }
