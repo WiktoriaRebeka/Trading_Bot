@@ -1,5 +1,4 @@
 # Lokalizacja: bot_service/bot_logic.py
-# WERSJA FINALNA: Usunięta walidacja szerokości OB, zaktualizowana do nowego alertu, zawiera wszystkie poprawki.
 
 import logging
 import os
@@ -14,7 +13,7 @@ from pydantic import ValidationError
 
 from shared_lib.models import AlertData
 from shared_lib.firebase_client import get_instrument_rules
-from shared_lib.risk_manager import calculate_position_size
+from shared_lib.risk_manager import calculate_position_size  # Upewnij się, że nazwa funkcji jest poprawna
 from bot_service import state_manager
 from bot_service.pnl_logger_real import log_real_trade_result
 from bot_service.bybit_executor import BybitExecutor, BybitAPIError
@@ -55,7 +54,6 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
         if state_manager.is_alert_processed(alert_id):
             continue
 
-        # Krok 1: Sprawdzenie, czy już istnieje otwarta pozycja
         open_position_side = executor.get_open_position_side(symbol)
         if open_position_side and open_position_side != "ERROR":
             logger.warning(
@@ -65,20 +63,17 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
             state_manager.mark_alert_as_processed(alert_id)
             continue
 
-        # Krok 2: Anulowanie starych zleceń LIMIT
         if not executor.cancel_all_open_orders_for_symbol(symbol):
              logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się anulować poprzednich zleceń.")
              continue
         
         try:
-            # Krok 3: Walidacja danych z alertu
             alert_model = AlertData.model_validate(alert_dict)
 
             if not _correct_and_validate_alert(alert_model):
                 state_manager.mark_alert_as_processed(alert_id)
                 continue
 
-            # Krok 4: Pobranie zasad dla instrumentu
             rule = instrument_rules.get(symbol)
             if not rule or "tickSize" not in rule or "qtyStep" not in rule:
                 logger.error(f"[{symbol}] Odrzucono alert: Brak zasad (tickSize, qtyStep) dla tego symbolu w Firestore.")
@@ -86,26 +81,24 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
                 continue
             tick_size, qty_step = rule["tickSize"], rule["qtyStep"]
 
-            # Krok 5: Zaokrąglenie cen i obliczenie wielkości pozycji
             is_long = alert_model.direction == 'LONG'
             final_entry = round_price_by_tick(alert_model.entry, tick_size, 'down' if is_long else 'up')
             final_sl = round_price_by_tick(alert_model.sl, tick_size, 'up' if is_long else 'down')
 
+            # <<< KLUCZOWA POPRAWKA BŁĘDU TypeError >>>
             final_qty = calculate_position_size(risk_per_trade_usdt=float(os.getenv("RISK_PER_TRADE_USDT", "2.5")), entry_price=final_entry, sl_price=final_sl, qty_step=qty_step)
+            
             if not final_qty or final_qty <= 0:
                 logger.error(f"[{symbol}] Odrzucono alert: Obliczona wielkość pozycji jest zerowa lub ujemna.")
                 state_manager.mark_alert_as_processed(alert_id)
                 continue
 
-            # Krok 6: Przygotowanie parametrów dla Trailing Stopu
             risk_distance_1R = abs(final_entry - final_sl)
             trailing_distance_final = round_price_by_tick(risk_distance_1R * 1, tick_size, 'none')
             
-            # Używamy pola 'tp' z nowego alertu jako ceny aktywacji
             activation_price_raw = alert_model.tp
             activation_price_final = round_price_by_tick(activation_price_raw, tick_size, 'down' if is_long else 'up')
 
-            # Krok 7: Złożenie zlecenia
             order_params = {
                 "symbol": symbol, "side": "Buy" if is_long else "Sell", "orderType": "Limit", 
                 "qty": str(final_qty), "price": str(final_entry), "stopLoss": str(final_sl), 
@@ -114,7 +107,6 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
             
             response = executor.place_order(order_params)
             if response and response.get('orderId'):
-                # Krok 8: Zapisanie "złotego rekordu" do Firestore
                 order_data_to_save = {
                     "symbol": symbol, "limitOrderId": response.get('orderId'), "orderLinkId": order_params["orderLinkId"],
                     "alert_id": alert_id, "direction": alert_model.direction,
@@ -140,39 +132,28 @@ def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: Bybi
 
 
 def _correct_and_validate_alert(alert: AlertData) -> bool:
-    # Sprawdzenie 1: Poprawny kierunek
     if not alert.direction or alert.direction not in ["LONG", "SHORT"]:
         logger.warning(f"Odrzucono alert [{alert.symbol}]: Brak lub nieprawidłowy kierunek.")
         return False
         
-    # Sprawdzenie 2: Logiczna pozycja SL względem wejścia
     is_long_ok = (alert.direction == 'LONG' and alert.sl < alert.entry)
     is_short_ok = (alert.direction == 'SHORT' and alert.sl > alert.entry)
     if not (is_long_ok or is_short_ok):
         logger.warning(f"Odrzucono alert [{alert.symbol}]: Nielogiczna pozycja SL. Kierunek: {alert.direction}, Wejście: {alert.entry}, SL: {alert.sl}.")
         return False
         
-    # Sprawdzenie 3: Obliczenie ryzyka procentowego (tylko do logowania)
     risk_perc = _calculate_risk_percentage(alert.entry, alert.sl)
     if risk_perc is None:
         return False
-
-    # ================================================================= #
-    # === WALIDACJA SZEROKOŚCI ORDER BLOCKA ZOSTAŁA USUNIĘTA ===
-    # ================================================================= #
 
     logger.info(f"Alert [{alert.symbol}] przeszedł walidację. Kierunek: {alert.direction}, Ryzyko: {risk_perc}%.")
     return True
 
 
-# --- POZOSTAŁE FUNKCJE (update_filled_orders, log_closed_positions_pnl, etc.) ---
-# --- POZOSTAW BEZ ZMIAN, UŻYJ TYCH Z POPRZEDNICH SUGESTII, KTÓRE ZAWIERAJĄ LOGOWANIE ---
-# --- PONIŻEJ WKLEJAM JE PONOWNIE DLA PEWNOŚCI ---
-
 def update_filled_orders(executor: BybitExecutor):
     logger.info("[ORDER_UPDATER] Rozpoczynam cykl aktualizacji.")
     
-    # --- CZĘŚĆ 1: Obsługa zleceń oczekujących na wejście (bez zmian) ---
+    # --- CZĘŚĆ 1: Obsługa zleceń oczekujących na wejście ---
     placed_orders_docs = list(state_manager.get_orders_by_status('PLACED'))
     legacy_orders_docs = list(state_manager.get_orders_without_status())
     orders_to_check_entry = placed_orders_docs + legacy_orders_docs
@@ -241,6 +222,7 @@ def update_filled_orders(executor: BybitExecutor):
             activation_price = float(order_data.get("ts_activation_price", 0.0)) 
             direction = order_data.get("direction")
 
+            # <<< LOG DIAGNOSTYCZNY 1 >>>
             logger.info(
                 f"{log_prefix} Oczekuję na aktywację Trailing Stop. "
                 f"Kierunek: {direction}, Aktualna cena (Mark): {mark_price}, "
@@ -255,6 +237,7 @@ def update_filled_orders(executor: BybitExecutor):
                               (direction == 'SHORT' and mark_price <= activation_price)
 
             if should_activate:
+                # <<< LOG DIAGNOSTYCZNY 2 >>>
                 logger.info(f"{log_prefix} WARUNEK SPEŁNIONY! Cena ({mark_price}) osiągnęła poziom aktywacji ({activation_price}). Próbuję ustawić Trailing Stop.")
                 
                 if not executor.get_position_info(symbol):
@@ -264,15 +247,21 @@ def update_filled_orders(executor: BybitExecutor):
                 
                 ts_distance = str(order_data.get("ts_distance"))
                 
+                # <<< LOG DIAGNOSTYCZNY 3 >>>
                 logger.info(f"{log_prefix} Pozycja wciąż istnieje. Wysyłam polecenie ustawienia Trailing Stop z odległością: {ts_distance}.")
                 
                 if executor.set_trailing_stop_for_position(symbol, ts_distance):
+                    # <<< LOG DIAGNOSTYCZNY 4 (SUKCES) >>>
                     logger.info(f"{log_prefix} SUKCES! Trailing Stop został aktywowany. Zmieniam status na 'ACTIVATED'.")
                     state_manager.update_active_order(order_link_id, {'ts_status': 'ACTIVATED'})
                 else:
+                    # <<< LOG DIAGNOSTYCZNY 4 (BŁĄD) >>>
                     logger.error(f"{log_prefix} BŁĄD! Nie udało się ustawić Trailing Stop przez API. Status pozostaje 'PENDING', spróbuję ponownie w następnym cyklu.")
         except Exception as e:
             logger.error(f"[ORDER_UPDATER] Błąd podczas przetwarzania otwartej pozycji {order_doc.id}: {e}", exc_info=True)
+
+# ... reszta pliku (log_closed_positions_pnl, etc.) pozostaje bez zmian ...
+# Poniżej wklejam je dla kompletności
 
 def _find_matching_order(pnl_record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     symbol = pnl_record.get("symbol")
