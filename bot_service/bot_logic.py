@@ -150,59 +150,89 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
     return True
 
 
+# Lokalizacja: bot_service/bot_logic.py
+# ZASTĄP ISTNIEJĄCĄ FUNKCJĘ TYM KODEM
+
 def update_filled_orders(executor: BybitExecutor):
     logger.info("[ORDER_UPDATER] Rozpoczynam cykl aktualizacji.")
     
-    # --- CZĘŚĆ 1: Obsługa zleceń oczekujących na wejście ---
+    # --- CZĘŚĆ 1: Obsługa zleceń oczekujących na wejście (status: PLACED) ---
     placed_orders_docs = list(state_manager.get_orders_by_status('PLACED'))
-    legacy_orders_docs = list(state_manager.get_orders_without_status())
+    legacy_orders_docs = list(state_manager.get_orders_without_status()) # Na wszelki wypadek
     orders_to_check_entry = placed_orders_docs + legacy_orders_docs
+
+    logger.info(f"[ORDER_UPDATER] Znaleziono {len(orders_to_check_entry)} zleceń ze statusem 'PLACED' (lub bez statusu) do sprawdzenia.")
 
     if orders_to_check_entry:
         for order_doc in orders_to_check_entry:
             order_data, order_link_id, symbol = order_doc.to_dict(), order_doc.id, order_doc.to_dict().get('symbol')
             log_prefix = f"[{symbol}|{order_link_id}]"
             try:
+                # Krok 1.1: Sprawdź status zlecenia w Bybit
                 order_details = executor.get_open_order_by_id(order_link_id) or executor.get_order_history_by_id(order_link_id)
+                
                 if not order_details:
+                    logger.warning(f"{log_prefix} Nie można znaleźć szczegółów zlecenia PLACED w Bybit. Ustawiam status na UNKNOWN.")
                     state_manager.update_active_order(order_link_id, {'status': 'UNKNOWN'})
                     continue
+                
                 order_status = order_details.get('orderStatus')
+                logger.info(f"{log_prefix} Status zlecenia PLACED w Bybit to: '{order_status}'.")
+
+                # Krok 1.2: Obsłuż zrealizowane zlecenie
                 if order_status == 'Filled':
+                    logger.info(f"{log_prefix} Zlecenie zostało zrealizowane! Próbuję zaktualizować status na 'OPEN'.")
                     position_info = None
-                    for _ in range(3):
+                    # Dajemy giełdzie chwilę na zaktualizowanie pozycji
+                    for i in range(3):
+                        logger.info(f"{log_prefix} Próba #{i+1} pobrania informacji o pozycji...")
                         position_info = executor.get_position_info(symbol)
-                        if position_info: break
+                        if position_info:
+                            logger.info(f"{log_prefix} Sukces! Pobrano informacje o pozycji.")
+                            break
                         time.sleep(2)
+                    
+                    # Sprawdzamy, czy pozycja istnieje i ma ustawiony SL
                     if position_info and position_info.get('stopLoss') and float(position_info.get('stopLoss')) > 0:
                         sl_order_id = executor.find_sl_order_id(symbol, order_data)
+                        logger.info(f"{log_prefix} Znaleziono pozycję i aktywny SL. Aktualizuję status w Firestore na 'OPEN' z slOrderId: {sl_order_id}.")
                         state_manager.update_active_order(order_link_id, {'status': 'OPEN', 'slOrderId': sl_order_id, 'position_opened_at': datetime.now(timezone.utc)})
                     elif position_info:
+                        logger.error(f"{log_prefix} KRYTYCZNY BŁĄD: Pozycja istnieje, ale NIE MA ustawionego Stop Lossa! Uruchamiam zamknięcie awaryjne.")
                         qty, side = float(position_info.get('size', 0)), position_info.get('side')
                         if qty > 0 and executor.close_position_market(symbol, qty, side):
                             state_manager.update_active_order(order_link_id, {'status': 'CLOSED_EMERGENCY', 'reason': 'Missing SL.'})
                         else:
                             state_manager.update_active_order(order_link_id, {'status': 'ERROR_NEEDS_MANUAL_CLOSURE'})
                     else:
+                        logger.error(f"{log_prefix} BŁĄD: Zlecenie zrealizowane, ale nie znaleziono otwartej pozycji w Bybit po 3 próbach. Ustawiam status na CLOSED_UNVERIFIED.")
                         state_manager.update_active_order(order_link_id, {'status': 'CLOSED_UNVERIFIED'})
+
+                # Krok 1.3: Obsłuż anulowane/odrzucone zlecenie
                 elif order_status in ['Cancelled', 'Rejected']:
+                    logger.info(f"{log_prefix} Zlecenie PLACED zostało anulowane/odrzucone. Usuwam z active_orders.")
                     state_manager.delete_active_order_by_id(order_link_id)
+                
+                # Krok 1.4: Jeśli zlecenie jest wciąż 'New', upewnij się, że ma status w bazie
                 elif 'status' not in order_data:
                     state_manager.update_active_order(order_link_id, {'status': 'PLACED'})
+
             except Exception as e:
                 logger.error(f"{log_prefix} Błąd podczas aktualizacji zlecenia PLACED: {e}", exc_info=True)
 
-    # --- CZĘŚĆ 2: Obsługa otwartych pozycji i aktywacja TS ---
+    # --- CZĘŚĆ 2: Obsługa otwartych pozycji i aktywacja TS (status: OPEN) ---
     open_orders_docs = list(state_manager.get_orders_by_status('OPEN'))
+    logger.info(f"[ORDER_UPDATER] Znaleziono {len(open_orders_docs)} zleceń ze statusem 'OPEN' do zarządzania TS.")
+
     if not open_orders_docs: 
+        logger.info("[ORDER_UPDATER] Brak otwartych pozycji do zarządzania TS. Kończę cykl.")
         return
 
     symbols_to_check = list({doc.to_dict().get('symbol') for doc in open_orders_docs if doc.to_dict().get('symbol')})
     if not symbols_to_check: return
         
     latest_prices = executor.get_latest_prices(symbols_to_check)
-    if not latest_prices:
-        return
+    if not latest_prices: return
 
     for order_doc in open_orders_docs:
         try:
@@ -222,7 +252,6 @@ def update_filled_orders(executor: BybitExecutor):
             activation_price = float(order_data.get("ts_activation_price", 0.0)) 
             direction = order_data.get("direction")
 
-            # <<< LOG DIAGNOSTYCZNY 1 >>>
             logger.info(
                 f"{log_prefix} Oczekuję na aktywację Trailing Stop. "
                 f"Kierunek: {direction}, Aktualna cena (Mark): {mark_price}, "
@@ -237,7 +266,6 @@ def update_filled_orders(executor: BybitExecutor):
                               (direction == 'SHORT' and mark_price <= activation_price)
 
             if should_activate:
-                # <<< LOG DIAGNOSTYCZNY 2 >>>
                 logger.info(f"{log_prefix} WARUNEK SPEŁNIONY! Cena ({mark_price}) osiągnęła poziom aktywacji ({activation_price}). Próbuję ustawić Trailing Stop.")
                 
                 if not executor.get_position_info(symbol):
@@ -247,21 +275,15 @@ def update_filled_orders(executor: BybitExecutor):
                 
                 ts_distance = str(order_data.get("ts_distance"))
                 
-                # <<< LOG DIAGNOSTYCZNY 3 >>>
                 logger.info(f"{log_prefix} Pozycja wciąż istnieje. Wysyłam polecenie ustawienia Trailing Stop z odległością: {ts_distance}.")
                 
                 if executor.set_trailing_stop_for_position(symbol, ts_distance):
-                    # <<< LOG DIAGNOSTYCZNY 4 (SUKCES) >>>
                     logger.info(f"{log_prefix} SUKCES! Trailing Stop został aktywowany. Zmieniam status na 'ACTIVATED'.")
                     state_manager.update_active_order(order_link_id, {'ts_status': 'ACTIVATED'})
                 else:
-                    # <<< LOG DIAGNOSTYCZNY 4 (BŁĄD) >>>
                     logger.error(f"{log_prefix} BŁĄD! Nie udało się ustawić Trailing Stop przez API. Status pozostaje 'PENDING', spróbuję ponownie w następnym cyklu.")
         except Exception as e:
             logger.error(f"[ORDER_UPDATER] Błąd podczas przetwarzania otwartej pozycji {order_doc.id}: {e}", exc_info=True)
-
-# ... reszta pliku (log_closed_positions_pnl, etc.) pozostaje bez zmian ...
-# Poniżej wklejam je dla kompletności
 
 def _find_matching_order(pnl_record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     symbol = pnl_record.get("symbol")
