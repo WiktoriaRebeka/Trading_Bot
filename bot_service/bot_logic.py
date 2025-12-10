@@ -150,15 +150,12 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
     return True
 
 
-# Lokalizacja: bot_service/bot_logic.py
-# ZASTĄP ISTNIEJĄCĄ FUNKCJĘ TYM KODEM
-
 def update_filled_orders(executor: BybitExecutor):
     logger.info("[ORDER_UPDATER] Rozpoczynam cykl aktualizacji.")
     
     # --- CZĘŚĆ 1: Obsługa zleceń oczekujących na wejście (status: PLACED) ---
     placed_orders_docs = list(state_manager.get_orders_by_status('PLACED'))
-    legacy_orders_docs = list(state_manager.get_orders_without_status()) # Na wszelki wypadek
+    legacy_orders_docs = list(state_manager.get_orders_without_status())
     orders_to_check_entry = placed_orders_docs + legacy_orders_docs
 
     logger.info(f"[ORDER_UPDATER] Znaleziono {len(orders_to_check_entry)} zleceń ze statusem 'PLACED' (lub bez statusu) do sprawdzenia.")
@@ -167,19 +164,27 @@ def update_filled_orders(executor: BybitExecutor):
         for order_doc in orders_to_check_entry:
             order_data, order_link_id, symbol = order_doc.to_dict(), order_doc.id, order_doc.to_dict().get('symbol')
             log_prefix = f"[{symbol}|{order_link_id}]"
+            
+            # Dodajemy licznik prób, aby uniknąć wiecznego "utknięcia"
+            retry_count = order_data.get('placed_check_retries', 0)
+
             try:
-                # Krok 1.1: Sprawdź status zlecenia w Bybit
+                # Szukamy zarówno w aktywnych, jak i w historii
                 order_details = executor.get_open_order_by_id(order_link_id) or executor.get_order_history_by_id(order_link_id)
                 
                 if not order_details:
-                    logger.warning(f"{log_prefix} Nie można znaleźć szczegółów zlecenia PLACED w Bybit. Ustawiam status na UNKNOWN.")
-                    state_manager.update_active_order(order_link_id, {'status': 'UNKNOWN'})
-                    continue
+                    # <<< NOWA, BARDZIEJ CIERPLIWA LOGIKA >>>
+                    if retry_count < 5: # Spróbuj 5 razy (łącznie 10 minut) zanim się poddasz
+                        logger.warning(f"{log_prefix} Nie można znaleźć szczegółów zlecenia PLACED w Bybit (próba {retry_count + 1}/5). Spróbuję ponownie w następnym cyklu.")
+                        state_manager.update_active_order(order_link_id, {'placed_check_retries': retry_count + 1})
+                    else:
+                        logger.error(f"{log_prefix} Nie można znaleźć szczegółów zlecenia PLACED po 5 próbach. Ustawiam status na UNKNOWN.")
+                        state_manager.update_active_order(order_link_id, {'status': 'UNKNOWN'})
+                    continue # Przejdź do następnego zlecenia
                 
                 order_status = order_details.get('orderStatus')
                 logger.info(f"{log_prefix} Status zlecenia PLACED w Bybit to: '{order_status}'.")
 
-                # Krok 1.2: Obsłuż zrealizowane zlecenie
                 if order_status == 'Filled':
                     logger.info(f"{log_prefix} Zlecenie zostało zrealizowane! Próbuję zaktualizować status na 'OPEN'.")
                     position_info = None
@@ -208,12 +213,10 @@ def update_filled_orders(executor: BybitExecutor):
                         logger.error(f"{log_prefix} BŁĄD: Zlecenie zrealizowane, ale nie znaleziono otwartej pozycji w Bybit po 3 próbach. Ustawiam status na CLOSED_UNVERIFIED.")
                         state_manager.update_active_order(order_link_id, {'status': 'CLOSED_UNVERIFIED'})
 
-                # Krok 1.3: Obsłuż anulowane/odrzucone zlecenie
                 elif order_status in ['Cancelled', 'Rejected']:
                     logger.info(f"{log_prefix} Zlecenie PLACED zostało anulowane/odrzucone. Usuwam z active_orders.")
                     state_manager.delete_active_order_by_id(order_link_id)
                 
-                # Krok 1.4: Jeśli zlecenie jest wciąż 'New', upewnij się, że ma status w bazie
                 elif 'status' not in order_data:
                     state_manager.update_active_order(order_link_id, {'status': 'PLACED'})
 
