@@ -1,4 +1,5 @@
 # Lokalizacja: bot_service/bybit_executor.py
+# WERSJA FINALNA Z POPRAWKAMI NIEZAWODNOŚCI
 
 import logging
 import time
@@ -164,21 +165,19 @@ class BybitExecutor:
         logger.info(f"Pobrano {len(all_pnl_records)} rekordów P&L.")
         return list(reversed(all_pnl_records))
 
+    # <<< POPRAWKA #1 - BARDZIEJ NIEZAWODNA WERSJA >>>
     def get_open_position_side(self, symbol: str) -> Optional[str]:
-        api_symbol = symbol.replace('.P', '')
-        params = {"category": "linear", "symbol": api_symbol}
         try:
-            result = self._send_request("GET", "/v5/position/list", params=params)
-            if result and result.get('list'):
-                position_data = result['list'][0]
-                position_size = float(position_data.get("size", "0"))
-                if position_size > 0:
-                    side = position_data.get("side")
-                    if side == "Buy": return "LONG"
-                    elif side == "Sell": return "SHORT"
+            position_info = self.get_position_info(symbol) # Używa już poprawionej, niezawodnej logiki
+            if position_info:
+                side = position_info.get("side")
+                if side == "Buy":
+                    return "LONG"
+                elif side == "Sell":
+                    return "SHORT"
             return None
-        except (RequestException, BybitAPIError) as e:
-            logger.error(f"[{symbol}] Błąd podczas sprawdzania otwartych pozycji: {e}")
+        except Exception as e:
+            logger.error(f"[{symbol}] Błąd podczas sprawdzania otwartych pozycji: {e}", exc_info=True)
             return "ERROR"
 
     def cancel_all_open_orders_for_symbol(self, symbol: str) -> bool:
@@ -207,38 +206,33 @@ class BybitExecutor:
             logger.critical(f"[{symbol}] Nieoczekiwany błąd podczas czyszczenia otwartych zleceň: {e}", exc_info=True)
             return False
 
+    # <<< POPRAWKA #2 - BARDZIEJ NIEZAWODNA WERSJA >>>
     def get_order_history_by_id(self, order_id: str = None, order_link_id: str = None) -> Optional[Dict[str, Any]]:
         if not order_id and not order_link_id:
             return None
+        
         endpoint = "/v5/order/history"
-        if order_link_id:
-            params = {"category": "linear", "orderLinkId": order_link_id}
-            try:
-                result = self._send_request("GET", endpoint, params=params)
-                if result and result.get('list'):
-                    logger.info(f"Znaleziono historię zlecenia po orderLinkId {order_link_id}.")
-                    return result['list'][0]
-            except Exception:
-                logger.warning(f"Nie udało się sprawdzić historii po orderLinkId {order_link_id}.")
-        if order_id:
-            params = {"category": "linear", "orderId": order_id, "orderFilter": "StopOrder"}
-            try:
-                result = self._send_request("GET", endpoint, params=params)
-                if result and result.get('list'):
-                    logger.info(f"Znaleziono orderId {order_id} w historii zleceň warunkowych.")
-                    return result['list'][0]
-            except Exception:
-                logger.warning(f"Nie udało się sprawdzić historii zleceň warunkowych dla {order_id}.")
-            params = {"category": "linear", "orderId": order_id}
-            try:
-                result = self._send_request("GET", endpoint, params=params)
-                if result and result.get('list'):
-                    logger.info(f"Znaleziono orderId {order_id} w historii zleceň zwykłych.")
-                    return result['list'][0]
-            except Exception:
-                logger.warning(f"Nie udało się sprawdzić historii zleceň zwykłych dla {order_id}.")
-        logger.warning(f"Ostatecznie nie znaleziono historii dla orderId: {order_id} / orderLinkId: {order_link_id}.")
-        return None
+        # Ustawiamy limit na 20, aby pobrać więcej ostatnich zleceń, co zwiększa szansę na znalezienie naszego.
+        params = {"category": "linear", "limit": 20}
+
+        try:
+            result = self._send_request("GET", endpoint, params=params)
+            if result and result.get('list'):
+                # Iterujemy po liście ostatnich zleceń i szukamy naszego
+                for order in result['list']:
+                    if order_link_id and order.get('orderLinkId') == order_link_id:
+                        logger.info(f"Znaleziono historię zlecenia po orderLinkId {order_link_id} na liście ostatnich zleceň.")
+                        return order
+                    if order_id and order.get('orderId') == order_id:
+                        logger.info(f"Znaleziono historię zlecenia po orderId {order_id} na liście ostatnich zleceň.")
+                        return order
+            
+            logger.warning(f"Nie znaleziono zlecenia {order_link_id or order_id} na liście ostatnich 20 historycznych zleceň.")
+            return None
+
+        except Exception as e:
+            logger.error(f"Błąd podczas przeszukiwania historii zleceň dla {order_link_id or order_id}: {e}", exc_info=True)
+            return None
 
     def get_open_order_by_id(self, order_id: str = None, order_link_id: str = None) -> Optional[Dict[str, Any]]:
         if not order_id and not order_link_id:
@@ -288,28 +282,20 @@ class BybitExecutor:
             logger.critical(f"[{api_symbol}] KRYTYCZNY BŁĄD podczas wysyłania awaryjnego zlecenia zamknięcia: {e}", exc_info=True)
             return False
 
-
     def get_position_info(self, symbol: str) -> Optional[Dict[str, Any]]:
         api_symbol = symbol.replace('.P', '')
         
-        # --- OSTATECZNA POPRAWKA ---
-        # Zamiast wysyłać puste zapytanie, prosimy o wszystkie pozycje
-        # rozliczane w USDT. To jest prawidłowe i zalecane użycie tego endpointu.
         params = {"category": "linear", "settleCoin": "USDT"}
         
         try:
             result = self._send_request("GET", "/v5/position/list", params=params)
             
             if result and result.get('list'):
-                # Iterujemy po liście wszystkich pozycji rozliczanych w USDT.
                 for position_data in result['list']:
-                    # Sprawdzamy, czy symbol pozycji pasuje do tego, którego szukamy
-                    # ORAZ czy rozmiar pozycji jest większy od zera.
                     if position_data.get('symbol') == api_symbol and float(position_data.get("size", "0")) > 0:
                         logger.info(f"[{symbol}] Znaleziono aktywną pozycję dla {api_symbol} na liście pozycji USDT.")
-                        return position_data # Zwracamy pasującą pozycję
+                        return position_data
             
-            # Jeśli pętla się zakończy i nic nie znajdziemy, zwracamy None.
             logger.warning(f"[{symbol}] Nie znaleziono aktywnej pozycji dla symbolu {api_symbol} na liście wszystkich otwartych pozycji USDT.")
             return None
             
@@ -317,15 +303,11 @@ class BybitExecutor:
             logger.error(f"[{symbol}] Błąd podczas pobierania informacji o pozycji: {e}", exc_info=True)
             return None
 
-
-
     def find_sl_order_id(self, symbol: str, order_data: Dict[str, Any]) -> Optional[str]:
-        """Znajduje ID aktywnego zlecenia Stop Loss pasującego do planowanej ceny."""
         try:
             active_stop_orders = self.get_active_tp_sl_orders(symbol)
             for stop_order in active_stop_orders:
                 trigger_price = float(stop_order.get('triggerPrice', 0))
-                # Szukamy tylko zlecenia, które jest Stop Lossem
                 if stop_order.get('stopOrderType') == 'StopLoss' and math.isclose(trigger_price, order_data.get('planned_sl_price')):
                     sl_order_id = stop_order.get('orderId')
                     logger.info(f"[{symbol}] Znaleziono pasujące zlecenie SL o ID: {sl_order_id}")
@@ -336,16 +318,13 @@ class BybitExecutor:
             logger.warning(f"[{symbol}] Nie udało się pobrać ID zlecenia SL: {e}")
             return None
 
-
     def get_latest_prices(self, symbols: List[str]) -> Dict[str, Dict[str, Any]]:
-        """Pobiera najnowsze informacje (ticker) dla listy symboli."""
         if not symbols:
             return {}
         
         endpoint = "/v5/market/tickers"
         params = {"category": "linear"}
         
-        # Jeśli jest tylko jeden symbol, możemy go podać bezpośrednio
         if len(symbols) == 1:
             params["symbol"] = symbols[0].replace('.P', '')
         
@@ -354,7 +333,6 @@ class BybitExecutor:
             price_data = {}
             if result and result.get('list'):
                 for ticker in result['list']:
-                    # Kluczem w naszej mapie jest symbol z ".P"
                     full_symbol = f"{ticker.get('symbol')}.P"
                     price_data[full_symbol] = ticker
                 logger.info(f"Pobrano aktualne ceny dla {len(price_data)}/{len(symbols)} symboli.")
