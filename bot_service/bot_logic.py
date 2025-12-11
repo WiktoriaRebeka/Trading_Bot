@@ -150,6 +150,7 @@ def _correct_and_validate_alert(alert: AlertData) -> bool:
     return True
 
 
+
 def update_filled_orders(executor: BybitExecutor):
     logger.info("[ORDER_UPDATER] Rozpoczynam cykl aktualizacji.")
     
@@ -165,15 +166,21 @@ def update_filled_orders(executor: BybitExecutor):
             order_data, order_link_id, symbol = order_doc.to_dict(), order_doc.id, order_doc.to_dict().get('symbol')
             log_prefix = f"[{symbol}|{order_link_id}]"
             
+            # <<< DODATKOWE ZABEZPIECZENIE: Sprawdzamy, czy dane w Firestore są kompletne >>>
+            if not symbol:
+                logger.error(f"Krytyczny błąd danych: Brak symbolu w dokumencie zlecenia {order_link_id}. Pomijam.")
+                state_manager.update_active_order(order_link_id, {'status': 'ERROR_DATA_MISSING'})
+                continue
+
             # Dodajemy licznik prób, aby uniknąć wiecznego "utknięcia"
             retry_count = order_data.get('placed_check_retries', 0)
 
             try:
-                # Szukamy zarówno w aktywnych, jak i w historii
-                order_details = executor.get_open_order_by_id(order_link_id) or executor.get_order_history_by_id(order_link_id)
+                # <<< KLUCZOWA ZMIANA: Używamy nowej, niezawodnej funkcji, która zawsze przekazuje symbol >>>
+                order_details = executor.find_order_details_by_link_id(symbol=symbol, order_link_id=order_link_id)
                 
                 if not order_details:
-                    # <<< NOWA, BARDZIEJ CIERPLIWA LOGIKA >>>
+                    # Logika cierpliwego czekania pozostaje, ale teraz będzie znacznie rzadziej używana
                     if retry_count < 5: # Spróbuj 5 razy (łącznie 10 minut) zanim się poddasz
                         logger.warning(f"{log_prefix} Nie można znaleźć szczegółów zlecenia PLACED w Bybit (próba {retry_count + 1}/5). Spróbuję ponownie w następnym cyklu.")
                         state_manager.update_active_order(order_link_id, {'placed_check_retries': retry_count + 1})

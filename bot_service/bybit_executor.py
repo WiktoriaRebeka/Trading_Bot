@@ -205,49 +205,49 @@ class BybitExecutor:
             logger.critical(f"[{symbol}] Nieoczekiwany błąd podczas czyszczenia otwartych zleceň: {e}", exc_info=True)
             return False
 
-
-
-    def get_order_history_by_id(self, order_id: str = None, order_link_id: str = None) -> Optional[Dict[str, Any]]:
-        if not order_id and not order_link_id:
+    def find_order_details_by_link_id(self, symbol: str, order_link_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Niezawodnie wyszukuje szczegóły zlecenia po orderLinkId, sprawdzając najpierw
+        aktywne zlecenia, a następnie historię. Zawsze używa symbolu do optymalizacji zapytania.
+        """
+        if not symbol or not order_link_id:
+            logger.error("Próba wyszukania zlecenia bez symbolu lub order_link_id.")
             return None
-        
-        endpoint = "/v5/order/history"
-        
-        # Szukamy tylko po orderLinkId, bo to jest nasz główny identyfikator
-        if order_link_id:
-            params = {"category": "linear", "orderLinkId": order_link_id}
-            try:
-                logger.info(f"Próbuję znaleźć zlecenie w historii po orderLinkId: {order_link_id}")
-                result = self._send_request("GET", endpoint, params=params)
-                if result and result.get('list'):
-                    logger.info(f"Znaleziono historię zlecenia po orderLinkId {order_link_id}.")
-                    return result['list'][0]
-            except Exception as e:
-                # Zmieniamy log na bardziej informacyjny
-                logger.error(f"Błąd podczas sprawdzania historii po orderLinkId {order_link_id}: {e}", exc_info=True)
-        
-        # Jeśli nie znaleziono, zwracamy None. Logika ponawiania jest w bot_logic.py
-        logger.warning(f"Nie znaleziono zlecenia w historii dla orderLinkId: {order_link_id}.")
+
+        api_symbol = symbol.replace('.P', '')
+        log_prefix = f"[{api_symbol}|{order_link_id}]"
+
+        # 1. Sprawdź w czasie rzeczywistym (dla zleceń 'New', 'PartiallyFilled')
+        try:
+            endpoint_realtime = "/v5/order/realtime"
+            params_realtime = {"category": "linear", "symbol": api_symbol, "orderLinkId": order_link_id}
+            result_realtime = self._send_request("GET", endpoint_realtime, params=params_realtime)
+            if result_realtime and result_realtime.get('list'):
+                logger.info(f"{log_prefix} Znaleziono zlecenie w czasie rzeczywistym (realtime).")
+                return result_realtime['list'][0]
+        except BybitAPIError as e:
+            # Ignorujemy błąd "order does not exist", bo to oczekiwane, jeśli zlecenie jest już w historii
+            if e.ret_code not in [110001, 110021]: 
+                logger.warning(f"{log_prefix} Błąd API podczas sprawdzania zleceń w czasie rzeczywistym: {e}")
+        except Exception as e:
+            logger.error(f"{log_prefix} Nieoczekiwany błąd podczas sprawdzania zleceń w czasie rzeczywistym: {e}", exc_info=True)
+
+        # 2. Jeśli nie znaleziono, sprawdź w historii (dla zleceń 'Filled', 'Cancelled', 'Rejected')
+        try:
+            endpoint_history = "/v5/order/history"
+            # <<< KLUCZOWA ZMIANA: Zawsze dodajemy 'symbol' do parametrów zapytania o historię >>>
+            params_history = {"category": "linear", "symbol": api_symbol, "orderLinkId": order_link_id}
+            result_history = self._send_request("GET", endpoint_history, params=params_history)
+            if result_history and result_history.get('list'):
+                logger.info(f"{log_prefix} Znaleziono zlecenie w historii.")
+                return result_history['list'][0]
+        except Exception as e:
+            logger.error(f"{log_prefix} Błąd podczas sprawdzania historii zleceń: {e}", exc_info=True)
+
+        # 3. Jeśli nigdzie nie znaleziono
+        logger.warning(f"{log_prefix} Nie znaleziono zlecenia ani w czasie rzeczywistym, ani w historii.")
         return None
 
-    def get_open_order_by_id(self, order_id: str = None, order_link_id: str = None) -> Optional[Dict[str, Any]]:
-        if not order_id and not order_link_id:
-            return None
-        endpoint = "/v5/order/realtime"
-        params = {"category": "linear"}
-        if order_link_id:
-            params["orderLinkId"] = order_link_id
-        else:
-            params["orderId"] = order_id
-        try:
-            result = self._send_request("GET", endpoint, params=params)
-            if result and result.get('list'):
-                logger.info(f"Znaleziono aktywne zlecenie dla orderId: {order_id} / orderLinkId: {order_link_id}.")
-                return result['list'][0]
-            return None
-        except Exception:
-            logger.warning(f"Nie udało się sprawdzić aktywnych zleceň dla orderId: {order_id} / orderLinkId: {order_link_id}.")
-            return None
 
     def get_active_tp_sl_orders(self, symbol: str) -> List[Dict[str, Any]]:
         api_symbol = symbol.replace('.P', '')
