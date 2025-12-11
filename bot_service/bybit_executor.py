@@ -1,5 +1,4 @@
 # Lokalizacja: bot_service/bybit_executor.py
-# WERSJA FINALNA Z POPRAWKAMI NIEZAWODNOŚCI
 
 import logging
 import time
@@ -206,32 +205,45 @@ class BybitExecutor:
             logger.critical(f"[{symbol}] Nieoczekiwany błąd podczas czyszczenia otwartych zleceň: {e}", exc_info=True)
             return False
 
-    # <<< POPRAWKA #2 - BARDZIEJ NIEZAWODNA WERSJA >>>
+
     def get_order_history_by_id(self, order_id: str = None, order_link_id: str = None) -> Optional[Dict[str, Any]]:
         if not order_id and not order_link_id:
             return None
         
         endpoint = "/v5/order/history"
-        # Ustawiamy limit na 20, aby pobrać więcej ostatnich zleceń, co zwiększa szansę na znalezienie naszego.
-        params = {"category": "linear", "limit": 20}
+        # Zwiększamy limit i usuwamy wszystkie inne filtry, aby dostać "surową" listę
+        params = {"category": "linear", "limit": 50}
 
         try:
+            logger.info(f"DIAGNOSTYKA: Próbuję pobrać historię ostatnich 50 zleceń dla kategorii 'linear'.")
             result = self._send_request("GET", endpoint, params=params)
+            
             if result and result.get('list'):
+                order_list = result.get('list')
+                logger.info(f"DIAGNOSTYKA: Otrzymano {len(order_list)} zleceń z historii. Przeszukuję listę...")
+
+                # Logujemy wszystkie znalezione orderLinkId, aby zobaczyć, co dostajemy
+                found_link_ids = [o.get('orderLinkId') for o in order_list if o.get('orderLinkId')]
+                logger.info(f"DIAGNOSTYKA: Znalezione orderLinkId w historii: {found_link_ids}")
+
                 # Iterujemy po liście ostatnich zleceń i szukamy naszego
-                for order in result['list']:
+                for order in order_list:
                     if order_link_id and order.get('orderLinkId') == order_link_id:
-                        logger.info(f"Znaleziono historię zlecenia po orderLinkId {order_link_id} na liście ostatnich zleceň.")
+                        logger.info(f"DIAGNOSTYKA: SUKCES! Znaleziono pasujące zlecenie w historii: {order}")
                         return order
                     if order_id and order.get('orderId') == order_id:
-                        logger.info(f"Znaleziono historię zlecenia po orderId {order_id} na liście ostatnich zleceň.")
+                        logger.info(f"DIAGNOSTYKA: SUKCES! Znaleziono pasujące zlecenie w historii po orderId: {order}")
                         return order
+                
+                logger.warning(f"DIAGNOSTYKA: Nie znaleziono zlecenia {order_link_id or order_id} na liście ostatnich {len(order_list)} historycznych zleceň.")
+                return None
             
-            logger.warning(f"Nie znaleziono zlecenia {order_link_id or order_id} na liście ostatnich 20 historycznych zleceň.")
-            return None
+            else:
+                logger.error(f"DIAGNOSTYKA: API Bybit zwróciło pustą listę lub brak listy dla historii zleceň. Odpowiedź: {result}")
+                return None
 
         except Exception as e:
-            logger.error(f"Błąd podczas przeszukiwania historii zleceň dla {order_link_id or order_id}: {e}", exc_info=True)
+            logger.error(f"DIAGNOSTYKA: Krytyczny błąd podczas przeszukiwania historii zleceň dla {order_link_id or order_id}: {e}", exc_info=True)
             return None
 
     def get_open_order_by_id(self, order_id: str = None, order_link_id: str = None) -> Optional[Dict[str, Any]]:
