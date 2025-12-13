@@ -113,7 +113,13 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
             "alert_id": alert_id,
             "order_id": order_id,
             "symbol": symbol,
-            "direction": active_order_data.get("direction") if active_order_data else pnl_data.get("side"),
+            
+            "direction": (
+                active_order_data.get("direction") if is_matched 
+                else ("SHORT" if float(pnl_data.get("avgEntryPrice", 0)) > float(pnl_data.get("avgExitPrice", 0)) else "LONG") 
+                if float(pnl_data.get("closedPnl", 0)) > 0 
+                else ("LONG" if float(pnl_data.get("avgEntryPrice", 0)) > float(pnl_data.get("avgExitPrice", 0)) else "SHORT")
+            ),
             "qty": float(qty),
             "leverage": int(float(pnl_data.get("leverage", 0))) if pnl_data.get("leverage") else None,
             "avg_entry_price": safe_round(float(avg_entry_price)),
