@@ -2,153 +2,119 @@
 
 import logging
 import os
+import time
+from typing import Dict, Any, Optional, List
+from datetime import datetime, timezone, timedelta
+from decimal import Decimal, ROUND_DOWN, ROUND_UP, getcontext
 import math
 import uuid
-import time
 
-from decimal import Decimal, ROUND_DOWN, ROUND_UP
-from typing import Dict, Any, List, Optional
-from datetime import datetime, timezone, timedelta
-from pydantic import ValidationError
+# Ustawienie precyzji dla Decimal, aby uniknąć błędów zaokrąglania
+getcontext().prec = 28 
 
 from shared_lib.models import AlertData
 from shared_lib.firebase_client import get_instrument_rules
-from shared_lib.risk_manager import calculate_position_size  # Upewnij się, że nazwa funkcji jest poprawna
+from shared_lib.risk_manager import calculate_position_size
 from bot_service import state_manager
-from bot_service.pnl_logger_real import log_real_trade_result
 from bot_service.bybit_executor import BybitExecutor, BybitAPIError
-from bot_service.fetch_from_firestore import fetch_new_alerts_since, save_last_processed_timestamp, load_last_processed_timestamp
+from bot_service.fetch_from_firestore import load_last_processed_timestamp, save_last_processed_timestamp
+from bot_service.pnl_logger_real import log_real_trade_result
 
 logger = logging.getLogger(__name__)
 
-def process_new_alerts(executor: BybitExecutor):
-    logger.info("Uruchamiam cykl przetwarzania nowych alertów.")
-    last_ts = load_last_processed_timestamp("alerts_last_fetch_state")
-    new_alerts, new_ts = fetch_new_alerts_since(last_ts)
+# =====================================================================
+# === 1. NARZĘDZIA POMOCNICZE (Rounding)                             ===
+# =====================================================================
 
-    if new_alerts:
-        _process_alerts_transactionally(new_alerts, executor)
+def round_price_by_tick(price: float, tick_size: str, direction: str) -> float:
+    """Zaokrągla cenę do najbliższego dozwolonego tick_size w kierunku 'up', 'down' lub 'none'."""
+    price_decimal = Decimal(str(price))
+    tick_decimal = Decimal(tick_size)
+    if direction == 'down':
+        quantized = (price_decimal / tick_decimal).to_integral_value(rounding=ROUND_DOWN) * tick_decimal
+    elif direction == 'up':
+        quantized = (price_decimal / tick_decimal).to_integral_value(rounding=ROUND_UP) * tick_decimal
+    else: 
+        quantized = round(price_decimal / tick_decimal) * tick_decimal
+    return float(quantized)
+
+# =====================================================================
+# === 2. GŁÓWNY SILNIK (PUSH)                                        ===
+# =====================================================================
+
+def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
+    """
+    OBSŁUGA SYGNAŁU PUSH - Wejście jest natychmiastowe po odebraniu JSON.
+    """
+    symbol = None
+    try:
+        alert = AlertData.model_validate(payload)
+        symbol = alert.symbol
         
-        if new_ts and (not last_ts or new_ts > last_ts):
-            save_last_processed_timestamp(new_ts, "alerts_last_fetch_state")
-    else:
-        logger.info("Brak nowych alertów do przetworzenia.")
+        logger.info(f"[{symbol}] PUSH: Sygnał {alert.direction} odebrany. Waliduję...")
 
+        # 1. BLOKADA DOUBLE-TRADE (Klucz do bezpieczeństwa)
+        if executor.get_open_position_side(symbol):
+            logger.warning(f"[{symbol}] ODRZUCONO: Pozycja jest już otwarta.")
+            return
 
-def _process_alerts_transactionally(alerts: List[Dict[str, Any]], executor: BybitExecutor):
-    instrument_rules = get_instrument_rules()
-    if not instrument_rules:
-        logger.error("Nie udało się wczytać zasad instrumentów z Firestore.")
-        return
+        # 2. POBRANIE PARAMETRÓW (TickSize)
+        rules = get_instrument_rules().get(symbol)
+        if not rules:
+            logger.error(f"[{symbol}] Brak zasad handlu (tickSize/qtyStep) w Firestore.")
+            return
+        tick_size = rules["tickSize"]
 
-    alerts.sort(key=lambda a: a.get('received_at', datetime.min.replace(tzinfo=timezone.utc)))
-    
-    latest_alerts_per_symbol: Dict[str, Dict[str, Any]] = {}
-    for alert_dict in alerts:
-        symbol = alert_dict.get('symbol')
-        if symbol: latest_alerts_per_symbol[symbol] = alert_dict
-
-    for symbol, alert_dict in latest_alerts_per_symbol.items():
-        alert_id = alert_dict.get('id', 'unknown_id')
+        # 3. ZAOKRĄGLANIE CEN (Krytyczny Krok)
+        is_long = alert.direction == "LONG"
+        final_entry = round_price_by_tick(alert.entry, tick_size, 'down' if is_long else 'up')
+        final_sl = round_price_by_tick(alert.sl, tick_size, 'up' if is_long else 'down')
+        final_tp = round_price_by_tick(alert.tp, tick_size, 'down' if is_long else 'up') # TP na Mark Price
         
-        if state_manager.is_alert_processed(alert_id):
-            continue
+        # 4. OBLICZENIE QTY (2.5 USDT)
+        qty = calculate_position_size(
+            risk_per_trade_usdt=alert.risk_usdt,
+            entry_price=final_entry,
+            sl_price=final_sl,
+            qty_step=rules["qtyStep"]
+        )
 
-        open_position_side = executor.get_open_position_side(symbol)
-        if open_position_side and open_position_side != "ERROR":
-            logger.warning(
-                f"[{symbol}] ODRZUCONO NOWY ALERT. Powód: Wykryto istniejącą pozycję. "
-                f"Kierunek wykrytej pozycji: {open_position_side}."
-            )
-            state_manager.mark_alert_as_processed(alert_id)
-            continue
+        if not qty or qty <= 0:
+            logger.error(f"[{symbol}] Błąd obliczeń Qty: zbyt ciasny SL (lub zero).")
+            return
 
-        if not executor.cancel_all_open_orders_for_symbol(symbol):
-             logger.error(f"[{symbol}] KRYTYCZNY BŁĄD: Nie udało się anulować poprzednich zleceń.")
-             continue
+        # 5. WYSŁANIE ZLECENIA LIMIT (Atomowa Transakcja)
+        order_params = {
+            "symbol": symbol,
+            "side": "Buy" if is_long else "Sell",
+            "orderType": "Limit",
+            "qty": str(qty),
+            "price": str(final_entry),
+            "stopLoss": str(final_sl),
+            "takeProfit": str(final_tp),
+            "orderLinkId": f"sc_{int(time.time())}_{symbol}_{int(math.sqrt(time.time() * 1000))}", # Unikalny Link ID
+            "timeInForce": "GTC"
+        }
+
+        response = executor.place_order(order_params)
         
-        try:
-            alert_model = AlertData.model_validate(alert_dict)
-
-            if not _correct_and_validate_alert(alert_model):
-                state_manager.mark_alert_as_processed(alert_id)
-                continue
-
-            rule = instrument_rules.get(symbol)
-            if not rule or "tickSize" not in rule or "qtyStep" not in rule:
-                logger.error(f"[{symbol}] Odrzucono alert: Brak zasad (tickSize, qtyStep) dla tego symbolu w Firestore.")
-                state_manager.mark_alert_as_processed(alert_id)
-                continue
-            tick_size, qty_step = rule["tickSize"], rule["qtyStep"]
-
-            is_long = alert_model.direction == 'LONG'
-            final_entry = round_price_by_tick(alert_model.entry, tick_size, 'down' if is_long else 'up')
-            final_sl = round_price_by_tick(alert_model.sl, tick_size, 'up' if is_long else 'down')
-
-            # <<< KLUCZOWA POPRAWKA BŁĘDU TypeError >>>
-            final_qty = calculate_position_size(risk_per_trade_usdt=float(os.getenv("RISK_PER_TRADE_USDT", "2.5")), entry_price=final_entry, sl_price=final_sl, qty_step=qty_step)
+        if response and response.get('orderId'):
+            logger.info(f"[{symbol}] SUKCES: Zlecenie LIMIT wysłane na Bybit.")
             
-            if not final_qty or final_qty <= 0:
-                logger.error(f"[{symbol}] Odrzucono alert: Obliczona wielkość pozycji jest zerowa lub ujemna.")
-                state_manager.mark_alert_as_processed(alert_id)
-                continue
+            # Zapis do Firestore dla monitoringu
+            state_manager.save_active_order(order_params["orderLinkId"], {
+                "symbol": symbol,
+                "status": "PLACED",
+                "direction": alert.direction,
+                "planned_qty": qty,
+                "planned_entry_price": final_entry,
+                "planned_sl_price": final_sl,
+                "planned_tp_price": final_tp,
+                "created_at": datetime.now(timezone.utc)
+            })
 
-            risk_distance_1R = abs(final_entry - final_sl)
-            trailing_distance_final = round_price_by_tick(risk_distance_1R * 1, tick_size, 'none')
-            
-            activation_price_raw = alert_model.tp
-            activation_price_final = round_price_by_tick(activation_price_raw, tick_size, 'down' if is_long else 'up')
-
-            order_params = {
-                "symbol": symbol, "side": "Buy" if is_long else "Sell", "orderType": "Limit", 
-                "qty": str(final_qty), "price": str(final_entry), "stopLoss": str(final_sl), 
-                "slTriggerBy": "MarkPrice", "orderLinkId": f"bot_{alert_id.replace('-', '')[:20]}", "timeInForce": "GTC"
-            }
-            
-            response = executor.place_order(order_params)
-            if response and response.get('orderId'):
-                order_data_to_save = {
-                    "symbol": symbol, "limitOrderId": response.get('orderId'), "orderLinkId": order_params["orderLinkId"],
-                    "alert_id": alert_id, "direction": alert_model.direction,
-                    "planned_entry_price": final_entry, "planned_sl_price": final_sl, 
-                    "planned_qty": final_qty,
-                    "ts_activation_price": activation_price_final,
-                    "ts_distance": trailing_distance_final,
-                    "ts_status": "PENDING"
-                }
-                state_manager.save_active_order(order_params["orderLinkId"], order_data_to_save)
-                state_manager.mark_alert_as_processed(alert_id)
-            else:
-                logger.error(f"[{symbol}] BŁĄD: Nie udało się złożyć zlecenia wejścia.")
-
-        except (ValidationError, BybitAPIError, Exception) as e:
-            if isinstance(e, ValidationError):
-                 logger.error(f"Błąd walidacji danych dla alertu ID: {alert_id}: {e}")
-                 state_manager.mark_alert_as_processed(alert_id)
-            elif isinstance(e, BybitAPIError):
-                logger.error(f"Błąd API Bybit podczas przetwarzania alertu {alert_id}: {e}", exc_info=False)
-            else:
-                logger.error(f"Krytyczny błąd podczas przetwarzania alertu {alert_id}: {e}", exc_info=True)
-
-
-def _correct_and_validate_alert(alert: AlertData) -> bool:
-    if not alert.direction or alert.direction not in ["LONG", "SHORT"]:
-        logger.warning(f"Odrzucono alert [{alert.symbol}]: Brak lub nieprawidłowy kierunek.")
-        return False
-        
-    is_long_ok = (alert.direction == 'LONG' and alert.sl < alert.entry)
-    is_short_ok = (alert.direction == 'SHORT' and alert.sl > alert.entry)
-    if not (is_long_ok or is_short_ok):
-        logger.warning(f"Odrzucono alert [{alert.symbol}]: Nielogiczna pozycja SL. Kierunek: {alert.direction}, Wejście: {alert.entry}, SL: {alert.sl}.")
-        return False
-        
-    risk_perc = _calculate_risk_percentage(alert.entry, alert.sl)
-    if risk_perc is None:
-        return False
-
-    logger.info(f"Alert [{alert.symbol}] przeszedł walidację. Kierunek: {alert.direction}, Ryzyko: {risk_perc}%.")
-    return True
-
+    except Exception as e:
+        logger.error(f"KRYTYCZNY BŁĄD w handle_immediate_signal. Symbol: {symbol}. Błąd: {e}", exc_info=True)
 
 
 def update_filled_orders(executor: BybitExecutor):
@@ -295,38 +261,7 @@ def update_filled_orders(executor: BybitExecutor):
         except Exception as e:
             logger.error(f"[ORDER_UPDATER] Błąd podczas przetwarzania otwartej pozycji {order_doc.id}: {e}", exc_info=True)
 
-def _find_matching_order(pnl_record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    symbol = pnl_record.get("symbol")
-    pnl_order_link_id = pnl_record.get("orderLinkId")
-    pnl_closing_order_id = pnl_record.get("orderId")
-    log_prefix = f"[{symbol}|{pnl_closing_order_id}]"
 
-    if pnl_order_link_id:
-        matched_order = state_manager.get_active_order_by_id(pnl_order_link_id)
-        if matched_order:
-            return matched_order
-
-    if pnl_closing_order_id:
-        matched_order = state_manager.get_active_order_by_sl_order_id(pnl_closing_order_id)
-        if matched_order:
-            return matched_order
-
-    try:
-        side = "LONG" if pnl_record.get("side") == "Buy" else "SHORT"
-        qty = float(pnl_record.get("qty", 0.0))
-        if all([symbol, side, qty > 0]):
-            matched_order = state_manager.find_active_order_by_details(symbol, side, qty)
-            if matched_order:
-                return matched_order
-    except (ValueError, TypeError):
-        pass
-
-    side = "LONG" if pnl_record.get("side") == "Buy" else "SHORT"
-    matched_order = state_manager.get_latest_active_order_for_symbol(symbol, side)
-    if matched_order:
-        return matched_order
-
-    return None
 
 def log_closed_positions_pnl(executor: BybitExecutor) -> int:
     logger.info("[PNL_LOGGER] Rozpoczynam cykl logowania zamkniętych pozycji.")
@@ -384,31 +319,36 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
     logger.info(f"[PNL_LOGGER] Zakończono cykl. Przetworzono {processed_count} rekordów.")
     return processed_count
 
-def round_price_by_tick(price: float, tick_size: str, direction: str) -> float:
-    price_decimal = Decimal(str(price))
-    tick_decimal = Decimal(tick_size)
-    if direction == 'down':
-        quantized = (price_decimal / tick_decimal).to_integral_value(rounding=ROUND_DOWN) * tick_decimal
-    elif direction == 'up':
-        quantized = (price_decimal / tick_decimal).to_integral_value(rounding=ROUND_UP) * tick_decimal
-    else: 
-        quantized = round(price_decimal / tick_decimal) * tick_decimal
-    return float(quantized)
+def _find_matching_order(pnl_record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    symbol = pnl_record.get("symbol")
+    pnl_order_link_id = pnl_record.get("orderLinkId")
+    pnl_closing_order_id = pnl_record.get("orderId")
+    log_prefix = f"[{symbol}|{pnl_closing_order_id}]"
 
-def _calculate_risk_percentage(entry_price: float, sl_price: float) -> Optional[float]:
-    if entry_price == 0: return None
-    risk_distance = abs(entry_price - sl_price)
-    return round((risk_distance / entry_price) * 100, 4)
+    if pnl_order_link_id:
+        matched_order = state_manager.get_active_order_by_id(pnl_order_link_id)
+        if matched_order:
+            return matched_order
 
-def repair_old_orders():
-    logger.info("[REPAIR_SCRIPT] Uruchamiam jednorazowy skrypt naprawczy dla starych zleceň.")
-    all_orders = state_manager.get_all_active_orders()
-    repaired_count = 0
-    for order_doc in all_orders:
-        order_data = order_doc.to_dict()
-        if 'status' not in order_data:
-            order_id = order_doc.id
-            state_manager.update_active_order(order_id, {'status': 'PLACED'})
-            repaired_count += 1
-    logger.info(f"[REPAIR_SCRIPT] Zakończono. Naprawiono {repaired_count} zleceń.")
-    return repaired_count
+    if pnl_closing_order_id:
+        matched_order = state_manager.get_active_order_by_sl_order_id(pnl_closing_order_id)
+        if matched_order:
+            return matched_order
+
+    try:
+        side = "LONG" if pnl_record.get("side") == "Buy" else "SHORT"
+        qty = float(pnl_record.get("qty", 0.0))
+        if all([symbol, side, qty > 0]):
+            matched_order = state_manager.find_active_order_by_details(symbol, side, qty)
+            if matched_order:
+                return matched_order
+    except (ValueError, TypeError):
+        pass
+
+    side = "LONG" if pnl_record.get("side") == "Buy" else "SHORT"
+    matched_order = state_manager.get_latest_active_order_for_symbol(symbol, side)
+    if matched_order:
+        return matched_order
+
+    return None
+

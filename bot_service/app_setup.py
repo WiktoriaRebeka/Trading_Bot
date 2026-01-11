@@ -41,26 +41,24 @@ def register_endpoints(app: Flask):
 
     @app.route('/process-alerts', methods=['POST'])
     def process_alerts_endpoint():
-        cycle_id = str(uuid.uuid4())
-        logger.info(f"--- Rozpoczynam cykl przetwarzania alertów [ID: {cycle_id}] ---")
+        # Pobieramy JSON bezpośrednio z żądania (PUSH)
+        alert_payload = request.get_json()
+        
+        if not alert_payload:
+            return jsonify({"status": "error", "message": "No payload received"}), 400
 
         if not app.config.get('INITIALIZATION_SUCCESS', False):
-             reason = app.config.get('INITIALIZATION_FAILURE_REASON', 'Aplikacja niezainicjalizowana.')
-             logger.error(f"Zatrzymano cykl, ponieważ aplikacja nie jest 'healthy'. Powód: {reason}", extra={"json_fields": {"cycle_id": cycle_id}})
-             return jsonify({"status": "error", "message": f"Service is unhealthy: {reason}"}), 503
+            return jsonify({"status": "error", "message": "Service initializing"}), 503
         
         try:
-            bybit_executor = app.config.get('BYBIT_EXECUTOR')
-            if not bybit_executor:
-                raise RuntimeError("BybitExecutor nie został poprawnie zainicjalizowany.")
+            executor = app.config.get('BYBIT_EXECUTOR')
+            # Uruchamiamy natychmiastową logikę
+            handle_immediate_signal(alert_payload, executor)
             
-            process_new_alerts(bybit_executor)
-
-            logger.info(f"--- Cykl przetwarzania alertów zakończony pomyślnie [ID: {cycle_id}] ---")
-            return jsonify({"status": "success", "cycle_id": cycle_id}), 200
+            return jsonify({"status": "success"}), 200
         except Exception as e:
-            logger.error(f"KRYTYCZNY BŁĄD w cyklu przetwarzania alertów: {e}", exc_info=True, extra={"json_fields": {"cycle_id": cycle_id}})
-            return jsonify({"status": "error", "message": str(e), "cycle_id": cycle_id}), 500
+            logger.error(f"Błąd endpointu: {e}")
+            return jsonify({"status": "error", "message": str(e)}), 500
 
 
     @app.route('/log-pnl', methods=['POST'])
