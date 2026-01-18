@@ -42,39 +42,32 @@ def round_price_by_tick(price: float, tick_size: str, direction: str) -> float:
 # === 2. GŁÓWNY SILNIK (PUSH)                                        ===
 # =====================================================================
 
-# Lokalizacja: bot_service/bot_logic.py
-
 def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
     """
-    OBSŁUGA SYGNAŁU PUSH - Sierra Chart
+    OBSŁUGA SYGNAŁU PUSH - Sierra Chart (TRYB DRY RUN)
     """
     symbol = None
     try:
-        # Walidacja payloadu przy użyciu nowego modelu (z aliasami)
+        # Walidacja payloadu
         alert = AlertData.model_validate(payload)
         symbol = alert.symbol
         
-        logger.info(f"[{symbol}] PUSH: Sygnał {alert.direction} (SC Raw TS: {alert.timestamp_raw}) odebrany. Waliduję...")
+        logger.info(f"[{symbol}] PUSH: Sygnał {alert.direction} odebrany. Waliduję (DRY RUN)...")
 
-        # 1. BLOKADA DOUBLE-TRADE
-        if executor.get_open_position_side(symbol):
-            logger.warning(f"[{symbol}] ODRZUCONO: Pozycja jest już otwarta.")
-            return
-
-        # 2. POBRANIE PARAMETRÓW (TickSize)
+        # 1. POBRANIE PARAMETRÓW (TickSize)
         rules = get_instrument_rules().get(symbol)
         if not rules:
-            logger.error(f"[{symbol}] Brak zasad handlu w Firestore.")
+            logger.error(f"[{symbol}] Brak zasad handlu w Firestore. Przerywam.")
             return
         tick_size = rules["tickSize"]
 
-        # 3. ZAOKRĄGLANIE CEN
+        # 2. ZAOKRĄGLANIE CEN
         is_long = alert.direction.upper() == "LONG"
         final_entry = round_price_by_tick(alert.entry, tick_size, 'down' if is_long else 'up')
         final_sl = round_price_by_tick(alert.sl, tick_size, 'up' if is_long else 'down')
         final_tp = round_price_by_tick(alert.tp, tick_size, 'down' if is_long else 'up')
         
-        # 4. OBLICZENIE QTY
+        # 3. OBLICZENIE QTY
         qty = calculate_position_size(
             risk_per_trade_usdt=alert.risk_usdt,
             entry_price=final_entry,
@@ -83,10 +76,10 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
         )
 
         if not qty or qty <= 0:
-            logger.error(f"[{symbol}] Błąd obliczeń Qty.")
+            logger.error(f"[{symbol}] Błąd obliczeń Qty (prawdopodobnie zbyt ciasny SL).")
             return
 
-        # 5. WYSŁANIE ZLECENIA
+        # 4. PRZYGOTOWANIE PARAMETRÓW
         order_params = {
             "symbol": symbol,
             "side": "Buy" if is_long else "Sell",
@@ -95,25 +88,21 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
             "price": str(final_entry),
             "stopLoss": str(final_sl),
             "takeProfit": str(final_tp),
-            "orderLinkId": f"sc_{int(time.time())}_{symbol}",
-            "timeInForce": "GTC"
+            "orderLinkId": f"dry_run_{int(time.time())}_{symbol}"
         }
 
-        response = executor.place_order(order_params)
+        # --- BLOKADA WYKONANIA (DRY RUN) ---
+        logger.info(f"[{symbol}] ✅ DRY RUN SUCCESS! Zlecenie przygotowane poprawnie: {order_params}")
         
-        if response and response.get('orderId'):
-            logger.info(f"[{symbol}] SUKCES: Zlecenie LIMIT wysłane na Bybit.")
-            
-            state_manager.save_active_order(order_params["orderLinkId"], {
-                "symbol": symbol,
-                "status": "PLACED",
-                "direction": alert.direction.upper(),
-                "planned_qty": qty,
-                "planned_entry_price": final_entry,
-                "planned_sl_price": final_sl,
-                "planned_tp_price": final_tp,
-                "created_at": datetime.now(timezone.utc)
-            })
+        # Zapisujemy do Firestore, żebyś widział wynik w bazie danych
+        state_manager.save_active_order(order_params["orderLinkId"], {
+            "symbol": symbol,
+            "status": "DRY_RUN_LOG",
+            "direction": alert.direction.upper(),
+            "planned_qty": qty,
+            "params": order_params,
+            "created_at": datetime.now(timezone.utc)
+        })
 
     except Exception as e:
         logger.error(f"KRYTYCZNY BŁĄD w handle_immediate_signal: {e}", exc_info=True)

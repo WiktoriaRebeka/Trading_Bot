@@ -1,23 +1,20 @@
-from pydantic import BaseModel, Field, computed_field, ConfigDict
+# Lokalizacja: shared_lib/models.py
+
+from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional
-from datetime import datetime
 
 class AlertData(BaseModel):
-    # Mapowanie pól z Sierra Chart (id_...) na pola używane w logice bota
+    # Mapowanie pól bezpośrednio z Sierra Chart
     symbol: str = Field(alias='id_symbol')
-    direction: str = Field(alias='id_direction') # Oczekuje "LONG" lub "SHORT"
+    direction: str = Field(alias='id_direction')  # Sierra wysyła "LONG" lub "SHORT"
     entry: float
     sl: float
     tp: float
-    timestamp_raw: float = Field(alias='id_timestamp_raw')
+    timestamp_raw: float = Field(alias='id_timestamp_raw', default=0.0)
     risk_usdt: float = 2.5 
 
     model_config = ConfigDict(
         populate_by_name=True,
         extra='ignore'
     )
-
-    @computed_field
-    @property
-    def direction(self) -> str:
-        return "LONG" if self.direction_code == 1 else "SHORT"
+    # USUNIĘTO computed_field direction - powodował konflikt i crash.
