@@ -9,7 +9,7 @@ from shared_lib.secret_manager import get_secret
 from shared_lib.firebase_client import initialize_firebase
 from bot_service.bigquery_logger import initialize_bigquery
 from bot_service.bybit_executor import BybitExecutor
-from bot_service.bot_logic import handle_immediate_signal, log_closed_positions_pnl, update_filled_orders, repair_old_orders
+from bot_service.bot_logic import handle_immediate_signal, log_closed_positions_pnl, update_filled_orders
 
 
 logger = logging.getLogger(__name__)
@@ -106,15 +106,6 @@ def register_endpoints(app: Flask):
         except Exception as e:
             logger.error(f"KRYTYCZNY BŁĄD w cyklu aktualizacji zleceň: {e}", exc_info=True, extra={"json_fields": {"cycle_id": cycle_id}})
             return jsonify({"status": "error", "message": str(e), "cycle_id": cycle_id}), 500
-    @app.route('/repair-old-orders', methods=['POST'])
-    def repair_orders_endpoint():
-        """Jednorazowy endpoint do naprawy starych zleceň bez statusu."""
-        try:
-            count = repair_old_orders()
-            return jsonify({"status": "success", "repaired_count": count}), 200
-        except Exception as e:
-            logger.error(f"Błąd w skrypcie naprawczym: {e}", exc_info=True)
-            return jsonify({"status": "error", "message": str(e)}), 500
 
 def initialize_app_services(app: Flask):
     with app.app_context():
