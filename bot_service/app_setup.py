@@ -9,7 +9,7 @@ from shared_lib.secret_manager import get_secret
 from shared_lib.firebase_client import initialize_firebase
 from bot_service.bigquery_logger import initialize_bigquery
 from bot_service.bybit_executor import BybitExecutor
-from bot_service.bot_logic import process_new_alerts, log_closed_positions_pnl, update_filled_orders, repair_old_orders, handle_immediate_signal
+from bot_service.bot_logic import handle_immediate_signal, log_closed_positions_pnl, update_filled_orders, repair_old_orders
 
 
 logger = logging.getLogger(__name__)

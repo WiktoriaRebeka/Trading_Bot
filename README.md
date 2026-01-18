@@ -1,85 +1,76 @@
-Automated Trading Bot for Bybit on Google Cloud
+Automated Trading Bot for Bybit (GCP)
 Overview
-
-This project is an automated, high-frequency trading system designed for scalping on the Bybit exchange.
-The system is fully event-driven (PUSH model) and deployed on Google Cloud Platform (GCP) for scalability and resilience.
-Sierra Chart is used as the analytics layer to achieve ultra-low-latency market analysis.
-
-The system focuses on Market Microstructure (Order Flow) and Relative Strength (RS/RW) rather than traditional retail technical analysis, allowing faster and more reliable trade execution.
+This project is a professional-grade, automated trading system designed for scalping on the Bybit exchange. The system is fully event-driven (PUSH model) and deployed on Google Cloud Platform (GCP) for maximum scalability and resilience.
+Unlike traditional retail bots, this system utilizes Market Microstructure (Order Flow) and Relative Strength (RS/RW) analysis via Sierra Chart, ensuring ultra-low latency and high-precision execution.
 
 1. System Architecture (Event-Driven)
-
 The architecture is split into two independent but tightly coupled environments:
-
-Analytics Engine – signal generation
-
-Execution Engine – trade execution and lifecycle management
-
 A. Analytics Engine (Sierra Chart)
+Located on a dedicated Windows VM in Tokyo (asia-northeast1) to achieve sub-millisecond proximity to Bybit’s matching engine.
+Component
+Responsibility
+Sierra Chart (ACSIL)
+Real-time Order Flow analysis, Liquidity Toxicity tracking, and Signal generation.
+GCP Webhook (Cloud Function)
+Acts as a secure gateway, receiving signals via HTTPS POST and forwarding them to the Execution Engine.
+
+B. Execution Engine (Google Cloud - Serverless)
+A fully serverless stack that processes signals and manages the trade lifecycle.
+Component
+Responsibility
+Trading Bot Service (Cloud Run)
+Core logic: receives PUSH alerts, calculates position size, and executes orders.
+Firestore
+Real-time state tracking (Active Orders, Instrument Rules, Klines).
+BigQuery
+Long-term storage for trade analytics and performance auditing.
+Cloud Scheduler
+Triggers maintenance tasks (PnL logging, Trailing Stop activation).
 
 
-This component acts as the primary data source.
-It runs on a dedicated Windows VM located close to Bybit servers to minimize latency.
+2. Infrastructure Security
+To protect the Analytics Engine and trading capital, a Zero-Trust Security Model is implemented:
+Windows VM Firewall (Sierra Chart)
+RDP Access (Port 3389): Strictly restricted to specific Whitelisted IPs. All other traffic is dropped at the Google network edge.
+Brute-Force Prevention: By closing the RDP port to the world, we eliminate unauthorized login attempts and preserve CPU resources.
+API & Secret Management
+GCP Secret Manager: Bybit API keys and Webhook tokens are never hardcoded; they are fetched at runtime.
+Webhook Authentication: Every signal from Sierra Chart must include a secret_token validated by the receiver.
 
-| Component                           | Responsibility                                                            |
-| ----------------------------------- | ------------------------------------------------------------------------- |
-| **Webhook Receiver (Firestore)**    | Receives trading signals, stores them, and immediately triggers execution |
-| **Trading Bot Service (Cloud Run)** | Core trading logic, order placement, and position management              |
-| **Cloud Scheduler**                 | Triggers only monitoring and reporting tasks                              |
+3. Core Execution Logic
+Cloud Run Endpoints
+Endpoint
+Trigger
+Responsibility
+/process-alerts
+PUSH (Immediate)
+Validates signal and places LIMIT orders (Entry, SL, TP).
+/update-orders
+Scheduler (2 min)
+Monitors PLACED orders, updates status to OPEN, and manages Trailing Stops.
+/log-pnl
+Scheduler (15 min)
+Fetches closed trade data, logs to BigQuery, and cleans up Firestore.
 
 
-Signals are sent immediately after edge detection, without polling or batching.
-
-B. Execution Engine (Google Cloud – Serverless)
-
-The execution layer is built on Cloud Run, with Firestore used for state tracking and BigQuery for analytics.
-
-| Endpoint              | Trigger Type                 | Responsibility                                                                 |
-| --------------------- | ---------------------------- | ------------------------------------------------------------------------------ |
-| **`/process-alerts`** | PUSH (event-driven)          | Immediately opens LIMIT orders (entry, SL, TP) on Bybit within milliseconds    |
-| **`/update-orders`**  | Scheduler (every 2 minutes)  | Tracks order states (`PLACED → FILLED → OPEN`) and manages trailing stop logic |
-| **`/log-pnl`**        | Scheduler (every 15 minutes) | Logs closed trades to BigQuery and cleans Firestore                            |
-
-
-The system operates strictly in a PUSH-based flow for trade execution.
-
-2. Core Execution Logic (Cloud Run Endpoints)
-
-The trading-bot-service exposes three independent endpoints:
-
-Endpoint	Trigger Type	Responsibility
-/process-alerts	PUSH (event-driven)	Immediately opens LIMIT orders (entry, SL, TP) on Bybit within milliseconds
-/update-orders	Scheduler (every 2 minutes)	Tracks order states (PLACED → FILLED → OPEN) and manages trailing stop logic
-/log-pnl	Scheduler (every 15 minutes)	Logs closed trades to BigQuery and cleans Firestore
-3. Core Trading Concepts
-
-The system is designed around professional trading principles rather than retail indicators:
-
+4. Core Trading Concepts
 Alpha Source
-Signals are generated using Volume Absorption and Liquidity Toxicity, not candlestick patterns.
-
+Signals are derived from Volume Absorption and Liquidity Toxicity (VPIN). The system enters when large players are trapped, rather than following lagging indicators.
 Relative Strength Filter (RS/RW)
-Every trade is validated against relative strength versus BTC to avoid trading against market dominance.
+Every trade is validated against BTC. We only go LONG on coins showing strength against BTC and SHORT on those showing relative weakness.
+Strict Risk Management
+Fixed Risk: Exactly 2.5 USDT per trade.
+Dynamic Sizing: Position size is calculated automatically based on the distance between Entry and Stop Loss, adjusted for fees.
+Precision: All prices are rounded to the nearest Tick Size of the specific instrument.
 
-Strict Risk Control (risk_usdt)
-Each trade risks exactly 2.5 USDT.
-Position size is calculated dynamically based on Entry and Stop Loss.
-Take Profit is defined in the range of 1.3R – 1.5R.
-
-orderLinkId – Single Source of Truth
-A unique identifier connects the full trade lifecycle:
-Signal → Entry Order → SL/TP Orders → BigQuery Record.
-
-4. Setup & Deployment
-Configuration & Secrets
-
-All environment variables and API keys are stored securely in GCP Secret Manager.
-
+5. Setup & Deployment
+Configuration
+Store Bybit API keys in Secret Manager.
+Define instrument rules (tickSize, qtyStep) in Firestore (bot_config/instrument_rules).
+Whitelist your local IP in GCP Firewall for RDP access.
 Deployment
+The system uses Cloud Build for automated CI/CD:
+Bash
+# Deploy the execution engine to GCP
+gcloud builds submit --config cloudbuild-bot.yaml .
 
-The system is deployed automatically using Cloud Build, defined in cloudbuild-bot.yaml.
-
-Conclusion
-
-This system is built for speed, precision, and data quality.
-By combining order-flow-based analytics, event-driven execution, and serverless cloud infrastructure, it provides a strong technical edge over traditional retail trading systems.
