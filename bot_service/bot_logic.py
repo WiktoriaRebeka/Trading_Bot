@@ -42,18 +42,21 @@ def round_price_by_tick(price: float, tick_size: str, direction: str) -> float:
 # === 2. GŁÓWNY SILNIK (PUSH)                                        ===
 # =====================================================================
 
+# Lokalizacja: bot_service/bot_logic.py
+
 def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
     """
-    OBSŁUGA SYGNAŁU PUSH - Wejście jest natychmiastowe po odebraniu JSON.
+    OBSŁUGA SYGNAŁU PUSH - Sierra Chart
     """
     symbol = None
     try:
+        # Walidacja payloadu przy użyciu nowego modelu (z aliasami)
         alert = AlertData.model_validate(payload)
         symbol = alert.symbol
         
-        logger.info(f"[{symbol}] PUSH: Sygnał {alert.direction} odebrany. Waliduję...")
+        logger.info(f"[{symbol}] PUSH: Sygnał {alert.direction} (SC Raw TS: {alert.timestamp_raw}) odebrany. Waliduję...")
 
-        # 1. BLOKADA DOUBLE-TRADE (Klucz do bezpieczeństwa)
+        # 1. BLOKADA DOUBLE-TRADE
         if executor.get_open_position_side(symbol):
             logger.warning(f"[{symbol}] ODRZUCONO: Pozycja jest już otwarta.")
             return
@@ -61,17 +64,17 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
         # 2. POBRANIE PARAMETRÓW (TickSize)
         rules = get_instrument_rules().get(symbol)
         if not rules:
-            logger.error(f"[{symbol}] Brak zasad handlu (tickSize/qtyStep) w Firestore.")
+            logger.error(f"[{symbol}] Brak zasad handlu w Firestore.")
             return
         tick_size = rules["tickSize"]
 
-        # 3. ZAOKRĄGLANIE CEN (Krytyczny Krok)
-        is_long = alert.direction == "LONG"
+        # 3. ZAOKRĄGLANIE CEN
+        is_long = alert.direction.upper() == "LONG"
         final_entry = round_price_by_tick(alert.entry, tick_size, 'down' if is_long else 'up')
         final_sl = round_price_by_tick(alert.sl, tick_size, 'up' if is_long else 'down')
-        final_tp = round_price_by_tick(alert.tp, tick_size, 'down' if is_long else 'up') # TP na Mark Price
+        final_tp = round_price_by_tick(alert.tp, tick_size, 'down' if is_long else 'up')
         
-        # 4. OBLICZENIE QTY (2.5 USDT)
+        # 4. OBLICZENIE QTY
         qty = calculate_position_size(
             risk_per_trade_usdt=alert.risk_usdt,
             entry_price=final_entry,
@@ -80,10 +83,10 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
         )
 
         if not qty or qty <= 0:
-            logger.error(f"[{symbol}] Błąd obliczeń Qty: zbyt ciasny SL (lub zero).")
+            logger.error(f"[{symbol}] Błąd obliczeń Qty.")
             return
 
-        # 5. WYSŁANIE ZLECENIA LIMIT (Atomowa Transakcja)
+        # 5. WYSŁANIE ZLECENIA
         order_params = {
             "symbol": symbol,
             "side": "Buy" if is_long else "Sell",
@@ -92,7 +95,7 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
             "price": str(final_entry),
             "stopLoss": str(final_sl),
             "takeProfit": str(final_tp),
-            "orderLinkId": f"sc_{int(time.time())}_{symbol}_{int(math.sqrt(time.time() * 1000))}", # Unikalny Link ID
+            "orderLinkId": f"sc_{int(time.time())}_{symbol}",
             "timeInForce": "GTC"
         }
 
@@ -101,11 +104,10 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
         if response and response.get('orderId'):
             logger.info(f"[{symbol}] SUKCES: Zlecenie LIMIT wysłane na Bybit.")
             
-            # Zapis do Firestore dla monitoringu
             state_manager.save_active_order(order_params["orderLinkId"], {
                 "symbol": symbol,
                 "status": "PLACED",
-                "direction": alert.direction,
+                "direction": alert.direction.upper(),
                 "planned_qty": qty,
                 "planned_entry_price": final_entry,
                 "planned_sl_price": final_sl,
@@ -114,7 +116,7 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
             })
 
     except Exception as e:
-        logger.error(f"KRYTYCZNY BŁĄD w handle_immediate_signal. Symbol: {symbol}. Błąd: {e}", exc_info=True)
+        logger.error(f"KRYTYCZNY BŁĄD w handle_immediate_signal: {e}", exc_info=True)
 
 
 def update_filled_orders(executor: BybitExecutor):

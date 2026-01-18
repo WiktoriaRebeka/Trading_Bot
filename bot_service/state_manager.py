@@ -10,7 +10,6 @@ import math
 
 from shared_lib.firebase_client import get_db
 from shared_lib import constants
-from shared_lib.models import AnalyticalCase
 
 logger = logging.getLogger(__name__)
 
