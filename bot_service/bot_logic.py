@@ -46,28 +46,40 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
     """
     OBSŁUGA SYGNAŁU PUSH - Sierra Chart (TRYB DRY RUN)
     """
-    symbol = None
+    symbol_raw = None
     try:
-        # Walidacja payloadu
+        # Walidacja payloadu (id_symbol, id_direction itd.)
         alert = AlertData.model_validate(payload)
-        symbol = alert.symbol
+        symbol_raw = alert.symbol  # np. "ETHUSDT_PERP_BINANCE"
         
-        logger.info(f"[{symbol}] PUSH: Sygnał {alert.direction} odebrany. Waliduję (DRY RUN)...")
+        # --- LOGIKA MAPOWANIA SYMBOLU ---
+        # Wycinamy "ETHUSDT" i dodajemy ".P", żeby pasowało do Twojego Firestore
+        base_symbol = symbol_raw.split('_')[0] 
+        symbol = f"{base_symbol}.P" 
+        
+        logger.info(f"[{symbol}] PUSH: Odebrano {alert.direction} (zmapowano z {symbol_raw})")
 
-        # 1. POBRANIE PARAMETRÓW (TickSize)
+        # 1. BLOKADA DOUBLE-TRADE
+        if executor.get_open_position_side(symbol):
+            logger.warning(f"[{symbol}] ODRZUCONO: Pozycja jest już otwarta.")
+            return
+
+        # 2. POBRANIE PARAMETRÓW Z FIRESTORE
         rules = get_instrument_rules().get(symbol)
         if not rules:
-            logger.error(f"[{symbol}] Brak zasad handlu w Firestore. Przerywam.")
+            logger.error(f"[{symbol}] Brak zasad handlu w Firestore dla tego symbolu! Sprawdź dokument instrument_rules.")
             return
+        
+        # DODANO: Pobranie tick_size z reguł (bez tego rounding nie zadziała)
         tick_size = rules["tickSize"]
 
-        # 2. ZAOKRĄGLANIE CEN
+        # 3. ZAOKRĄGLANIE CEN
         is_long = alert.direction.upper() == "LONG"
         final_entry = round_price_by_tick(alert.entry, tick_size, 'down' if is_long else 'up')
         final_sl = round_price_by_tick(alert.sl, tick_size, 'up' if is_long else 'down')
         final_tp = round_price_by_tick(alert.tp, tick_size, 'down' if is_long else 'up')
         
-        # 3. OBLICZENIE QTY
+        # 4. OBLICZENIE QTY (Wielkość pozycji)
         qty = calculate_position_size(
             risk_per_trade_usdt=alert.risk_usdt,
             entry_price=final_entry,
@@ -79,7 +91,7 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
             logger.error(f"[{symbol}] Błąd obliczeń Qty (prawdopodobnie zbyt ciasny SL).")
             return
 
-        # 4. PRZYGOTOWANIE PARAMETRÓW
+        # 5. PRZYGOTOWANIE PARAMETRÓW ZLECENIA
         order_params = {
             "symbol": symbol,
             "side": "Buy" if is_long else "Sell",
@@ -94,7 +106,7 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
         # --- BLOKADA WYKONANIA (DRY RUN) ---
         logger.info(f"[{symbol}] ✅ DRY RUN SUCCESS! Zlecenie przygotowane poprawnie: {order_params}")
         
-        # Zapisujemy do Firestore, żebyś widział wynik w bazie danych
+        # Zapisujemy do Firestore, żebyś widziała wynik w bazie danych (kolekcja active_orders)
         state_manager.save_active_order(order_params["orderLinkId"], {
             "symbol": symbol,
             "status": "DRY_RUN_LOG",
