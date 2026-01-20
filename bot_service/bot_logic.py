@@ -3,14 +3,13 @@
 import logging
 import os
 import time
+import uuid
 from typing import Dict, Any, Optional, List
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal, ROUND_DOWN, ROUND_UP, getcontext
-import math
-import uuid
 
-# Ustawienie precyzji dla Decimal, aby uniknąć błędów zaokrąglania
-getcontext().prec = 28 
+# Ustawienie precyzji dla Decimal
+getcontext().prec = 28
 
 from shared_lib.models import AlertData
 from shared_lib.firebase_client import get_instrument_rules
@@ -19,6 +18,7 @@ from bot_service import state_manager
 from bot_service.bybit_executor import BybitExecutor, BybitAPIError
 from bot_service.fetch_from_firestore import load_last_processed_timestamp, save_last_processed_timestamp
 from bot_service.pnl_logger_real import log_real_trade_result
+# PRZENIESIONY IMPORT:
 from bot_service.bigquery_logger import log_analysis_result
 
 logger = logging.getLogger(__name__)
@@ -35,7 +35,7 @@ def round_price_by_tick(price: float, tick_size: str, direction: str) -> float:
         quantized = (price_decimal / tick_decimal).to_integral_value(rounding=ROUND_DOWN) * tick_decimal
     elif direction == 'up':
         quantized = (price_decimal / tick_decimal).to_integral_value(rounding=ROUND_UP) * tick_decimal
-    else: 
+    else:
         quantized = round(price_decimal / tick_decimal) * tick_decimal
     return float(quantized)
 
