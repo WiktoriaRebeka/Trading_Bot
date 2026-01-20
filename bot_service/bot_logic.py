@@ -128,7 +128,7 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
             "qty": qty,                             # NULLABLE: NUMERIC
             "timestamp_signal": datetime.now(timezone.utc).isoformat(), # REQUIRED: TIMESTAMP
             "id_timestamp_raw": alert.timestamp_raw, # NULLABLE: FLOAT (z Sierry)
-            "microstructure_context": {},           # NULLABLE: JSON (miejsce na Deltę/RS/RW)
+            #"microstructure_context": {},           # NULLABLE: JSON (miejsce na Deltę/RS/RW)
             "status": "DRY_RUN_SUCCESS"             # NULLABLE: STRING
         }
         
