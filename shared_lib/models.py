@@ -17,4 +17,3 @@ class AlertData(BaseModel):
         populate_by_name=True,
         extra='ignore'
     )
-    # USUNIĘTO computed_field direction - powodował konflikt i crash.

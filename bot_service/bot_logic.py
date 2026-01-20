@@ -19,6 +19,7 @@ from bot_service import state_manager
 from bot_service.bybit_executor import BybitExecutor, BybitAPIError
 from bot_service.fetch_from_firestore import load_last_processed_timestamp, save_last_processed_timestamp
 from bot_service.pnl_logger_real import log_real_trade_result
+from bot_service.bigquery_logger import log_analysis_result
 
 logger = logging.getLogger(__name__)
 
@@ -51,12 +52,11 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
         # Walidacja payloadu (id_symbol, id_direction itd.)
         alert = AlertData.model_validate(payload)
         symbol_raw = alert.symbol  # np. "ETHUSDT_PERP_BINANCE"
-        
+       
         # --- LOGIKA MAPOWANIA SYMBOLU ---
-        # Wycinamy "ETHUSDT" i dodajemy ".P", żeby pasowało do Twojego Firestore
-        base_symbol = symbol_raw.split('_')[0] 
-        symbol = f"{base_symbol}.P" 
-        
+        base_symbol = symbol_raw.split('_')[0]
+        symbol = f"{base_symbol}.P"
+       
         logger.info(f"[{symbol}] PUSH: Odebrano {alert.direction} (zmapowano z {symbol_raw})")
 
         # 1. BLOKADA DOUBLE-TRADE
@@ -69,8 +69,7 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
         if not rules:
             logger.error(f"[{symbol}] Brak zasad handlu w Firestore dla tego symbolu! Sprawdź dokument instrument_rules.")
             return
-        
-        # DODANO: Pobranie tick_size z reguł (bez tego rounding nie zadziała)
+       
         tick_size = rules["tickSize"]
 
         # 3. ZAOKRĄGLANIE CEN
@@ -78,7 +77,7 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
         final_entry = round_price_by_tick(alert.entry, tick_size, 'down' if is_long else 'up')
         final_sl = round_price_by_tick(alert.sl, tick_size, 'up' if is_long else 'down')
         final_tp = round_price_by_tick(alert.tp, tick_size, 'down' if is_long else 'up')
-        
+       
         # 4. OBLICZENIE QTY (Wielkość pozycji)
         qty = calculate_position_size(
             risk_per_trade_usdt=alert.risk_usdt,
@@ -92,6 +91,7 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
             return
 
         # 5. PRZYGOTOWANIE PARAMETRÓW ZLECENIA
+        order_link_id = f"dry_run_{int(time.time())}_{symbol}"
         order_params = {
             "symbol": symbol,
             "side": "Buy" if is_long else "Sell",
@@ -100,14 +100,14 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
             "price": str(final_entry),
             "stopLoss": str(final_sl),
             "takeProfit": str(final_tp),
-            "orderLinkId": f"dry_run_{int(time.time())}_{symbol}"
+            "orderLinkId": order_link_id
         }
 
         # --- BLOKADA WYKONANIA (DRY RUN) ---
-        logger.info(f"[{symbol}] ✅ DRY RUN SUCCESS! Zlecenie przygotowane poprawnie: {order_params}")
-        
-        # Zapisujemy do Firestore, żebyś widziała wynik w bazie danych (kolekcja active_orders)
-        state_manager.save_active_order(order_params["orderLinkId"], {
+        logger.info(f"[{symbol}] ✅ DRY RUN SUCCESS! Zlecenie przygotowane: {order_params}")
+       
+        # Zapis do Firestore (active_orders)
+        state_manager.save_active_order(order_link_id, {
             "symbol": symbol,
             "status": "DRY_RUN_LOG",
             "direction": alert.direction.upper(),
@@ -115,6 +115,27 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
             "params": order_params,
             "created_at": datetime.now(timezone.utc)
         })
+
+        # --- PRZYGOTOWANIE DANYCH DO ANALITYKI (Zgodnie ze schematem BigQuery) ---
+        analysis_data = {
+            "alert_id": order_link_id,              # REQUIRED: Unikalny ID sygnału
+            "symbol": symbol,                       # REQUIRED: np. ETHUSDT.P
+            "direction": alert.direction.upper(),   # REQUIRED: LONG/SHORT
+            "entry_price": final_entry,             # REQUIRED: NUMERIC
+            "sl_price": final_sl,                   # REQUIRED: NUMERIC
+            "tp_price": final_tp,                   # REQUIRED: NUMERIC
+            "risk_usdt": alert.risk_usdt,           # NULLABLE: NUMERIC
+            "qty": qty,                             # NULLABLE: NUMERIC
+            "timestamp_signal": datetime.now(timezone.utc).isoformat(), # REQUIRED: TIMESTAMP
+            "id_timestamp_raw": alert.timestamp_raw, # NULLABLE: FLOAT (z Sierry)
+            "microstructure_context": {},           # NULLABLE: JSON (miejsce na Deltę/RS/RW)
+            "status": "DRY_RUN_SUCCESS"             # NULLABLE: STRING
+        }
+        
+        # Wysyłka do BigQuery (Tabela: new_trades_history)
+        log_analysis_result(analysis_data)
+
+        logger.info(f"[{symbol}] ✅ ANALYTICS: Sygnał pomyślnie zalogowany do BigQuery.")
 
     except Exception as e:
         logger.error(f"KRYTYCZNY BŁĄD w handle_immediate_signal: {e}", exc_info=True)
