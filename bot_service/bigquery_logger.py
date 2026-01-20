@@ -53,22 +53,26 @@ def get_bigquery_client() -> bigquery.Client:
     return bigquery_client
 
 def log_analysis_result(result_data: Dict[str, Any]):
-    analysis_id = result_data.get('analysis_id')
-    logger.info(f"[BQ_LOGGER][{analysis_id}] Rozpoczynam proces zapisu wyniku do BigQuery.")
+    # Pobieramy alert_id (zgodnie z nowym kluczem)
+    alert_id = result_data.get('alert_id', 'unknown')
+    logger.info(f"[BQ_LOGGER][{alert_id}] Rozpoczynam proces zapisu wyniku do BigQuery.")
+    
     try:
         client = get_bigquery_client()
     except RuntimeError as e:
-        logger.error(f"[BQ_LOGGER][{analysis_id}] Nie można zalogować wyniku: {e}")
+        logger.error(f"[BQ_LOGGER][{alert_id}] Nie można zalogować wyniku: {e}")
         return
 
     try:
         rows_to_insert = [result_data]
         errors = client.insert_rows_json(ANALYTICAL_TABLE_REF, rows_to_insert)
         if not errors:
-            logger.info(f"[BQ_LOGGER][{analysis_id}] SUKCES! Pomyślnie wstawiono wiersz dla targetu {result_data.get('target_level')}.")
+            logger.info(f"[BQ_LOGGER][{alert_id}] SUKCES! Rekord zapisany w BigQuery.")
         else:
-            logger.error(f"[BQ_LOGGER][{analysis_id}] Błąd podczas wstawiania wierszy: {errors}")
+            logger.error(f"[BQ_LOGGER][{alert_id}] Błąd podczas wstawiania wierszy: {errors}")
     except GoogleAPICallError as e:
-        logger.error(f"[BQ_LOGGER][{analysis_id}] Błąd API BigQuery podczas zapisu: {e}", exc_info=True)
+        # TUTAJ POPRAWIONO: alert_id zamiast analysis_id
+        logger.error(f"[BQ_LOGGER][{alert_id}] Błąd API BigQuery podczas zapisu: {e}", exc_info=True)
     except Exception as e:
-        logger.error(f"[BQ_LOGGER][{analysis_id}] Krytyczny błąd podczas zapisu: {e}", exc_info=True)
+        # TUTAJ POPRAWIONO: alert_id zamiast analysis_id
+        logger.error(f"[BQ_LOGGER][{alert_id}] Krytyczny błąd podczas zapisu: {e}", exc_info=True)
