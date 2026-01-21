@@ -9,8 +9,8 @@ class AlertData(BaseModel):
     entry: float
     sl: float
     tp: float
-    # NOWE POLE:
-    m2_delta: float = Field(alias='m2_delta', default=0.0) 
+    m2_delta: float = Field(alias='m2_delta', default=0.0)
+    m5_rs_ratio: float = Field(alias='m5_rs_ratio', default=1.0)  
     
     timestamp_raw: float = Field(alias='id_timestamp_raw', default=0.0)
     risk_usdt: float = 2.5
