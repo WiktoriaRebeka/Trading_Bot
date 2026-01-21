@@ -141,7 +141,7 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
         # Wysyłka do BigQuery
         log_analysis_result(analysis_data)
 
-        logger.info(f"[{symbol}] ✅ ANALYTICS: Sygnał z Deltą ({alert.m2_delta}) zapisany w BigQuery.")
+        logger.info(f"[{symbol}] ✅ ANALYTICS: Sygnał z Deltą ({alert.m2_delta}) i RS ({alert.m5_rs_ratio}) zapisany w BigQuery.")
 
     except Exception as e:
         logger.error(f"KRYTYCZNY BŁĄD w handle_immediate_signal: {e}", exc_info=True)
