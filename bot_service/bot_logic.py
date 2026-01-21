@@ -133,7 +133,7 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
             "id_timestamp_raw": alert.timestamp_raw,
             "status": "DRY_RUN_SUCCESS", # PRZECINEK BYŁ POTRZEBNY TUTAJ
             "microstructure_context": json.dumps({ # DODANO json.dumps()
-                "m2_delta": alert.m2_delta
+                "m2_delta": alert.m2_delta,
                 "m5_rs_ratio": alert.m5_rs_ratio
             })
         }
