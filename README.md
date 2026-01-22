@@ -1,76 +1,57 @@
-Automated Trading Bot for Bybit (GCP)
+Automated Microstructure Trading & Data Engine (GCP)
 Overview
-This project is a professional-grade, automated trading system designed for scalping on the Bybit exchange. The system is fully event-driven (PUSH model) and deployed on Google Cloud Platform (GCP) for maximum scalability and resilience.
-Unlike traditional retail bots, this system utilizes Market Microstructure (Order Flow) and Relative Strength (RS/RW) analysis via Sierra Chart, ensuring ultra-low latency and high-precision execution.
+This project is a professional-grade, high-frequency trading (HFT) infrastructure designed for the Bybit exchange. It utilizes a PUSH-model architecture to process Market Microstructure signals in real-time. The system is engineered to identify institutional order flow patterns, such as Passive Absorption and Aggressive Imbalances, providing a significant statistical edge over traditional technical analysis.
+Key Differentiator: Unlike standard bots, this system captures and stores raw microstructure snapshots (9 modules) into BigQuery, building a proprietary dataset for Edge Discovery and future Data as a Service (DaaS) monetization.
 
 1. System Architecture (Event-Driven)
-The architecture is split into two independent but tightly coupled environments:
 A. Analytics Engine (Sierra Chart)
-Located on a dedicated Windows VM in Tokyo (asia-northeast1) to achieve sub-millisecond proximity to Bybit’s matching engine.
-Component
-Responsibility
-Sierra Chart (ACSIL)
-Real-time Order Flow analysis, Liquidity Toxicity tracking, and Signal generation.
-GCP Webhook (Cloud Function)
-Acts as a secure gateway, receiving signals via HTTPS POST and forwarding them to the Execution Engine.
+Location: Dedicated Windows VM in Tokyo (asia-northeast1) for sub-millisecond proximity to Bybit’s matching engine.
+Transmitter (C++/ACSIL): Custom-built DLL that performs real-time calculations on every tick. It detects triggers (Sweeps + Volume) and pushes a rich JSON payload to the cloud.
+Data Integrity: Operates on raw contract units (e.g., ETH quantity) to ensure precision across varying price levels.
+B. Execution & Intelligence Engine (Google Cloud)
+GCP Webhook (Cloud Function): A secure, low-latency gateway that validates and sanitizes incoming signals.
+Bot Service (Cloud Run): The "Brain" of the system. It calculates position sizing based on a fixed risk model (2.5 USDT), manages instrument-specific rules via Firestore, and handles the trade lifecycle.
+BigQuery (Analytical Warehouse): Every signal is logged with its full Microstructure Context (JSON format), allowing for deep SQL-based backtesting and Win-Rate optimization.
 
-B. Execution Engine (Google Cloud - Serverless)
-A fully serverless stack that processes signals and manages the trade lifecycle.
-Component
-Responsibility
-Trading Bot Service (Cloud Run)
-Core logic: receives PUSH alerts, calculates position size, and executes orders.
-Firestore
-Real-time state tracking (Active Orders, Instrument Rules, Klines).
-BigQuery
-Long-term storage for trade analytics and performance auditing.
-Cloud Scheduler
-Triggers maintenance tasks (PnL logging, Trailing Stop activation).
+2. Modular Microstructure Intelligence
+The system is designed around 9 core analytical modules. Currently implemented and logging to BigQuery:
+Module 2: Order Flow Delta: Measures net aggression (Ask Vol - Bid Vol). Identifies when aggressive sellers are being absorbed by passive buyers.
+Module 3: Stacking Imbalances: Detects diagonal aggressive pressure (e.g., 300% buy-side dominance across multiple price levels).
+Module 5: Relative Strength (RS/RW): Real-time correlation analysis against BTCUSDT.P. Filters for "Alpha" by identifying assets outperforming the market leader.
 
+3. Infrastructure & Security
+Zero-Trust Model: RDP access restricted to whitelisted IPs; all other traffic dropped at the edge.
+Secret Management: API keys and Webhook tokens are managed via GCP Secret Manager (no hardcoded credentials).
+Serverless Scalability: The execution layer scales to zero when inactive, minimizing costs while maintaining instant readiness for high-volatility events.
 
-2. Infrastructure Security
-To protect the Analytics Engine and trading capital, a Zero-Trust Security Model is implemented:
-Windows VM Firewall (Sierra Chart)
-RDP Access (Port 3389): Strictly restricted to specific Whitelisted IPs. All other traffic is dropped at the Google network edge.
-Brute-Force Prevention: By closing the RDP port to the world, we eliminate unauthorized login attempts and preserve CPU resources.
-API & Secret Management
-GCP Secret Manager: Bybit API keys and Webhook tokens are never hardcoded; they are fetched at runtime.
-Webhook Authentication: Every signal from Sierra Chart must include a secret_token validated by the receiver.
-
-3. Core Execution Logic
-Cloud Run Endpoints
+4. Core Trading Logic (Cloud Run Endpoints)
 Endpoint
 Trigger
 Responsibility
 /process-alerts
 PUSH (Immediate)
-Validates signal and places LIMIT orders (Entry, SL, TP).
+Validates signals and prepares LIMIT orders with precise Tick-Size rounding.
 /update-orders
 Scheduler (2 min)
-Monitors PLACED orders, updates status to OPEN, and manages Trailing Stops.
+Manages PLACED orders, updates status to OPEN, and activates Trailing Stops.
 /log-pnl
 Scheduler (15 min)
-Fetches closed trade data, logs to BigQuery, and cleans up Firestore.
+Fetches closed trade data, calculates realized RRR, and audits performance in BigQuery.
 
 
-4. Core Trading Concepts
-Alpha Source
-Signals are derived from Volume Absorption and Liquidity Toxicity (VPIN). The system enters when large players are trapped, rather than following lagging indicators.
-Relative Strength Filter (RS/RW)
-Every trade is validated against BTC. We only go LONG on coins showing strength against BTC and SHORT on those showing relative weakness.
-Strict Risk Management
-Fixed Risk: Exactly 2.5 USDT per trade.
-Dynamic Sizing: Position size is calculated automatically based on the distance between Entry and Stop Loss, adjusted for fees.
-Precision: All prices are rounded to the nearest Tick Size of the specific instrument.
+5. Roadmap: From Bot to DaaS
+Phase 1 (Current): Data Collection & Dry Run. Verifying the integrity of the 9 microstructure modules.
+Phase 2: Edge Discovery. Using BigQuery ML and SQL to isolate high-probability signal clusters.
+Phase 3: Live Execution. Transitioning from Dry Run to active capital management on Bybit.
+Phase 4: DaaS Launch. Exposing processed microstructure features (Z-Scores, Percentiles) via a commercial API, utilizing "Recipe Protection" to share insights without revealing the underlying strategy.
 
-5. Setup & Deployment
-Configuration
-Store Bybit API keys in Secret Manager.
-Define instrument rules (tickSize, qtyStep) in Firestore (bot_config/instrument_rules).
-Whitelist your local IP in GCP Firewall for RDP access.
-Deployment
-The system uses Cloud Build for automated CI/CD:
-Bash
-# Deploy the execution engine to GCP
+6. Deployment
+The system uses a fully automated CI/CD pipeline via Cloud Build:
+code Bash
+downloadcontent_copy
+expand_less
+# Deploy the execution engine
 gcloud builds submit --config cloudbuild-bot.yaml .
+
+
 
