@@ -50,7 +50,8 @@ The system uses a fully automated CI/CD pipeline via Cloud Build:
 code Bash
 downloadcontent_copy
 expand_less
-# Deploy the execution engine
+
+Deploy the execution engine
 gcloud builds submit --config cloudbuild-bot.yaml .
 
 
