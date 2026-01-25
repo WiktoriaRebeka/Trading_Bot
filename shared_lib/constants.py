@@ -17,7 +17,7 @@ LAST_PROCESSED_TS_FIELD = "last_processed_timestamp"
 # === Konfiguracja BigQuery ===
 BIGQUERY_PROJECT_ID = os.getenv("GCP_PROJECT", "trading-bot-463318")
 BIGQUERY_DATASET_ID = "trading_analytics"
-BIGQUERY_ANALYTICAL_TABLE_ID = "new_trades_history"
+BIGQUERY_ANALYTICAL_TABLE_ID = "market_structure_signals"
 BIGQUERY_REAL_TRADES_TABLE_ID = "real_trades_history"
 
 # === Konfiguracja API ===
