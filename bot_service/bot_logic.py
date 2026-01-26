@@ -44,7 +44,6 @@ def round_price_by_tick(price: float, tick_size: str, direction: str) -> float:
 # === 2. GŁÓWNY SILNIK (PUSH)                                        ===
 # =====================================================================
 
-import json # UPEWNIJ SIĘ, ŻE MASZ TEN IMPORT NA GÓRZE PLIKU
 
 def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
     """
