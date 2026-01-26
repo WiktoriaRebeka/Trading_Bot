@@ -1,110 +1,173 @@
-Project Nexus: High-Frequency Market Structure Execution Engine
-Overview
+Automated Trading Infrastructure – Sierra Chart → GCP → Bybit → BigQuery
 
-Project Nexus is a private, end-to-end automated trading infrastructure designed for low-latency execution on Bybit. The system leverages Sierra Chart (C++ ACSIL) for high-fidelity market microstructure analysis and Google Cloud Platform (Python) for serverless execution and dual-layer analytical logging.
+This repository contains a private, institutional-grade trading system integrating tick-level signal detection in Sierra Chart (ACSIL C++), secure ingestion via GCP Cloud Functions, and real-time execution on Bybit through a hardened Cloud Run microservice. All analytics are logged to BigQuery for post-trade analysis.
 
-This is a private execution engine, not a commercial service. It is optimized for capturing liquidity grabs and market structure shifts (BOS/CHOCH) using tick-level data.
+No subscriptions. No external vendors. This is a closed execution engine.
 
-System Architecture
-code
-Mermaid
-download
-content_copy
-expand_less
-graph TD
-    subgraph "Detection Tier (Tokyo - asia-northeast1)"
-        SC[Sierra Chart ACSIL C++] -->|JSON over HTTPS| CF
-    end
+Architecture Overview
 
-    subgraph "Ingestion Tier (GCP - europe-central2)"
-        CF[Cloud Function: Webhook Receiver] -->|Validate & Clean| FS[(Firestore: Alerts)]
-        CF -->|Trigger| CR[Cloud Run: Bot Service]
-    end
+Detection Tier – Sierra Chart ACSIL (C++)
 
-    subgraph "Execution & Analytics Tier"
-        CR -->|REST API| BYB[Bybit Exchange]
-        CR -->|State Management| FS_ACT[(Firestore: Active Orders)]
-        CR -->|Signal Context| BQ_SIG[BigQuery: market_structure_signals]
-        CR -->|Fill Data| BQ_TRD[BigQuery: real_trades_history]
-    end
+Engine V3.1 detects:
 
-    BYB -->|PnL/Closed Trades| CR
-1. Detection Tier: Market Structure Engine (C++)
+Break of Structure (BOS)
 
-The core signal logic resides in a custom ACSIL (Advanced Custom Study Interface and Language) study.
+Change of Character (CHOCH)
 
-Logic: Monitors tick-by-tick data to identify Order Flow imbalances, Sweeps, and Market Structure Breaks.
+Liquidity Grabs (LG)
 
-Implementation: Built using C++ for maximum performance.
+Swing context: M2 delta, M5 RS ratio
 
-Connectivity: Utilizes sc.MakeHTTPPOSTRequest with n_ACSIL::s_HTTPHeader for compatibility with Sierra Chart Build 2860+.
+Uses n_ACSIL::s_HTTPHeader for Build 2860 compatibility
 
-Payload: Transmits a rich JSON object containing entry/SL/TP levels and microstructure context (e.g., Delta, RS/RW ratios).
+Sends structured alerts via HTTP POST to GCP
 
-2. Ingestion Tier: Secure Webhook (Python)
+Ingestion Tier – GCP Cloud Functions
 
-A hardened GCP Cloud Function acts as the gateway between the Windows-based detection environment and the Linux-based execution environment.
+Validates HMAC/secret tokens
 
-Security: Implements HMAC-SHA256/Secret Token validation to prevent unauthorized signal injection.
+Cleans C++ binary noise
 
-Data Sanitization: Explicitly handles C++ binary noise by stripping null bytes (\x00) and cleaning raw byte streams before JSON parsing.
+Archives raw alerts in Firestore
 
-Persistence: Archives every raw signal into Firestore for auditability before forwarding to the execution engine.
+Forwards normalized payloads to Cloud Run
 
-3. Execution & Analytics Tier (Python)
+Execution & Analytics Tier – GCP Cloud Run (Python)
 
-The Bot Service is a containerized Flask application deployed on GCP Cloud Run, designed for stateless, event-driven execution.
+Places orders on Bybit (limit with SL/TP)
 
-Execution Logic
+Manages position lifecycle
 
-Bybit Integration: Interfaces with Bybit V5 API. Uses Decimal precision for all financial calculations to eliminate floating-point errors.
+Activates trailing stops
 
-Risk Management: Dynamic position sizing based on a fixed USDT risk model. Includes slippage buffers and taker-fee adjustments.
+Logs:
 
-State Tracking: Uses Firestore to track PLACED, OPEN, and CLOSED states, enabling resilient Trailing Stop management via Cloud Scheduler.
+Microstructure signals → market_structure_signals
 
-Dual-Layer Analytical Logging
+Real trade fills → real_trades_history
 
-The system treats data as the primary asset, logging to BigQuery across two distinct tables:
+BigQuery acts as the Single Source of Truth for both strategy intent and execution outcome.
 
-market_structure_signals (The "Why"): Logs the microstructure context at the moment of the signal (e.g., M2 Delta, M5 Relative Strength). This allows for SQL-based backtesting of signal quality.
+Mermaid Diagram – Full Pipeline
 
-real_trades_history (The "Result"): Logs actual execution data, including average fill prices, realized RRR (Reward-to-Risk Ratio), and slippage.
+flowchart LR
+    SC[Sierra Chart<br/>ACSIL Engine V3.1] -->|HTTP POST| CF[GCP Cloud Function<br/>Webhook Receiver]
+    CF -->|Validated Payload| FS[Firestore<br/>Raw Archive]
+    CF -->|Cleaned Alert| CR[Cloud Run Bot Service]
+    CR -->|Order Execution| BYB[Bybit API]
+    CR -->|Signal Log| BQ1[(BigQuery<br/>market_structure_signals)]
+    CR -->|Trade Log| BQ2[(BigQuery<br/>real_trades_history)]
 
-Technical Highlights
+Repository Structure
 
-Zero-Trust Security: API keys and secrets are managed via GCP Secret Manager. No credentials reside in the source code or environment variables.
+bot_service/ – Cloud Run Execution Engine
 
-Microstructure Context: Unlike standard bots, Nexus sends raw swing data and delta values to BigQuery, enabling post-trade analysis of whether a trade failed due to "bad logic" or "bad execution."
+app_setup.py – Flask app + endpoint registration
 
-Precision Rounding: Implements round_price_by_tick and round_quantity_by_step to ensure 100% compliance with Bybit’s instrument-specific rules, preventing API retCode: 10001 errors.
+bot_logic.py – Signal handling, dry-run logic, QTY calculation
 
-Resilience: The update_filled_orders cycle ensures that even if a webhook is missed, the system synchronizes its state with the exchange within 120 seconds.
+bybit_executor.py – Signed API integration with Bybit
 
-Deployment
-Prerequisites
+bigquery_logger.py – Dual-layer logging
 
-GCP Project with BigQuery, Firestore, and Cloud Run enabled.
+state_manager.py – Firestore-backed order state machine
 
-Bybit API Keys (Mainnet or Testnet).
+pnl_logger_real.py – Closed position PnL logging
 
-Sierra Chart installed on a low-latency VPS (Tokyo recommended for Bybit).
+fetch_from_firestore.py – Timestamp sync
 
-CI/CD Pipeline
+Dockerfile – Container for Cloud Run
 
-Deployment is automated via Cloud Build:
+collector_service/ – Tick-Level Data Collector
 
-code
-Bash
-download
-content_copy
-expand_less
-# Deploy Bot Service
-gcloud builds submit --config cloudbuild-bot.yaml .
+collector_main.py, data_collector.py – Historical data ingestion
 
-# Deploy Data Collector
-gcloud builds submit --config cloudbuild-collector.yaml .
+Dockerfile – Containerized service
 
-Author: Senior HFT Systems Architect
-Version: 3.2.0 (Stable)
-License: Private / Proprietary
+gcp-webhook/ – Cloud Function Receiver
+
+main.py – Secure webhook handler
+
+requirements.txt – Dependencies
+
+shared_lib/ – Shared Utilities
+
+models.py – Alert schema validation
+
+firebase_client.py – Firestore access
+
+risk_manager.py – Position sizing logic
+
+secret_manager.py – GCP Secret Manager integration
+
+constants.py, config.py – Configuration
+
+Root Directory
+
+.gitignore
+
+README.md
+
+cloudbuild-bot.yaml, cloudbuild-collector.yaml – CI/CD pipelines
+
+Bybit Integration
+
+API keys managed via GCP Secret Manager
+
+Injected into Cloud Run via environment variables
+
+All requests signed with HMAC SHA-256
+
+BigQuery Logging
+
+market_structure_signals
+
+Logs signal intent:
+
+Symbol, direction, entry/SL/TP
+
+Microstructure context (M2 delta, M5 RS ratio)
+
+Timestamp, raw alert ID
+
+real_trades_history
+
+Logs execution outcome:
+
+Fill prices, slippage, PnL
+
+Trailing stop activation
+
+Emergency closures
+
+Together, these enable:
+
+Win-rate analysis
+
+Slippage modeling
+
+Strategy iteration via SQL
+
+Operational Guarantees
+
+Stateless execution engine
+
+Deterministic signal ingestion
+
+Firestore-backed state tracking
+
+BigQuery-backed analytics
+
+No external dependencies beyond Sierra Chart, GCP, and Bybit
+
+Next Steps
+
+Tick-level slippage modeling
+
+Multi-symbol parallel execution
+
+Latency benchmarking (SC → GCP → Bybit)
+
+Reinforced microstructure context logging
+
+For onboarding, schema specs, or production hardening checklists, reach out to the system architect.
