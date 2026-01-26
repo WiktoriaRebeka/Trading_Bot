@@ -121,22 +121,26 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
 
         # --- PRZYGOTOWANIE DANYCH DO ANALITYKI (BigQuery) ---
         analysis_data = {
-            "alert_id": order_link_id,
-            "symbol": symbol,
+            "signal_id": alert.signal_id,
+            "symbol": alert.symbol, # Oryginalny symbol ze Sierry
+            "timestamp": alert.timestamp,
             "direction": alert.direction.upper(),
-            "entry_price": final_entry,
-            "sl_price": final_sl,
-            "tp_price": final_tp,
-            "risk_usdt": alert.risk_usdt,
-            "qty": qty,
-            "timestamp_signal": datetime.now(timezone.utc).isoformat(),
-            "id_timestamp_raw": alert.timestamp_raw,
-            "status": "DRY_RUN_SUCCESS", # PRZECINEK BYŁ POTRZEBNY TUTAJ
-            "microstructure_context": json.dumps({ # DODANO json.dumps()
-                "m2_delta": alert.m2_delta,
-                "m3_stack": alert.m3_stack,
-                "m5_rs_ratio": alert.m5_rs_ratio
-            })
+            "entry": final_entry,
+            "sl": final_sl,
+            "tp": final_tp,
+            "risk_pct": alert.risk_pct,
+            "rr": alert.rr,
+            "structure_state": alert.structure_state,
+            "bos_high": alert.bos_high,
+            "bos_low": alert.bos_low,
+            "choch_up": alert.choch_up,
+            "choch_down": alert.choch_down,
+            "liquidity_grab_above": alert.liquidity_grab_above,
+            "liquidity_grab_below": alert.liquidity_grab_below,
+            "liquidity_price": alert.liquidity_price,
+            "eqh_detected": alert.eqh_detected,
+            "eql_detected": alert.eql_detected,
+            "raw_context": alert.raw_context # Przekazujemy jako słownik, biblioteka BQ zamieni to na JSON
         }
         
         # Wysyłka do BigQuery
