@@ -1,58 +1,110 @@
-Automated Microstructure Trading & Data Engine (GCP)
+Project Nexus: High-Frequency Market Structure Execution Engine
 Overview
-This project is a professional-grade, high-frequency trading (HFT) infrastructure designed for the Bybit exchange. It utilizes a PUSH-model architecture to process Market Microstructure signals in real-time. The system is engineered to identify institutional order flow patterns, such as Passive Absorption and Aggressive Imbalances, providing a significant statistical edge over traditional technical analysis.
-Key Differentiator: Unlike standard bots, this system captures and stores raw microstructure snapshots (9 modules) into BigQuery, building a proprietary dataset for Edge Discovery and future Data as a Service (DaaS) monetization.
 
-1. System Architecture (Event-Driven)
-A. Analytics Engine (Sierra Chart)
-Location: Dedicated Windows VM in Tokyo (asia-northeast1) for sub-millisecond proximity to Bybit’s matching engine.
-Transmitter (C++/ACSIL): Custom-built DLL that performs real-time calculations on every tick. It detects triggers (Sweeps + Volume) and pushes a rich JSON payload to the cloud.
-Data Integrity: Operates on raw contract units (e.g., ETH quantity) to ensure precision across varying price levels.
-B. Execution & Intelligence Engine (Google Cloud)
-GCP Webhook (Cloud Function): A secure, low-latency gateway that validates and sanitizes incoming signals.
-Bot Service (Cloud Run): The "Brain" of the system. It calculates position sizing based on a fixed risk model (2.5 USDT), manages instrument-specific rules via Firestore, and handles the trade lifecycle.
-BigQuery (Analytical Warehouse): Every signal is logged with its full Microstructure Context (JSON format), allowing for deep SQL-based backtesting and Win-Rate optimization.
+Project Nexus is a private, end-to-end automated trading infrastructure designed for low-latency execution on Bybit. The system leverages Sierra Chart (C++ ACSIL) for high-fidelity market microstructure analysis and Google Cloud Platform (Python) for serverless execution and dual-layer analytical logging.
 
-2. Modular Microstructure Intelligence
-The system is designed around 9 core analytical modules. Currently implemented and logging to BigQuery:
-Module 2: Order Flow Delta: Measures net aggression (Ask Vol - Bid Vol). Identifies when aggressive sellers are being absorbed by passive buyers.
-Module 3: Stacking Imbalances: Detects diagonal aggressive pressure (e.g., 300% buy-side dominance across multiple price levels).
-Module 5: Relative Strength (RS/RW): Real-time correlation analysis against BTCUSDT.P. Filters for "Alpha" by identifying assets outperforming the market leader.
+This is a private execution engine, not a commercial service. It is optimized for capturing liquidity grabs and market structure shifts (BOS/CHOCH) using tick-level data.
 
-3. Infrastructure & Security
-Zero-Trust Model: RDP access restricted to whitelisted IPs; all other traffic dropped at the edge.
-Secret Management: API keys and Webhook tokens are managed via GCP Secret Manager (no hardcoded credentials).
-Serverless Scalability: The execution layer scales to zero when inactive, minimizing costs while maintaining instant readiness for high-volatility events.
-
-4. Core Trading Logic (Cloud Run Endpoints)
-Endpoint
-Trigger
-Responsibility
-/process-alerts
-PUSH (Immediate)
-Validates signals and prepares LIMIT orders with precise Tick-Size rounding.
-/update-orders
-Scheduler (2 min)
-Manages PLACED orders, updates status to OPEN, and activates Trailing Stops.
-/log-pnl
-Scheduler (15 min)
-Fetches closed trade data, calculates realized RRR, and audits performance in BigQuery.
-
-
-5. Roadmap: From Bot to DaaS
-Phase 1 (Current): Data Collection & Dry Run. Verifying the integrity of the 9 microstructure modules.
-Phase 2: Edge Discovery. Using BigQuery ML and SQL to isolate high-probability signal clusters.
-Phase 3: Live Execution. Transitioning from Dry Run to active capital management on Bybit.
-Phase 4: DaaS Launch. Exposing processed microstructure features (Z-Scores, Percentiles) via a commercial API, utilizing "Recipe Protection" to share insights without revealing the underlying strategy.
-
-6. Deployment
-The system uses a fully automated CI/CD pipeline via Cloud Build:
-code Bash
-downloadcontent_copy
+System Architecture
+code
+Mermaid
+download
+content_copy
 expand_less
+graph TD
+    subgraph "Detection Tier (Tokyo - asia-northeast1)"
+        SC[Sierra Chart ACSIL C++] -->|JSON over HTTPS| CF
+    end
 
-Deploy the execution engine
+    subgraph "Ingestion Tier (GCP - europe-central2)"
+        CF[Cloud Function: Webhook Receiver] -->|Validate & Clean| FS[(Firestore: Alerts)]
+        CF -->|Trigger| CR[Cloud Run: Bot Service]
+    end
+
+    subgraph "Execution & Analytics Tier"
+        CR -->|REST API| BYB[Bybit Exchange]
+        CR -->|State Management| FS_ACT[(Firestore: Active Orders)]
+        CR -->|Signal Context| BQ_SIG[BigQuery: market_structure_signals]
+        CR -->|Fill Data| BQ_TRD[BigQuery: real_trades_history]
+    end
+
+    BYB -->|PnL/Closed Trades| CR
+1. Detection Tier: Market Structure Engine (C++)
+
+The core signal logic resides in a custom ACSIL (Advanced Custom Study Interface and Language) study.
+
+Logic: Monitors tick-by-tick data to identify Order Flow imbalances, Sweeps, and Market Structure Breaks.
+
+Implementation: Built using C++ for maximum performance.
+
+Connectivity: Utilizes sc.MakeHTTPPOSTRequest with n_ACSIL::s_HTTPHeader for compatibility with Sierra Chart Build 2860+.
+
+Payload: Transmits a rich JSON object containing entry/SL/TP levels and microstructure context (e.g., Delta, RS/RW ratios).
+
+2. Ingestion Tier: Secure Webhook (Python)
+
+A hardened GCP Cloud Function acts as the gateway between the Windows-based detection environment and the Linux-based execution environment.
+
+Security: Implements HMAC-SHA256/Secret Token validation to prevent unauthorized signal injection.
+
+Data Sanitization: Explicitly handles C++ binary noise by stripping null bytes (\x00) and cleaning raw byte streams before JSON parsing.
+
+Persistence: Archives every raw signal into Firestore for auditability before forwarding to the execution engine.
+
+3. Execution & Analytics Tier (Python)
+
+The Bot Service is a containerized Flask application deployed on GCP Cloud Run, designed for stateless, event-driven execution.
+
+Execution Logic
+
+Bybit Integration: Interfaces with Bybit V5 API. Uses Decimal precision for all financial calculations to eliminate floating-point errors.
+
+Risk Management: Dynamic position sizing based on a fixed USDT risk model. Includes slippage buffers and taker-fee adjustments.
+
+State Tracking: Uses Firestore to track PLACED, OPEN, and CLOSED states, enabling resilient Trailing Stop management via Cloud Scheduler.
+
+Dual-Layer Analytical Logging
+
+The system treats data as the primary asset, logging to BigQuery across two distinct tables:
+
+market_structure_signals (The "Why"): Logs the microstructure context at the moment of the signal (e.g., M2 Delta, M5 Relative Strength). This allows for SQL-based backtesting of signal quality.
+
+real_trades_history (The "Result"): Logs actual execution data, including average fill prices, realized RRR (Reward-to-Risk Ratio), and slippage.
+
+Technical Highlights
+
+Zero-Trust Security: API keys and secrets are managed via GCP Secret Manager. No credentials reside in the source code or environment variables.
+
+Microstructure Context: Unlike standard bots, Nexus sends raw swing data and delta values to BigQuery, enabling post-trade analysis of whether a trade failed due to "bad logic" or "bad execution."
+
+Precision Rounding: Implements round_price_by_tick and round_quantity_by_step to ensure 100% compliance with Bybit’s instrument-specific rules, preventing API retCode: 10001 errors.
+
+Resilience: The update_filled_orders cycle ensures that even if a webhook is missed, the system synchronizes its state with the exchange within 120 seconds.
+
+Deployment
+Prerequisites
+
+GCP Project with BigQuery, Firestore, and Cloud Run enabled.
+
+Bybit API Keys (Mainnet or Testnet).
+
+Sierra Chart installed on a low-latency VPS (Tokyo recommended for Bybit).
+
+CI/CD Pipeline
+
+Deployment is automated via Cloud Build:
+
+code
+Bash
+download
+content_copy
+expand_less
+# Deploy Bot Service
 gcloud builds submit --config cloudbuild-bot.yaml .
 
+# Deploy Data Collector
+gcloud builds submit --config cloudbuild-collector.yaml .
 
-
+Author: Senior HFT Systems Architect
+Version: 3.2.0 (Stable)
+License: Private / Proprietary
