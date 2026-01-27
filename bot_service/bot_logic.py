@@ -139,7 +139,10 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
             "liquidity_price": alert.liquidity_price,
             "eqh_detected": alert.eqh_detected,
             "eql_detected": alert.eql_detected,
-            "raw_context": alert.raw_context # Przekazujemy jako słownik, biblioteka BQ zamieni to na JSON
+            "risk_usdt": alert.risk_usdt, # Teraz dostępne dzięki poprawce modelu
+            "m2_delta": alert.m2_delta,   # Teraz dostępne dzięki poprawce modelu
+            "m5_rs_ratio": alert.m5_rs_ratio, # Teraz dostępne dzięki poprawce modelu
+            "raw_context": json.dumps(alert.raw_context) # JAWNA SERIALIZACJA STRINGA JSON DLA BQ
         }
         
         # Wysyłka do BigQuery
