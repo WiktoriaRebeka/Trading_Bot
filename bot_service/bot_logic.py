@@ -82,7 +82,7 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
        
         # 4. OBLICZENIE QTY
         qty = calculate_position_size(
-            risk_per_trade_usdt=alert.risk_usdt,
+            risk_per_trade_usdt=alert.risk_usdt, # Użycie alert.risk_usdt (teraz istnieje)
             entry_price=final_entry,
             sl_price=final_sl,
             qty_step=rules["qtyStep"]
@@ -92,8 +92,10 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
             logger.error(f"[{symbol}] Błąd obliczeń Qty.")
             return
 
+
         # 5. PRZYGOTOWANIE PARAMETRÓW ZLECENIA
-        order_link_id = f"dry_run_{int(time.time())}_{symbol}"
+        # Zmieniamy order_link_id na event_id z C++
+        order_link_id = alert.event_id # Używamy event_id z payloadu
         order_params = {
             "symbol": symbol,
             "side": "Buy" if is_long else "Sell",
@@ -102,7 +104,7 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
             "price": str(final_entry),
             "stopLoss": str(final_sl),
             "takeProfit": str(final_tp),
-            "orderLinkId": order_link_id
+            "orderLinkId": order_link_id # Używamy event_id jako orderLinkId
         }
 
         # --- BLOKADA WYKONANIA (DRY RUN) ---
@@ -120,8 +122,9 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
 
         # --- PRZYGOTOWANIE DANYCH DO ANALITYKI (BigQuery) ---
         analysis_data = {
+            "event_id": alert.event_id, # NOWE: Zapisujemy ID zdarzenia
             "signal_id": alert.signal_id,
-            "symbol": alert.symbol, # Oryginalny symbol ze Sierry
+            "symbol": alert.symbol, 
             "timestamp": alert.timestamp,
             "direction": alert.direction.upper(),
             "entry": final_entry,
@@ -139,10 +142,11 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
             "liquidity_price": alert.liquidity_price,
             "eqh_detected": alert.eqh_detected,
             "eql_detected": alert.eql_detected,
-            "risk_usdt": alert.risk_usdt, # Teraz dostępne dzięki poprawce modelu
-            "m2_delta": alert.m2_delta,   # Teraz dostępne dzięki poprawce modelu
-            "m5_rs_ratio": alert.m5_rs_ratio, # Teraz dostępne dzięki poprawce modelu
-            "raw_context": json.dumps(alert.raw_context) # JAWNA SERIALIZACJA STRINGA JSON DLA BQ
+            "risk_usdt": alert.risk_usdt, 
+            "m2_delta": alert.m2_delta,   
+            "m5_rs_ratio": alert.m5_rs_ratio, 
+            # Wymuszenie stringa JSON dla BQ, aby uniknąć błędu 'not a record'
+            "raw_context": json.dumps(alert.raw_context) 
         }
         
         # Wysyłka do BigQuery

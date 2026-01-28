@@ -1,4 +1,4 @@
-# Lokalizacja: shared_lib/models.py (Poprawiony model)
+# Lokalizacja: shared_lib/models.py
 
 from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional, Dict, Any
