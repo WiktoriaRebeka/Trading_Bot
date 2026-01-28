@@ -80,9 +80,10 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
         final_sl = round_price_by_tick(alert.sl, tick_size, 'up' if is_long else 'down')
         final_tp = round_price_by_tick(alert.tp, tick_size, 'down' if is_long else 'up')
        
+
         # 4. OBLICZENIE QTY
         qty = calculate_position_size(
-            risk_per_trade_usdt=alert.risk_usdt, # Użycie alert.risk_usdt (teraz istnieje)
+            risk_per_trade_usdt=alert.risk_usdt,
             entry_price=final_entry,
             sl_price=final_sl,
             qty_step=rules["qtyStep"]
@@ -145,7 +146,6 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
             "risk_usdt": alert.risk_usdt, 
             "m2_delta": alert.m2_delta,   
             "m5_rs_ratio": alert.m5_rs_ratio, 
-            # Wymuszenie stringa JSON dla BQ, aby uniknąć błędu 'not a record'
             "raw_context": json.dumps(alert.raw_context) 
         }
         
@@ -183,6 +183,8 @@ def update_filled_orders(executor: BybitExecutor):
 
             try:
                 # <<< KLUCZOWA ZMIANA: Używamy nowej, niezawodnej funkcji, która zawsze przekazuje symbol >>>
+                # UWAGA: W tym miejscu musimy upewnić się, że executor.find_order_details_by_link_id 
+                # akceptuje i używa event_id jako order_link_id.
                 order_details = executor.find_order_details_by_link_id(symbol=symbol, order_link_id=order_link_id)
                 
                 if not order_details:
