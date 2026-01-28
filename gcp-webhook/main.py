@@ -48,15 +48,22 @@ def firestore_webhook_receiver(request):
             logger.error(f"BŁĄD PARSOWANIA: {e}")
             return ("Invalid JSON", 400)
 
-        # 3. Weryfikacja tokena (Bezpieczeństwo)
+# 3. Weryfikacja tokena (Bezpieczeństwo)
         received_token = alert_data.pop('secret_token', None)
         if not received_token or not hmac.compare_digest(str(received_token), WEBHOOK_SECRET):
             logger.error(f"BŁĄD AUTORYZACJI. Token: {received_token}")
             return ("Unauthorized", 403)
 
         # 4. Walidacja pól i Price Sanity Check (Bramkarz)
-        symbol = alert_data.get('id_symbol', '')
-        entry_price = float(alert_data.get('entry', 0))
+        # Używamy pól, które C++ teraz wysyła
+        symbol = alert_data.get('id_symbol', '') # CF nadal używa id_symbol
+        entry_price = float(alert_data.get('entry', 0.0))
+        risk_usdt = float(alert_data.get('risk_usdt', 0.0)) # NOWE: Walidacja ryzyka
+        event_id = alert_data.get('event_id', '') # NOWE: Walidacja ID
+
+        if not event_id:
+            logger.error("BŁĄD: Brak event_id.")
+            return ("Missing event_id", 400)
 
         if "BTC" in symbol and entry_price < 10000:
             logger.error(f"ODRZUCONO: Nierealna cena BTC: {entry_price}")
@@ -66,14 +73,15 @@ def firestore_webhook_receiver(request):
             logger.error(f"ODRZUCONO: Nierealna cena ETH: {entry_price}")
             return ("Invalid Price", 422)
 
-        if not symbol or entry_price <= 0:
-            logger.error(f"BŁĄD: Brak symbolu lub ceny <= 0")
+        if not symbol or entry_price <= 0 or risk_usdt <= 0: # Dodana walidacja risk_usdt
+            logger.error(f"BŁĄD: Brak symbolu, ceny <= 0 lub risk_usdt <= 0")
             return ("Missing data", 400)
 
         logger.info(f"✅ SYGNAŁ ZWERYFIKOWANY: {symbol} @ {entry_price}")
 
         # 5. PRZEKAZANIE DO BOTA (Zanim dodamy Sentinel)
         try:
+            # Upewniamy się, że przekazujemy CAŁY alert_data, który zawiera teraz wszystkie nowe pola
             resp = requests.post(BOT_SERVICE_URL, json=alert_data, timeout=5)
             logger.info(f"Bot Service Response: {resp.status_code}")
         except Exception as e:
