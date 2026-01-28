@@ -44,11 +44,13 @@ def firestore_webhook_receiver(request):
         try:
             raw_text = clean_bytes.decode("utf-8")
             alert_data = json.loads(raw_text)
+            print("DEBUG RAW TEXT:", raw_text)
+            print("DEBUG ALERT DATA:", alert_data)
         except Exception as e:
             logger.error(f"BŁĄD PARSOWANIA: {e}")
             return ("Invalid JSON", 400)
 
-# 3. Weryfikacja tokena (Bezpieczeństwo)
+        # 3. Weryfikacja tokena (Bezpieczeństwo)
         received_token = alert_data.pop('secret_token', None)
         if not received_token or not hmac.compare_digest(str(received_token), WEBHOOK_SECRET):
             logger.error(f"BŁĄD AUTORYZACJI. Token: {received_token}")
@@ -56,24 +58,16 @@ def firestore_webhook_receiver(request):
 
         # 4. Walidacja pól i Price Sanity Check (Bramkarz)
         # Używamy pól, które C++ teraz wysyła
-        symbol = alert_data.get('id_symbol', '') # CF nadal używa id_symbol
+        symbol = alert_data.get('id_symbol', '') 
         entry_price = float(alert_data.get('entry', 0.0))
-        risk_usdt = float(alert_data.get('risk_usdt', 0.0)) # NOWE: Walidacja ryzyka
+        risk_usdt = float(alert_data.get('risk_usdt', 0.0)) 
         event_id = alert_data.get('event_id', '') # NOWE: Walidacja ID
 
         if not event_id:
             logger.error("BŁĄD: Brak event_id.")
             return ("Missing event_id", 400)
-
-        if "BTC" in symbol and entry_price < 10000:
-            logger.error(f"ODRZUCONO: Nierealna cena BTC: {entry_price}")
-            return ("Invalid Price", 422)
         
-        if "ETH" in symbol and entry_price < 500:
-            logger.error(f"ODRZUCONO: Nierealna cena ETH: {entry_price}")
-            return ("Invalid Price", 422)
-
-        if not symbol or entry_price <= 0 or risk_usdt <= 0: # Dodana walidacja risk_usdt
+        if not symbol or entry_price <= 0 or risk_usdt <= 0: 
             logger.error(f"BŁĄD: Brak symbolu, ceny <= 0 lub risk_usdt <= 0")
             return ("Missing data", 400)
 
