@@ -1,4 +1,4 @@
-# Lokalizacja: shared_lib/models.py
+# Lokalizacja: shared_lib/models.py (Pełna, zaktualizowana wersja)
 
 from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional, Dict, Any
@@ -6,6 +6,7 @@ from typing import Optional, Dict, Any
 class AlertData(BaseModel):
     # Mapowanie pól z JSONa Sierry na model Pythona
     signal_id: str
+    event_id: str # NOWE: Unikalny ID zdarzenia z C++
     symbol: str = Field(alias='id_symbol') # CF używa id_symbol, bot używa symbol
     timestamp: str
     direction: str
@@ -28,9 +29,22 @@ class AlertData(BaseModel):
     eql_detected: Optional[bool] = False
     
     # --- DODANE POLA (Wymagane przez bot_logic.py i C++) ---
-    risk_usdt: float = 0.0  # Kluczowe dla calculate_position_size
+    risk_usdt: float = 0.0
     m2_delta: float = 0.0
     m5_rs_ratio: float = 0.0
+    
+    # ETAP 1: TIME FEATURES
+    session: str = "UNKNOWN"
+    minute_of_day: int = -1
+    day_of_week: int = -1
+    second: int = -1
+    
+    # ETAP 2: VOLATILITY FEATURES
+    bar_range: float = 0.0
+    ob_range: float = 0.0
+    swing_range: float = 0.0
+    distance_to_liquidity: float = 0.0
+    volatility_regime: str = "UNKNOWN"
     # ------------------------------------------------------
     
     # Kontekst surowy (JSON w BigQuery)
