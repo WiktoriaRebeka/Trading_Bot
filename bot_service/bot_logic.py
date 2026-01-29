@@ -123,9 +123,9 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
 
         # --- PRZYGOTOWANIE DANYCH DO ANALITYKI (BigQuery) ---
         analysis_data = {
-            "event_id": alert.event_id, # NOWE: Zapisujemy ID zdarzenia
+            "event_id": alert.event_id,
             "signal_id": alert.signal_id,
-            "symbol": alert.symbol, 
+            "symbol": alert.symbol,
             "timestamp": alert.timestamp,
             "direction": alert.direction.upper(),
             "entry": final_entry,
@@ -143,11 +143,20 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
             "liquidity_price": alert.liquidity_price,
             "eqh_detected": alert.eqh_detected,
             "eql_detected": alert.eql_detected,
-            "risk_usdt": alert.risk_usdt, 
-            "m2_delta": alert.m2_delta,   
-            "m5_rs_ratio": alert.m5_rs_ratio, 
+            "risk_usdt": alert.risk_usdt,
+            "m2_delta": alert.m2_delta,
+            "m5_rs_ratio": alert.m5_rs_ratio,
+            "session": alert.session,
+            "minute_of_day": alert.minute_of_day,
+            "day_of_week": alert.day_of_week,
+            "second": alert.second,
+            "bar_range": alert.bar_range,
+            "ob_range": alert.ob_range,
+            "swing_range": alert.swing_range,
+            "distance_to_liquidity": alert.distance_to_liquidity,
+            "volatility_regime": alert.volatility_regime,
             "raw_context": json.dumps(alert.raw_context),
-            "session": alert.session 
+
         }
         
         # Wysyłka do BigQuery
