@@ -146,7 +146,8 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
             "risk_usdt": alert.risk_usdt, 
             "m2_delta": alert.m2_delta,   
             "m5_rs_ratio": alert.m5_rs_ratio, 
-            "raw_context": json.dumps(alert.raw_context) 
+            "raw_context": json.dumps(alert.raw_context),
+            "session": alert.session 
         }
         
         # Wysyłka do BigQuery
