@@ -155,7 +155,7 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
             "swing_range": alert.swing_range,
             "distance_to_liquidity": alert.distance_to_liquidity,
             "volatility_regime": alert.volatility_regime,
-            "raw_context": alert.raw_context,
+            "raw_context": json.dumps(alert.raw_context)
 
         }
         
