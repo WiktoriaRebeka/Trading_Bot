@@ -4,7 +4,7 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-COPY requirements.txt .
+COPY orderflow_engine/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Kopiujemy cały folder orderflow_engine jako pakiet
