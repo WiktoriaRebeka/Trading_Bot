@@ -13,3 +13,5 @@ COPY . /app/orderflow_engine/
 WORKDIR /app/orderflow_engine/
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
+
+#dupsko test
