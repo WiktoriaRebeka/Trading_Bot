@@ -1,0 +1,46 @@
+# Lokalizacja: /cloudbuild-orderflow.yaml
+
+steps:
+  # 1. Build image
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'Build Image'
+    args:
+      - 'build'
+      - '-t'
+      - 'europe-central2-docker.pkg.dev/$PROJECT_ID/trading-bot-image/orderflow-engine:$SHORT_SHA'
+      - '--file'
+      - 'orderflow_engine/Dockerfile'
+      - '.'
+
+  # 2. Push image
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'Push Image'
+    args:
+      - 'push'
+      - 'europe-central2-docker.pkg.dev/$PROJECT_ID/trading-bot-image/orderflow-engine:$SHORT_SHA'
+
+  # 3. Deploy to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: 'Deploy to Cloud Run'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'orderflow-engine'
+      - '--image'
+      - 'europe-central2-docker.pkg.dev/$PROJECT_ID/trading-bot-image/orderflow-engine:$SHORT_SHA'
+      - '--region'
+      - 'europe-central2'
+      - '--platform'
+      - 'managed'
+      - '--service-account'
+      - 'trading-bot-runner@$PROJECT_ID.iam.gserviceaccount.com'
+      - '--min-instances=1'
+      - '--update-secrets'
+      - 'BYBIT_API_KEY=bybit-api-key:latest,BYBIT_API_SECRET=bybit-api-secret:latest'
+
+images:
+  - 'europe-central2-docker.pkg.dev/$PROJECT_ID/trading-bot-image/orderflow-engine:$SHORT_SHA'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
