@@ -142,6 +142,8 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
             "planned_tp_price": safe_round(active_order_data.get("planned_tp_price")) if active_order_data else None,
             "exit_price_result": safe_round(exit_price_result),
             "tp_price_chart": safe_round(active_order_data.get("alert_tp_price")) if active_order_data else None,
+            "m2_delta": safe_round(active_order_data.get("m2_delta", 0.0)),
+            "m5_rs_ratio": safe_round(active_order_data.get("m5_rs_ratio", 0.0), 4),
         }
 
     except Exception as e:

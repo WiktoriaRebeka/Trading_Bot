@@ -22,3 +22,4 @@ BIGQUERY_REAL_TRADES_TABLE_ID = "real_trades_history"
 
 # === Konfiguracja API ===
 BYBIT_API_URL_V5_KLINE = "https://api.bybit.com/v5/market/kline"
+ORDERFLOW_ENGINE_URL = os.getenv("ORDERFLOW_ENGINE_URL", "http://localhost:8000") # NOWA STAŁA

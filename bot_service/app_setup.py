@@ -10,7 +10,8 @@ from shared_lib.firebase_client import initialize_firebase
 from bot_service.bigquery_logger import initialize_bigquery
 from bot_service.bybit_executor import BybitExecutor
 from bot_service.bot_logic import handle_immediate_signal, log_closed_positions_pnl, update_filled_orders
-
+from bot_service.orderflow_client import OrderFlowClient # NOWY IMPORT
+from shared_lib.constants import ORDERFLOW_ENGINE_URL # NOWY IMPORT
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +128,12 @@ def initialize_app_services(app: Flask):
                     executor = BybitExecutor(api_key=api_key, api_secret=api_secret, testnet=USE_TESTNET)
                     app.config['BYBIT_EXECUTOR'] = executor
                     logger.info(f"BybitExecutor pomyślnie zainicjalizowany. Tryb Testnet: {USE_TESTNET}")
+                    
+                    # --- NOWY KROK: Inicjalizacja OrderFlow Client ---
+                    orderflow_url = ORDERFLOW_ENGINE_URL
+                    app.config['ORDERFLOW_CLIENT'] = OrderFlowClient(orderflow_url)
+                    logger.info(f"OrderFlow Client zainicjalizowany z URL: {orderflow_url}")
+                
                 except Exception as e:
                     failure_reasons.append(f"Błąd inicjalizacji BybitExecutor: {e}")
             else:

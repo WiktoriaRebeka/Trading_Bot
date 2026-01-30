@@ -8,6 +8,7 @@ import json
 from typing import Dict, Any, Optional, List
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal, ROUND_DOWN, ROUND_UP, getcontext
+from flask import current_app # NOWY IMPORT
 
 # Ustawienie precyzji dla Decimal
 getcontext().prec = 28
@@ -45,22 +46,23 @@ def round_price_by_tick(price: float, tick_size: str, direction: str) -> float:
 # =====================================================================
 
 
-def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
+def handle_immediate_signal (payload: Dict[str, Any], executor:
+BybitExecutor):
     """
-    OBSŁUGA SYGNAŁU PUSH - Sierra Chart (TRYB DRY RUN)
+    OBSŁUGA SYGNAŁU PUSH Sierra Chart (TRYB DRY RUN)
     """
     symbol_raw = None
     try:
         # Walidacja payloadu
         alert = AlertData.model_validate(payload)
         symbol_raw = alert.symbol
-       
-        # --- LOGIKA MAPOWANIA SYMBOLU ---
-        base_symbol = symbol_raw.split('_')[0]
-        symbol = f"{base_symbol}.P"
-       
+        
+        # LOGIKA MAPOWANIA SYMBOLU
+        base_symbol = symbol_raw.split('_')[0] # np. ADAUSDT
+        symbol = f"{base_symbol}.P" # Format dla Firestore/Bybit Executor (np. ADAUSDT.P)
+        
         logger.info(f"[{symbol}] PUSH: Odebrano {alert.direction} (zmapowano z {symbol_raw})")
-
+        
         # 1. BLOKADA DOUBLE-TRADE
         if executor.get_open_position_side(symbol):
             logger.warning(f"[{symbol}] ODRZUCONO: Pozycja jest już otwarta.")
@@ -71,16 +73,25 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
         if not rules:
             logger.error(f"[{symbol}] Brak zasad handlu w Firestore dla tego symbolu!")
             return
-       
+        
         tick_size = rules["tickSize"]
+        
+        # --- NOWY KROK: Pobranie metryk z OrderFlow Engine ---
+        orderflow_client = current_app.config.get('ORDERFLOW_CLIENT')
+        orderflow_metrics = {}
+        
+        if orderflow_client:
+            # Przekazujemy symbol bazowy (bez .P) do OrderFlow API
+            orderflow_metrics = orderflow_client.get_metrics(base_symbol)
+            if not orderflow_metrics:
+                logger.warning(f"[{symbol}] Nie udało się pobrać metryk z OrderFlow Engine. Używam wartości domyślnych (0.0).")
 
         # 3. ZAOKRĄGLANIE CEN
         is_long = alert.direction.upper() == "LONG"
         final_entry = round_price_by_tick(alert.entry, tick_size, 'down' if is_long else 'up')
         final_sl = round_price_by_tick(alert.sl, tick_size, 'up' if is_long else 'down')
         final_tp = round_price_by_tick(alert.tp, tick_size, 'down' if is_long else 'up')
-       
-
+        
         # 4. OBLICZENIE QTY
         qty = calculate_position_size(
             risk_per_trade_usdt=alert.risk_usdt,
@@ -88,14 +99,12 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
             sl_price=final_sl,
             qty_step=rules["qtyStep"]
         )
-
+        
         if not qty or qty <= 0:
             logger.error(f"[{symbol}] Błąd obliczeń Qty.")
             return
-
-
+        
         # 5. PRZYGOTOWANIE PARAMETRÓW ZLECENIA
-        # Zmieniamy order_link_id na event_id z C++
         order_link_id = alert.event_id # Używamy event_id z payloadu
         order_params = {
             "symbol": symbol,
@@ -109,27 +118,30 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
         }
 
         # --- BLOKADA WYKONANIA (DRY RUN) ---
-        logger.info(f"[{symbol}] ✅ DRY RUN SUCCESS! Zlecenie przygotowane: {order_params}")
-       
-        # Zapis do Firestore
+        logger.info(f"[{symbol}] DRY RUN SUCCESS! Zlecenie przygotowane: {order_params}")
+        
+        # Zapis do Firestore (musi zawierać nowe pola)
         state_manager.save_active_order(order_link_id, {
             "symbol": symbol,
-            "status": "DRY_RUN_LOG",
+            "status": "DRY RUN LOG",
             "direction": alert.direction.upper(),
             "planned_qty": qty,
             "params": order_params,
-            "created_at": datetime.now(timezone.utc)
+            "created_at": datetime.now(timezone.utc),
+            # Zapisujemy metryki, aby PnL logger mógł je odzyskać
+            "m2_delta": orderflow_metrics.get("m2_delta", 0.0),
+            "m5_rs_ratio": orderflow_metrics.get("m5_rs_ratio", 0.0),
         })
 
-        # --- PRZYGOTOWANIE DANYCH DO ANALITYKI (BigQuery) ---
+        # PRZYGOTOWANIE DANYCH DO ANALITYKI (BigQuery)
         analysis_data = {
-            "event_id": alert.event_id,
+            "event_id": alert.event_id, 
             "signal_id": alert.signal_id,
             "symbol": alert.symbol,
             "timestamp": alert.timestamp,
             "direction": alert.direction.upper(),
             "entry": final_entry,
-            "sl": final_sl,
+            "sl": final_sl, # POPRAWIONE: Klucz "sl"
             "tp": final_tp,
             "risk_pct": alert.risk_pct,
             "rr": alert.rr,
@@ -144,28 +156,18 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
             "eqh_detected": alert.eqh_detected,
             "eql_detected": alert.eql_detected,
             "risk_usdt": alert.risk_usdt,
-            "m2_delta": alert.m2_delta,
-            "m5_rs_ratio": alert.m5_rs_ratio,
-            "session": alert.session,
-            "minute_of_day": alert.minute_of_day,
-            "day_of_week": alert.day_of_week,
-            "second": alert.second,
-            "bar_range": alert.bar_range,
-            "ob_range": alert.ob_range,
-            "swing_range": alert.swing_range,
-            "distance_to_liquidity": alert.distance_to_liquidity,
-            "volatility_regime": alert.volatility_regime,
+            "m2_delta": orderflow_metrics.get("m2_delta", 0.0),
+            "m5_rs_ratio": orderflow_metrics.get("m5_rs_ratio", 0.0),
             "raw_context": json.dumps(alert.raw_context)
-
         }
         
         # Wysyłka do BigQuery
         log_analysis_result(analysis_data)
-
-        logger.info(f"[{symbol}] ✅ ANALYTICS: Sygnał z Deltą ({alert.m2_delta}) i RS ({alert.m5_rs_ratio}) zapisany w BigQuery.")
+        logger.info(f"[{symbol}] ANALYTICS: Sygnał z Deltą ({analysis_data['m2_delta']}) i RS ({analysis_data['m5_rs_ratio']}) zapisany w BigQuery.")
 
     except Exception as e:
         logger.error(f"KRYTYCZNY BŁĄD w handle_immediate_signal: {e}", exc_info=True)
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 def update_filled_orders(executor: BybitExecutor):
     logger.info("[ORDER_UPDATER] Rozpoczynam cykl aktualizacji.")
