@@ -66,7 +66,6 @@ def build_subscribe_payload(stream_type: str, symbols: List[str]) -> Dict[str, A
         "args": topics,
     }
 
-
 async def websocket_listener(
     metrics_processor: OrderFlowMetrics,
     process_trade_func: Callable[[int, str, str, float], None],
@@ -82,9 +81,11 @@ async def websocket_listener(
         try:
             logger.info(f"Próba połączenia z Bybit WS: {BYBIT_WS_URL}")
             async with ClientSession() as session:
+
                 # Inicjalizacja ceny BTC dla RS
                 await fetch_initial_prices(session, metrics_processor)
 
+                # Połączenie WS — poprawne parametry dla aiohttp 3.9+
                 async with session.ws_connect(
                     BYBIT_WS_URL,
                     heartbeat=20,
@@ -112,18 +113,16 @@ async def websocket_listener(
                             op = data.get("op")
                             topic = data.get("topic", "")
 
-                            # Odpowiedzi kontrolne (auth/subscribe/ping) – dla public WS głównie subscribe/ping
+                            # Odpowiedzi kontrolne
                             if op == "subscribe" and data.get("success") is True:
                                 logger.debug("Subskrypcja potwierdzona.")
                                 continue
                             if op == "ping":
-                                # Bybit może odesłać 'op': 'ping' jako potwierdzenie
                                 logger.debug("Odebrano PING/PONG z serwera.")
                                 continue
 
-                            # Dane z topic
+                            # --- publicTrade.* ---
                             if topic.startswith("publicTrade."):
-                                # publicTrade payload: data: [ { T, s, S, v, ... }, ... ]
                                 for trade in data.get("data", []):
                                     try:
                                         ts_ms = int(trade["T"])
@@ -135,15 +134,22 @@ async def websocket_listener(
                                         logger.warning(f"Błąd parsowania trade z WS: {trade} ({e})")
                                         continue
 
+                            # --- tickers.* ---
                             elif topic.startswith("tickers."):
-                                # tickers payload: data: [ { symbol, markPrice, ... }, ... ]
                                 for ticker in data.get("data", []):
+
+                                    # Bybit czasem wysyła stringi zamiast dictów → ignorujemy
+                                    if not isinstance(ticker, dict):
+                                        continue
+
                                     try:
                                         symbol_raw = ticker.get("symbol")
                                         if not symbol_raw:
                                             continue
+
                                         mark_price = float(ticker.get("markPrice", 0.0))
                                         process_ticker_func(symbol_raw, mark_price)
+
                                     except (TypeError, ValueError) as e:
                                         logger.warning(f"Błąd parsowania tickera z WS: {ticker} ({e})")
                                         continue
