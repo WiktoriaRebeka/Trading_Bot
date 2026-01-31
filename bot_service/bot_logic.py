@@ -170,8 +170,15 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
             "risk_usdt": alert.risk_usdt,
             "m2_delta": orderflow_metrics.get("m2_delta", 0.0),
             "m5_rs_ratio": orderflow_metrics.get("m5_rs_ratio", 0.0),
-            
-            # POPRAWKA: raw_context jako dict, NIE json.dumps()
+            "session": alert.session,
+            "minute_of_day": alert.minute_of_day,
+            "day_of_week": alert.day_of_week,
+            "second": alert.second,
+            "bar_range": alert.bar_range,
+            "ob_range": alert.ob_range,
+            "swing_range": alert.swing_range,
+            "distance_to_liquidity": alert.distance_to_liquidity,
+            "volatility_regime": alert.volatility_regime,
             "raw_context": json.dumps(alert.raw_context)
         }
         
