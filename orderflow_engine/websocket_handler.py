@@ -85,11 +85,10 @@ async def websocket_listener(
                 # Inicjalizacja ceny BTC dla RS
                 await fetch_initial_prices(session, metrics_processor)
 
-                # Utrzymujemy połączenie; heartbeat na poziomie protokołu zapewnia aiohttp
                 async with session.ws_connect(
                     BYBIT_WS_URL,
-                    ping_interval=20,
-                    ping_timeout=10,
+                    heartbeat=20,
+                    autoping=True,
                 ) as ws:
                     logger.info("Połączenie WS nawiązane.")
 
