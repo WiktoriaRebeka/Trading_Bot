@@ -11,4 +11,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY shared_lib/ /app/shared_lib/
 COPY orderflow_engine/ /app/orderflow_engine/
 
-CMD exec gunicorn --bind :$PORT --workers 1 --threads 8 --timeout 300 "orderflow_engine.main:app"
+CMD ["uvicorn", "orderflow_engine.main:app", "--host", "0.0.0.0", "--port", "8080"]
