@@ -60,7 +60,7 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
         # POPRAWKA: Sierra wysyła czysty ticker (np. ADAUSDT), nie ADAUSDT_1
         # Więc nie potrzeba split('_')[0]
         base_symbol = symbol_raw.upper().replace('.P', '')  # Usuń .P jeśli by było
-        symbol = f"{base_symbol}.P"  # Format dla Firestore/Bybit (np. ADAUSDT.P)
+        symbol = base_symbol
         
         logger.info(f"[{symbol}] PUSH: Odebrano {alert.direction} (symbol={symbol_raw})")
         
