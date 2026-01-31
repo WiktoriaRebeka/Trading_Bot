@@ -87,7 +87,7 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
         # --- NOWY KROK: Pobranie metryk z OrderFlow Engine ---
         orderflow_client = current_app.config.get('ORDERFLOW_CLIENT')
         orderflow_metrics = {}
-        
+        base_symbol = symbol
         if orderflow_client:
             # Przekazujemy symbol bazowy (bez .P) do OrderFlow API
             metrics = orderflow_client.get_metrics(base_symbol)
