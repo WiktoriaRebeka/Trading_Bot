@@ -4,9 +4,9 @@ import asyncio
 from datetime import datetime, timezone, timedelta
 from fastapi import FastAPI, HTTPException
 
-from .config_symbols import SYMBOLS_TO_WATCH_CLEAN, BENCHMARK_SYMBOL
-from .metrics_processor import OrderFlowMetrics
-from .websocket_handler import websocket_listener
+from orderflow_engine.config_symbols import SYMBOLS_TO_WATCH_CLEAN, BENCHMARK_SYMBOL
+from orderflow_engine.metrics_processor import OrderFlowMetrics
+from orderflow_engine.websocket_handler import websocket_listener
 
 # --- Konfiguracja ---
 logging.basicConfig(level=logging.INFO)
