@@ -58,7 +58,8 @@ def firestore_webhook_receiver(request):
 
         # 4. Walidacja pól i Price Sanity Check (Bramkarz)
         # Używamy pól, które C++ teraz wysyła
-        symbol = alert_data.get('id_symbol', '') 
+        symbol_raw = alert_data.get('symbol', '')
+        symbol = symbol_raw.split("_")[0]  # ADAUSDT_PERP_BINANCE → ADAUSDT 
         entry_price = float(alert_data.get('entry', 0.0))
         risk_usdt = float(alert_data.get('risk_usdt', 0.0)) 
         event_id = alert_data.get('event_id', '') # NOWE: Walidacja ID
