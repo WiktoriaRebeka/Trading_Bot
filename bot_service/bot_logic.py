@@ -172,7 +172,7 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
             "m5_rs_ratio": orderflow_metrics.get("m5_rs_ratio", 0.0),
             
             # POPRAWKA: raw_context jako dict, NIE json.dumps()
-            "raw_context": alert.raw_context  # BigQuery insert_rows_json() akceptuje dict
+            "raw_context": json.dumps(alert.raw_context)
         }
         
         # Wysyłka do BigQuery
