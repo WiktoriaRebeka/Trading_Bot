@@ -56,12 +56,9 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
         # Walidacja payloadu
         alert = AlertData.model_validate(payload)
         symbol_raw = alert.symbol
-        
-        # POPRAWKA: Sierra wysyła czysty ticker (np. ADAUSDT), nie ADAUSDT_1
-        # Więc nie potrzeba split('_')[0]
-        base_symbol = symbol_raw.upper().replace('.P', '')  # Usuń .P jeśli by było
-        symbol = base_symbol
-        
+    
+        symbol = symbol_raw.split('_')[0]   # ADAUSDT_PERP_BINANCE → ADAUSDT
+
         logger.info(f"[{symbol}] PUSH: Odebrano {alert.direction} (symbol={symbol_raw})")
         
         # NOWA WALIDACJA: event_id nie może być pusty
