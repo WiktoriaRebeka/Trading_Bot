@@ -86,7 +86,7 @@ async def websocket_listener(
                 await fetch_initial_prices(session, metrics_processor)
                 logger.info(f"[INIT] BTC last_price_btc={metrics_processor.last_price_btc}")
 
-                # Połączenie WS — poprawne parametry dla aiohttp 3.9+
+                # Połączenie WS
                 async with session.ws_connect(
                     BYBIT_WS_URL,
                     heartbeat=20,
@@ -94,7 +94,7 @@ async def websocket_listener(
                 ) as ws:
                     logger.info("Połączenie WS nawiązane.")
 
-                    # Subskrypcje – zgodne z dokumentacją Bybit v5
+                    # Subskrypcje
                     trade_payload = build_subscribe_payload("publicTrade", SYMBOLS_TO_WATCH_CLEAN)
                     ticker_payload = build_subscribe_payload("tickers", ALL_SYMBOLS_FOR_WS)
 
@@ -113,8 +113,11 @@ async def websocket_listener(
 
                             op = data.get("op")
                             topic = data.get("topic", "")
+
+                            # Logujemy każdy topic
                             if topic:
                                 logger.info(f"[WS-TOPIC] {topic}")
+
                             # Odpowiedzi kontrolne
                             if op == "subscribe" and data.get("success") is True:
                                 logger.debug("Subskrypcja potwierdzona.")
@@ -129,12 +132,13 @@ async def websocket_listener(
                                     try:
                                         ts_ms = int(trade["T"])
                                         symbol_raw = trade["s"]
-                                        side = trade["S"]  # "Buy" / "Sell"
+                                        side = trade["S"]
                                         qty = float(trade["v"])
 
                                         logger.info(f"[WS-TRADE] {symbol_raw} {side} qty={qty} ts={ts_ms}")
 
                                         process_trade_func(ts_ms, symbol_raw, side, qty)
+
                                     except (KeyError, TypeError, ValueError) as e:
                                         logger.warning(f"Błąd parsowania trade z WS: {trade} ({e})")
                                         continue
@@ -142,7 +146,6 @@ async def websocket_listener(
                             # --- tickers.* ---
                             elif topic.startswith("tickers."):
                                 for ticker in data.get("data", []):
-                                    # Bybit czasem wysyła stringi zamiast dictów → ignorujemy
                                     if not isinstance(ticker, dict):
                                         continue
 
@@ -156,6 +159,7 @@ async def websocket_listener(
                                         logger.info(f"[WS-TICKER] {symbol_raw} mark={mark_price}")
 
                                         process_ticker_func(symbol_raw, mark_price)
+
                                     except (TypeError, ValueError) as e:
                                         logger.warning(f"Błąd parsowania tickera z WS: {ticker} ({e})")
                                         continue
