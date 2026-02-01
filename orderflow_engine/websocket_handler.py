@@ -84,6 +84,7 @@ async def websocket_listener(
 
                 # Inicjalizacja ceny BTC dla RS
                 await fetch_initial_prices(session, metrics_processor)
+                logger.info(f"[INIT] BTC last_price_btc={metrics_processor.last_price_btc}")
 
                 # Połączenie WS — poprawne parametry dla aiohttp 3.9+
                 async with session.ws_connect(
@@ -129,6 +130,9 @@ async def websocket_listener(
                                         symbol_raw = trade["s"]
                                         side = trade["S"]  # "Buy" / "Sell"
                                         qty = float(trade["v"])
+
+                                        logger.info(f"[WS-TRADE] {symbol_raw} {side} qty={qty} ts={ts_ms}")
+
                                         process_trade_func(ts_ms, symbol_raw, side, qty)
                                     except (KeyError, TypeError, ValueError) as e:
                                         logger.warning(f"Błąd parsowania trade z WS: {trade} ({e})")
@@ -137,7 +141,6 @@ async def websocket_listener(
                             # --- tickers.* ---
                             elif topic.startswith("tickers."):
                                 for ticker in data.get("data", []):
-
                                     # Bybit czasem wysyła stringi zamiast dictów → ignorujemy
                                     if not isinstance(ticker, dict):
                                         continue
@@ -148,18 +151,21 @@ async def websocket_listener(
                                             continue
 
                                         mark_price = float(ticker.get("markPrice", 0.0))
-                                        process_ticker_func(symbol_raw, mark_price)
 
+                                        logger.info(f"[WS-TICKER] {symbol_raw} mark={mark_price}")
+
+                                        process_ticker_func(symbol_raw, mark_price)
                                     except (TypeError, ValueError) as e:
                                         logger.warning(f"Błąd parsowania tickera z WS: {ticker} ({e})")
                                         continue
 
                         elif message.type in (WSMsgType.CLOSE, WSMsgType.CLOSED, WSMsgType.ERROR):
+                            logger.error(f"[WS] Połączenie zamknięte: {message.type}, data={message.data}")
                             logger.warning(f"Połączenie WS zakończone: {message.type}. Próbuję reconnect za 5s.")
                             break
 
         except (ClientError, TimeoutError, OSError) as e:
-            logger.error(f"Błąd komunikacji WS: {type(e).__name__}. Reconnect za 5s.")
+            logger.error(f"[WS-ERROR] {e}. Próba reconnect za 5s.")
         except Exception as e:
             logger.error(f"Nieoczekiwany błąd w pętli WS: {e}", exc_info=True)
 
