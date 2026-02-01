@@ -113,7 +113,8 @@ async def websocket_listener(
 
                             op = data.get("op")
                             topic = data.get("topic", "")
-
+                            if topic:
+                                logger.info(f"[WS-TOPIC] {topic}")
                             # Odpowiedzi kontrolne
                             if op == "subscribe" and data.get("success") is True:
                                 logger.debug("Subskrypcja potwierdzona.")
