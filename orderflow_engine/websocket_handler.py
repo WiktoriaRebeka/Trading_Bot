@@ -142,27 +142,30 @@ async def websocket_listener(
                                     except (KeyError, TypeError, ValueError) as e:
                                         logger.warning(f"Błąd parsowania trade z WS: {trade} ({e})")
                                         continue
-
+                                        
                             # --- tickers.* ---
                             elif topic.startswith("tickers."):
-                                for ticker in data.get("data", []):
-                                    if not isinstance(ticker, dict):
+                                ticker = data.get("data")
+
+                                # Bybit czasem wysyła stringi zamiast dictów → ignorujemy
+                                if not isinstance(ticker, dict):
+                                    logger.warning(f"[WS-TICKER] Otrzymano niepoprawny format tickera: {ticker}")
+                                    continue
+
+                                try:
+                                    symbol_raw = ticker.get("symbol")
+                                    if not symbol_raw:
                                         continue
 
-                                    try:
-                                        symbol_raw = ticker.get("symbol")
-                                        if not symbol_raw:
-                                            continue
+                                    mark_price = float(ticker.get("markPrice", 0.0))
 
-                                        mark_price = float(ticker.get("markPrice", 0.0))
+                                    logger.info(f"[WS-TICKER] {symbol_raw} mark={mark_price}")
 
-                                        logger.info(f"[WS-TICKER] {symbol_raw} mark={mark_price}")
+                                    process_ticker_func(symbol_raw, mark_price)
 
-                                        process_ticker_func(symbol_raw, mark_price)
-
-                                    except (TypeError, ValueError) as e:
-                                        logger.warning(f"Błąd parsowania tickera z WS: {ticker} ({e})")
-                                        continue
+                                except (TypeError, ValueError) as e:
+                                    logger.warning(f"Błąd parsowania tickera z WS: {ticker} ({e})")
+                                    continue
 
                         elif message.type in (WSMsgType.CLOSE, WSMsgType.CLOSED, WSMsgType.ERROR):
                             logger.error(f"[WS] Połączenie zamknięte: {message.type}, data={message.data}")
