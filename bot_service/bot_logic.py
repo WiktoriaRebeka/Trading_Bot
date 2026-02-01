@@ -93,6 +93,7 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
             metrics = orderflow_client.get_metrics(base_symbol)
             if metrics and isinstance(metrics, dict):
                 orderflow_metrics = metrics
+                logger.info(f"[{symbol}] Otrzymane metryki z OrderFlow: {orderflow_metrics}")
             else:
                 logger.warning(f"[{symbol}] OrderFlow zwrócił nieprawidłowe dane: {metrics}")
         else:
