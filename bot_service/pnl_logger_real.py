@@ -41,8 +41,6 @@ def acquire_lock_for_order(order_id: str) -> bool:
         logger.error(f"[PNL_LOCK] Błąd podczas próby założenia blokady dla order_id {order_id}: {e}", exc_info=True)
         return False
 
-# Lokalizacja: bot_service/pnl_logger_real.py
-# ... (importy i funkcje pomocnicze bez zmian)
 
 def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[Dict[str, Any]]) -> bool:
     """
@@ -60,7 +58,8 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
     if not acquire_lock_for_order(order_id):
         return False
 
-    is_matched = bool(active_order_data and 'event_id' in active_order_data) # Zmieniono 'alert_id' na 'event_id' (klucz dopasowania)
+    # Używamy 'event_id' jako klucza dopasowania, który pochodzi z Sierry
+    is_matched = bool(active_order_data and 'event_id' in active_order_data) 
     alert_id = active_order_data.get('event_id', 'UNMATCHED_OR_MANUAL') if active_order_data else 'UNMATCHED_OR_MANUAL'
     
     
@@ -136,23 +135,23 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
             "exit_type": pnl_data.get("exitType"),
             "timestamp_entry": datetime.fromtimestamp(int(pnl_data.get("createdTime")) / 1000, tz=timezone.utc).isoformat(),
             "timestamp_close": datetime.fromtimestamp(int(pnl_data.get("updatedTime")) / 1000, tz=timezone.utc).isoformat(),
-            "timestamp_signal": active_order_data.get("timestamp") if active_order_data else None, # NOWE POLE (z Sierry)
+            "timestamp_signal": active_order_data.get("timestamp") if active_order_data else None, # NOWE POLE (Timestamp z Sierry)
             "planned_risk_usdt": safe_round(planned_risk_usdt),
             "realized_rrr": safe_round(realized_rrr, 4), # RRR z mniejszą precyzją
             
-            # Zastąpienie pól alert_* (TV) danymi z Sierry (entry, sl, tp)
+            # Ceny z Sierry (entry, sl, tp) mapowane do pól alert_*
             "alert_entry_price": safe_round(active_order_data.get("entry")) if active_order_data else None,
             "alert_sl_price": safe_round(active_order_data.get("sl")) if active_order_data else None,
             "alert_tp_price": safe_round(active_order_data.get("tp")) if active_order_data else None,
 
-            # planned_* (ceny po zaokrągleniu) zostają, bo to co poszło do Bybit
+            # Ceny po zaokrągleniu (planned_*)
             "planned_entry_price": safe_round(active_order_data.get("planned_entry_price")) if active_order_data else None,
             "planned_sl_price": safe_round(active_order_data.get("planned_sl_price")) if active_order_data else None,
             "planned_tp_price": safe_round(active_order_data.get("planned_tp_price")) if active_order_data else None,
             "exit_price_result": safe_round(exit_price_result),
             "tp_price_chart": safe_round(active_order_data.get("alert_tp_price")) if active_order_data else None,
             
-            # POBIERANIE POL ANALITYCZNYCH Z ACTIVE_ORDER_DATA (gdzie zostały zapisane w Krok 4)
+            # POBIERANIE POL ANALITYCZNYCH Z ACTIVE_ORDER_DATA (zapisane w Krok 4)
             "m2_delta": safe_round(active_order_data.get("m2_delta", 0.0)),
             "m5_rs_ratio": safe_round(active_order_data.get("m5_rs_ratio", 0.0), 4),
             "structure_state": active_order_data.get("structure_state"),
@@ -175,7 +174,7 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
             "swing_range": active_order_data.get("swing_range"),
             "distance_to_liquidity": active_order_data.get("distance_to_liquidity"),
             "volatility_regime": active_order_data.get("volatility_regime"),
-            "raw_context": active_order_data.get("raw_context"), # Zakładamy, że to już jest dict/JSON string
+            "raw_context": active_order_data.get("raw_context"),
         }
 
     except Exception as e:
@@ -195,11 +194,3 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
                     state_manager.delete_active_order_by_id(order_link_id_to_delete)
                 else:
                     logger.error(f"{log_prefix} Nie można usunąć dokumentu – brak pola 'id' w dopasowanych danych.")
-            return True
-        else:
-            logger.error(f"{log_prefix} Błąd podczas wstawiania do BigQuery: {errors}. Dokument w active_orders NIE został usunięty.")
-            return False
-
-    except Exception as e:
-        logger.critical(f"{log_prefix} Krytyczny błąd podczas zapisu do BigQuery: {e}", exc_info=True)
-        return False
