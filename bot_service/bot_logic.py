@@ -22,6 +22,9 @@ from bot_service.bigquery_logger import log_analysis_result
 
 logger = logging.getLogger(__name__)
 
+# Lokalizacja: bot_service/bot_logic.py
+# ... (importy bez zmian)
+
 # =====================================================================
 # === 1. NARZĘDZIA POMOCNICZE (Rounding) ===
 # =====================================================================
@@ -133,7 +136,7 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
         # --- BLOKADA WYKONANIA (DRY RUN) ---
         logger.info(f"[{symbol}] DRY RUN SUCCESS! Zlecenie przygotowane: {order_params}")
         
-        # Zapis do Firestore
+        # Zapis do Firestore (Wprowadzamy wszystkie dane analityczne tutaj)
         state_manager.save_active_order(order_link_id, {
             "symbol": symbol,
             "status": "DRY RUN LOG",
@@ -141,12 +144,44 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
             "planned_qty": qty,
             "params": order_params,
             "created_at": datetime.now(timezone.utc),
-            # Zapisujemy metryki z OrderFlow
+            
+            # Dane z Sierry (Oryginalne ceny i timestamp)
+            "entry": final_entry, # Cena po zaokrągleniu (używana jako SL/TP w log_real_trade_result)
+            "sl": final_sl,       # Cena po zaokrągleniu
+            "tp": final_tp,       # Cena po zaokrągleniu
+            "timestamp": alert.timestamp, # Timestamp sygnału z Sierry
+            
+            # Dane analityczne (dla mapowania do real_trades_history)
+            "event_id": alert.event_id,
+            "signal_id": alert.signal_id,
+            "structure_state": alert.structure_state,
+            "bos_high": alert.bos_high,
+            "bos_low": alert.bos_low,
+            "choch_up": alert.choch_up,
+            "choch_down": alert.choch_down,
+            "liquidity_grab_above": alert.liquidity_grab_above,
+            "liquidity_grab_below": alert.liquidity_grab_below,
+            "liquidity_price": alert.liquidity_price,
+            "eqh_detected": alert.eqh_detected,
+            "eql_detected": alert.eql_detected,
+            "risk_usdt": alert.risk_usdt,
+            "session": alert.session,
+            "minute_of_day": alert.minute_of_day,
+            "day_of_week": alert.day_of_week,
+            "second": alert.second,
+            "bar_range": alert.bar_range,
+            "ob_range": alert.ob_range,
+            "swing_range": alert.swing_range,
+            "distance_to_liquidity": alert.distance_to_liquidity,
+            "volatility_regime": alert.volatility_regime,
+            "raw_context": json.dumps(alert.raw_context),
+            
+            # Metryki OrderFlow
             "m2_delta": orderflow_metrics.get("m2_delta", 0.0),
             "m5_rs_ratio": orderflow_metrics.get("m5_rs_ratio", 0.0),
         })
         
-        # PRZYGOTOWANIE DANYCH DO ANALITYKI (BigQuery)
+        # PRZYGOTOWANIE DANYCH DO ANALITYKI (BigQuery) - to jest nadal potrzebne dla signals
         analysis_data = {
             "event_id": alert.event_id,  # PRIMARY KEY
             "signal_id": alert.signal_id,
@@ -189,6 +224,7 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
     
     except Exception as e:
         logger.error(f"KRYTYCZNY BŁĄD w handle_immediate_signal: {e}", exc_info=True)
+
 
 # =====================================================================
 # === 3. POZOSTAŁE FUNKCJE BEZ ZMIAN ===
