@@ -116,7 +116,7 @@ async def websocket_listener(
 
                             # Logujemy każdy topic
                             if topic:
-                                logger.info(f"[WS-TOPIC] {topic}")
+                                logger.debug(f"[WS-TOPIC] {topic}")
 
                             # Odpowiedzi kontrolne
                             if op == "subscribe" and data.get("success") is True:
@@ -135,7 +135,7 @@ async def websocket_listener(
                                         side = trade["S"]
                                         qty = float(trade["v"])
 
-                                        logger.info(f"[WS-TRADE] {symbol_raw} {side} qty={qty} ts={ts_ms}")
+                                        logger.debug(f"[WS-TRADE] {symbol_raw} {side} qty={qty} ts={ts_ms}")
 
                                         process_trade_func(ts_ms, symbol_raw, side, qty)
 
@@ -159,7 +159,7 @@ async def websocket_listener(
 
                                     mark_price = float(ticker.get("markPrice", 0.0))
 
-                                    logger.info(f"[WS-TICKER] {symbol_raw} mark={mark_price}")
+                                    logger.debug(f"[WS-TICKER] {symbol_raw} mark={mark_price}")
 
                                     process_ticker_func(symbol_raw, mark_price)
 
