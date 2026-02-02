@@ -40,7 +40,7 @@ def acquire_lock_for_order(order_id: str) -> bool:
     except Exception as e:
         logger.error(f"[PNL_LOCK] Błąd podczas próby założenia blokady dla order_id {order_id}: {e}", exc_info=True)
         return False
-
+y
 
 def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[Dict[str, Any]]) -> bool:
     """
