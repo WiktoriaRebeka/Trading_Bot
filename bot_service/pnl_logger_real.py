@@ -57,6 +57,7 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
     if not acquire_lock_for_order(order_id):
         return False
 
+    # Używamy 'alert_id' jako klucza dopasowania, jak w Twojej działającej wersji
     is_matched = bool(active_order_data and 'alert_id' in active_order_data)
     alert_id = active_order_data.get('alert_id', 'UNMATCHED_OR_MANUAL') if active_order_data else 'UNMATCHED_OR_MANUAL'
     
@@ -134,16 +135,44 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
             "timestamp_close": datetime.fromtimestamp(int(pnl_data.get("updatedTime")) / 1000, tz=timezone.utc).isoformat(),
             "planned_risk_usdt": safe_round(planned_risk_usdt),
             "realized_rrr": safe_round(realized_rrr, 4), # RRR z mniejszą precyzją
-            "alert_entry_price": safe_round(active_order_data.get("alert_entry_price")) if active_order_data else None,
-            "alert_sl_price": safe_round(active_order_data.get("alert_sl_price")) if active_order_data else None,
-            "alert_tp_price": safe_round(active_order_data.get("alert_tp_price")) if active_order_data else None,
+            
+            # --- MAPOWANIE DANYCH Z SIERRY (z active_order_data) ---
+            "alert_entry_price": safe_round(active_order_data.get("entry")) if active_order_data else None,
+            "alert_sl_price": safe_round(active_order_data.get("sl")) if active_order_data else None,
+            "alert_tp_price": safe_round(active_order_data.get("tp")) if active_order_data else None,
+            "timestamp_signal": active_order_data.get("timestamp") if active_order_data else None, # NOWE POLE
+            
+            # Planned (ceny po zaokrągleniu)
             "planned_entry_price": safe_round(active_order_data.get("planned_entry_price")) if active_order_data else None,
             "planned_sl_price": safe_round(active_order_data.get("planned_sl_price")) if active_order_data else None,
             "planned_tp_price": safe_round(active_order_data.get("planned_tp_price")) if active_order_data else None,
             "exit_price_result": safe_round(exit_price_result),
             "tp_price_chart": safe_round(active_order_data.get("alert_tp_price")) if active_order_data else None,
+            
+            # Pola analityczne (pobierane z active_order_data, jeśli zostały tam zapisane w Kroku 4)
             "m2_delta": safe_round(active_order_data.get("m2_delta", 0.0)),
             "m5_rs_ratio": safe_round(active_order_data.get("m5_rs_ratio", 0.0), 4),
+            "structure_state": active_order_data.get("structure_state"),
+            "bos_high": active_order_data.get("bos_high"),
+            "bos_low": active_order_data.get("bos_low"),
+            "choch_up": active_order_data.get("choch_up"),
+            "choch_down": active_order_data.get("choch_down"),
+            "liquidity_grab_above": active_order_data.get("liquidity_grab_above"),
+            "liquidity_grab_below": active_order_data.get("liquidity_grab_below"),
+            "liquidity_price": active_order_data.get("liquidity_price"),
+            "eqh_detected": active_order_data.get("eqh_detected"),
+            "eql_detected": active_order_data.get("eql_detected"),
+            "risk_usdt": active_order_data.get("risk_usdt"),
+            "session": active_order_data.get("session"),
+            "minute_of_day": active_order_data.get("minute_of_day"),
+            "day_of_week": active_order_data.get("day_of_week"),
+            "second": active_order_data.get("second"),
+            "bar_range": active_order_data.get("bar_range"),
+            "ob_range": active_order_data.get("ob_range"),
+            "swing_range": active_order_data.get("swing_range"),
+            "distance_to_liquidity": active_order_data.get("distance_to_liquidity"),
+            "volatility_regime": active_order_data.get("volatility_regime"),
+            "raw_context": active_order_data.get("raw_context"),
         }
 
     except Exception as e:
