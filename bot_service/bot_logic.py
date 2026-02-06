@@ -146,12 +146,12 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
             "m5_rs_ratio": orderflow_metrics.get("m5_rs_ratio", 0.0),
         })
         
-        # PRZYGOTOWANIE DANYCH DO ANALITYKI (BigQuery)
+# PRZYGOTOWANIE DANYCH DO ANALITYKI (BigQuery)
         analysis_data = {
-            "event_id": alert.event_id,  # PRIMARY KEY
+            "event_id": alert.event_id,
             "signal_id": alert.signal_id,
-            "symbol": alert.symbol,  # Czysty ticker (np. ADAUSDT)
-            "timestamp": alert.timestamp,  # STRING ISO 8601
+            "symbol": alert.symbol,
+            "timestamp": alert.timestamp,
             "direction": alert.direction.upper(),
             "entry": final_entry,
             "sl": final_sl,
@@ -169,8 +169,13 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
             "eqh_detected": alert.eqh_detected,
             "eql_detected": alert.eql_detected,
             "risk_usdt": alert.risk_usdt,
+            
+            # --- METRYKI ORDERFLOW (V2.1) ---
             "m2_delta": orderflow_metrics.get("m2_delta", 0.0),
             "m5_rs_ratio": orderflow_metrics.get("m5_rs_ratio", 0.0),
+            "funding_rate": orderflow_metrics.get("funding_rate", 0.0),   # NOWE
+            "open_interest": orderflow_metrics.get("open_interest", 0.0), # NOWE
+            
             "session": alert.session,
             "minute_of_day": alert.minute_of_day,
             "day_of_week": alert.day_of_week,
