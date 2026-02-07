@@ -4,27 +4,6 @@ Automated Trading Infrastructure – Sierra Chart → GCP → Bybit → BigQuery
 ## Overview
 This project is a professional-grade, high-frequency trading (HFT) infrastructure designed for the Bybit exchange. It utilizes a **PUSH-model architecture** to process Market Microstructure signals in real-time. The system is engineered to identify institutional order flow patterns, such as Passive Absorption and Aggressive Imbalances, providing a significant statistical edge over traditional technical analysis.
 
-## System Architecture
-
-```mermaid
-graph TD
-    subgraph Detection_Tier [Detection Tier (Tokyo - asia-northeast1)]
-        SC[Sierra Chart C++/ACSIL] -->|HTTP POST| CF[GCP Cloud Function<br/>Webhook Receiver]
-    end
-
-    subgraph Ingestion_Tier [Ingestion Tier (europe-central2)]
-        CF -->|Auth & Clean| FS_ALERTS[(Firestore: Alerts)]
-        CF -->|Trigger| CR[GCP Cloud Run: Bot Service]
-    end
-    
-    subgraph Execution_Tier [Execution & Intelligence Engine]
-        CR -->|Place Order| BYBIT[Bybit API]
-        CR -->|Manage State| FS_ORDERS[(Firestore: Active Orders)]
-        CR -->|Log Signal Context| BQ_SIG[BigQuery: market_structure_signals]
-        CR -->|Log Execution Data| BQ_TRD[BigQuery: real_trades_history]
-    end
-
-    BYBIT -->|PnL & Fill Data| CR
 
 1. System Architecture (Event-Driven)
 The architecture is split into two independent but tightly coupled environments:
