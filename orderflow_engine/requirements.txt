@@ -1,12 +1,23 @@
+# orderflow_engine/requirements.txt
+# WERSJA: 5.0 - Institutional Footprint Engine
+
+# Serwer i API
 fastapi
 uvicorn[standard]
-aiohttp
-pydantic
-python-dotenv
-google-cloud-firestore
-google-auth
 gunicorn
+
+# Komunikacja asynchroniczna (WebSocket/HTTP)
 aiohttp==3.9.1
+
+# Walidacja danych i modele
+pydantic
+python-dateutil==2.8.2
+
+# Infrastruktura Google Cloud
 google-cloud-firestore==2.14.0
 google-cloud-secret-manager==2.17.0
-python-dateutil==2.8.2
+google-auth
+
+# Narzędzia pomocnicze
+python-dotenv
+numpy
