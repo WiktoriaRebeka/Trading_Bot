@@ -4,7 +4,6 @@ import logging
 from fastapi import FastAPI, HTTPException
 from contextlib import asynccontextmanager
 
-# Importy absolutne zgodne z PYTHONPATH=/app
 from orderflow_engine.websocket_handler import MultiConnectionWSManager
 from orderflow_engine.metrics_processor import OrderFlowMetrics
 from orderflow_engine.config_symbols import SYMBOLS_TO_WATCH_CLEAN
@@ -19,7 +18,7 @@ METRICS_PROCESSOR = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global METRICS_PROCESSOR
-    logger.info("🚀 Starting OrderFlow Engine V6.1...")
+    logger.info("🚀 Starting OrderFlow Engine V6.1 (Autonomous + Backfill)...")
     
     # 1. Inicjalizacja Firebase
     if initialize_firebase():
@@ -29,15 +28,16 @@ async def lifespan(app: FastAPI):
         logger.error("❌ Błąd krytyczny: Brak połączenia z Firestore.")
         METRICS_PROCESSOR = OrderFlowMetrics(firestore_client=None)
 
-    # 2. Backfill historii
+    # 2. BACKFILL - Pobieranie historii przed startem WS
     backfiller = HistoryBackfiller()
     for symbol in SYMBOLS_TO_WATCH_CLEAN:
         logger.info(f"📥 Backfilling {symbol}...")
         h_m1 = backfiller.fetch_history(symbol, interval='1', limit=1000)
         h_d1 = backfiller.fetch_history(symbol, interval='D', limit=365)
-        METRICS_PROCESSOR.pre_load_history(symbol, h_m1, h_d1)
+        if METRICS_PROCESSOR:
+            METRICS_PROCESSOR.pre_load_history(symbol, h_m1, h_d1)
 
-    # 3. Uruchomienie połączeń Bybit
+    # 3. Uruchomienie połączeń Bybit w tle
     ws_manager = MultiConnectionWSManager(
         symbols=SYMBOLS_TO_WATCH_CLEAN,
         metrics_processor=METRICS_PROCESSOR
@@ -45,12 +45,13 @@ async def lifespan(app: FastAPI):
     
     task = asyncio.create_task(ws_manager.start_all_connections())
     
-    yield
+    yield  # Tutaj aplikacja działa
     
     logger.info("🛑 Zamykanie silnika...")
     await ws_manager.shutdown()
     task.cancel()
 
+# Tworzymy aplikację JEDEN RAZ z poprawną funkcją lifespan
 app = FastAPI(title="OrderFlow Engine V6.1", lifespan=lifespan)
 
 @app.get("/health")
@@ -59,7 +60,7 @@ async def health():
 
 @app.get("/metrics")
 async def get_metrics(symbol: str):
-    if not METRICS_PROCESSOR:
+    if METRICS_PROCESSOR is None:
         raise HTTPException(status_code=503, detail="Engine not ready")
     
     symbol_clean = symbol.upper().replace('.P', '')
