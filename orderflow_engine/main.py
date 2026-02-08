@@ -1,63 +1,56 @@
 # orderflow_engine/main.py
-import logging
+# WERSJA: 5.0 - Używa MultiConnectionWSManager
+
 import asyncio
-from datetime import datetime, timezone, timedelta
-from fastapi import FastAPI, HTTPException
+import logging
+import os
+from websocket_handler import MultiConnectionWSManager
+from metrics_processor import OrderFlowMetrics
+from config_symbols import SYMBOLS_TO_WATCH_CLEAN
+from shared_lib.firebase_client import get_firestore_client
 
-from orderflow_engine.config_symbols import SYMBOLS_TO_WATCH_CLEAN, BENCHMARK_SYMBOL
-from orderflow_engine.metrics_processor import OrderFlowMetrics
-from orderflow_engine.websocket_handler import websocket_listener
-
-# --- Konfiguracja ---
-logging.basicConfig(level=logging.INFO)
+# Logging setup
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
-# --- Inicjalizacja Stanu ---
-METRICS_PROCESSOR = OrderFlowMetrics(
-    symbols=SYMBOLS_TO_WATCH_CLEAN,
-    benchmark=BENCHMARK_SYMBOL
-)
-
-# --- FastAPI Setup ---
-app = FastAPI(title="OrderFlow Engine")
-
-@app.on_event("startup")
-async def startup_event():
-    asyncio.create_task(
-        websocket_listener(
-            METRICS_PROCESSOR,
-            METRICS_PROCESSOR.process_trade,
-            METRICS_PROCESSOR.process_ticker
-        )
+async def main():
+    """
+    Główny entry point OrderFlow Engine V5.0
+    """
+    logger.info("=" * 60)
+    logger.info("🚀 OrderFlow Engine V5.0 - Institutional Footprint Tracker")
+    logger.info("=" * 60)
+    
+    # Inicjalizacja Firestore
+    try:
+        firestore_client = get_firestore_client()
+        logger.info("✅ Firestore połączony")
+    except Exception as e:
+        logger.error(f"❌ Błąd połączenia z Firestore: {e}")
+        firestore_client = None
+    
+    # Inicjalizacja Metrics Processor
+    metrics_processor = OrderFlowMetrics(firestore_client=firestore_client)
+    
+    # Inicjalizacja WebSocket Manager
+    logger.info(f"📡 Inicjalizacja WebSocket dla {len(SYMBOLS_TO_WATCH_CLEAN)} symboli...")
+    ws_manager = MultiConnectionWSManager(
+        symbols=SYMBOLS_TO_WATCH_CLEAN,
+        metrics_processor=metrics_processor
     )
-    logger.info("OrderFlow Engine startup complete. WS listener started.")
+    
+    # Uruchom wszystkie połączenia
+    try:
+        await ws_manager.start_all_connections()
+    except KeyboardInterrupt:
+        logger.info("⚠️  Otrzymano sygnał zatrzymania...")
+        await ws_manager.shutdown()
+    except Exception as e:
+        logger.error(f"❌ Krytyczny błąd: {e}", exc_info=True)
+        await ws_manager.shutdown()
 
-@app.get("/health")
-async def health_check():
-    btc_state = METRICS_PROCESSOR.states.get(BENCHMARK_SYMBOL)
-
-    is_btc_fresh = (
-        btc_state
-        and btc_state.last_update_ts
-        and (datetime.now(timezone.utc) - btc_state.last_update_ts < timedelta(seconds=30))
-    )
-
-    status = "healthy" if is_btc_fresh else "unhealthy"
-
-    return {
-        "status": status,
-        "ws_active": True,  # opcjonalnie mogę dodać realne sprawdzanie
-        "btc_price_fresh": bool(is_btc_fresh)
-    }
-
-@app.get("/metrics")
-async def get_metrics_endpoint(symbol: str):
-    symbol_clean = symbol.upper().replace('.P', '')
-
-    if symbol_clean not in METRICS_PROCESSOR.states:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Symbol {symbol_clean} nie jest śledzony."
-        )
-
-    return METRICS_PROCESSOR.get_metrics_json(symbol_clean)
+if __name__ == "__main__":
+    asyncio.run(main())

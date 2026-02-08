@@ -1,6 +1,9 @@
 # Lokalizacja: shared_lib/models.py
 from pydantic import BaseModel, Field, ConfigDict, field_validator
 from typing import Optional, Dict, Any
+from pydantic import BaseModel
+from typing import List, Optional
+from datetime import datetime
 
 class AlertData(BaseModel):
     """
@@ -106,3 +109,71 @@ class AlertData(BaseModel):
         extra='ignore',  # Ignoruj dodatkowe pola (np. secret_token)
         str_strip_whitespace=True
     )
+
+
+
+    # shared_lib/models.py
+# DODAJ NA KOŃCU PLIKU (po istniejącym AlertData)
+
+
+# ========================================
+# NOWE MODELE (V5.0)
+# ========================================
+
+class LiquidationCascadeEvent(BaseModel):
+    """Event kaskady likwidacji"""
+    type: str = "LIQUIDATION_CASCADE"
+    symbol: str
+    cascade_type: str  # 'LONG_CASCADE' or 'SHORT_CASCADE'
+    total_volume_usd: float
+    dominant_volume_usd: float
+    count: int
+    timestamp: str
+
+class DOMWallEvent(BaseModel):
+    """Event wykrycia ściany w Order Booku"""
+    type: str = "DOM_WALL_DETECTED"
+    symbol: str
+    side: str  # 'BID' or 'ASK'
+    price: float
+    size: float
+    distance_from_mid_pct: float
+    obi: float  # Order Book Imbalance
+    timestamp: str
+
+class SetupSignal(BaseModel):
+    """
+    Kompletny sygnał setupu (łączy wszystkie warunki).
+    Używany przez signal_generator.
+    """
+    setup_id: str
+    symbol: str
+    direction: str  # 'LONG' or 'SHORT'
+    
+    # Struktura
+    structure_type: str  # 'EQL', 'EQH', 'SWING_LOW', etc.
+    swing_price: float
+    
+    # Liquidations
+    liquidation_detected: bool
+    liquidation_volume_usd: float
+    
+    # Delta
+    delta_divergence: bool
+    delta_strength: float
+    
+    # DOM
+    dom_wall_detected: bool
+    wall_price: Optional[float] = None
+    wall_size: Optional[float] = None
+    obi: float
+    
+    # Entry details
+    entry_price: float
+    stop_loss: float
+    take_profit: float
+    
+    # Scoring
+    confidence_score: float  # 0-100
+    
+    timestamp: str
