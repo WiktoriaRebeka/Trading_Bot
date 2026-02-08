@@ -1,5 +1,4 @@
 # Lokalizacja: bot_service/app_setup.py
-
 import logging
 import os
 import uuid
@@ -10,12 +9,13 @@ from shared_lib.firebase_client import initialize_firebase
 from bot_service.bigquery_logger import initialize_bigquery
 from bot_service.bybit_executor import BybitExecutor
 from bot_service.bot_logic import handle_immediate_signal, log_closed_positions_pnl, update_filled_orders
-from bot_service.orderflow_client import OrderFlowClient # NOWY IMPORT
-from shared_lib.constants import ORDERFLOW_ENGINE_URL # NOWY IMPORT
+from shared_lib.constants import ORDERFLOW_ENGINE_URL
+
+# NEW imports for OrderFlow async client
+from bot_service.orderflow_client import AsyncOrderFlowClient, SyncOrderFlowAdapter
 
 logger = logging.getLogger(__name__)
 
-# --- Konfiguracja Aplikacji ---
 GCP_PROJECT_ID = os.getenv("GCP_PROJECT")
 USE_TESTNET = os.getenv("USE_TESTNET", "true").lower() == "true"
 
@@ -42,25 +42,20 @@ def register_endpoints(app: Flask):
 
     @app.route('/process-alerts', methods=['POST'])
     def process_alerts_endpoint():
-        # Pobieramy JSON bezpośrednio z żądania (PUSH)
         alert_payload = request.get_json()
-        
         if not alert_payload:
             return jsonify({"status": "error", "message": "No payload received"}), 400
 
         if not app.config.get('INITIALIZATION_SUCCESS', False):
             return jsonify({"status": "error", "message": "Service initializing"}), 503
-        
+
         try:
             executor = app.config.get('BYBIT_EXECUTOR')
-            # Uruchamiamy natychmiastową logikę
             handle_immediate_signal(alert_payload, executor)
-            
             return jsonify({"status": "success"}), 200
         except Exception as e:
             logger.error(f"Błąd endpointu: {e}")
             return jsonify({"status": "error", "message": str(e)}), 500
-
 
     @app.route('/log-pnl', methods=['POST'])
     def log_pnl_endpoint():
@@ -68,55 +63,54 @@ def register_endpoints(app: Flask):
         logger.info(f"--- Rozpoczynam cykl logowania PnL [ID: {cycle_id}] ---")
 
         if not app.config.get('INITIALIZATION_SUCCESS', False):
-             reason = app.config.get('INITIALIZATION_FAILURE_REASON', 'Aplikacja niezainicjalizowana.')
-             logger.error(f"Zatrzymano cykl PnL, ponieważ aplikacja nie jest 'healthy'. Powód: {reason}", extra={"json_fields": {"cycle_id": cycle_id}})
-             return jsonify({"status": "error", "message": f"Service is unhealthy: {reason}"}), 503
+            reason = app.config.get('INITIALIZATION_FAILURE_REASON', 'Aplikacja niezainicjalizowana.')
+            logger.error(f"Zatrzymano cykl PnL, ponieważ aplikacja nie jest 'healthy'. Powód: {reason}", extra={"json_fields": {"cycle_id": cycle_id}})
+            return jsonify({"status": "error", "message": f"Service is unhealthy: {reason}"}), 503
 
         try:
             bybit_executor = app.config.get('BYBIT_EXECUTOR')
             if not bybit_executor:
                 raise RuntimeError("BybitExecutor nie został poprawnie zainicjalizowany.")
-            
             processed_count = log_closed_positions_pnl(bybit_executor)
-            
             logger.info(f"--- Cykl logowania PnL zakończony. Przetworzono {processed_count} rekordów. [ID: {cycle_id}] ---")
             return jsonify({"status": "success", "processed_records": processed_count, "cycle_id": cycle_id}), 200
         except Exception as e:
             logger.error(f"KRYTYCZNY BŁĄD w cyklu logowania PnL: {e}", exc_info=True, extra={"json_fields": {"cycle_id": cycle_id}})
             return jsonify({"status": "error", "message": str(e), "cycle_id": cycle_id}), 500
-    
+
     @app.route('/update-orders', methods=['POST'])
     def update_orders_endpoint():
         cycle_id = str(uuid.uuid4())
-        logger.info(f"--- Rozpoczynam cykl aktualizacji zleceň [ID: {cycle_id}] ---")
+        logger.info(f"--- Rozpoczynam cykl aktualizacji zleceń [ID: {cycle_id}] ---")
 
         if not app.config.get('INITIALIZATION_SUCCESS', False):
             reason = app.config.get('INITIALIZATION_FAILURE_REASON', 'Aplikacja niezainicjalizowana.')
             logger.error(f"Zatrzymano cykl aktualizacji, ponieważ aplikacja nie jest 'healthy'. Powód: {reason}", extra={"json_fields": {"cycle_id": cycle_id}})
             return jsonify({"status": "error", "message": f"Service is unhealthy: {reason}"}), 503
-        
+
         try:
             bybit_executor = app.config.get('BYBIT_EXECUTOR')
             if not bybit_executor:
                 raise RuntimeError("BybitExecutor nie został poprawnie zainicjalizowany.")
-            
             update_filled_orders(bybit_executor)
-
-            logger.info(f"--- Cykl aktualizacji zleceň zakończony pomyślnie [ID: {cycle_id}] ---")
+            logger.info(f"--- Cykl aktualizacji zleceń zakończony pomyślnie [ID: {cycle_id}] ---")
             return jsonify({"status": "success", "cycle_id": cycle_id}), 200
         except Exception as e:
-            logger.error(f"KRYTYCZNY BŁĄD w cyklu aktualizacji zleceň: {e}", exc_info=True, extra={"json_fields": {"cycle_id": cycle_id}})
+            logger.error(f"KRYTYCZNY BŁĄD w cyklu aktualizacji zleceń: {e}", exc_info=True, extra={"json_fields": {"cycle_id": cycle_id}})
             return jsonify({"status": "error", "message": str(e), "cycle_id": cycle_id}), 500
+
 
 def initialize_app_services(app: Flask):
     with app.app_context():
         logger.info("Rozpoczynam konfigurację aplikacji bot_service.")
-        
+
         failure_reasons = []
-        
-        if not initialize_firebase(): failure_reasons.append("Failed to initialize Firebase/Firestore")
-        if not initialize_bigquery(): failure_reasons.append("Failed to initialize BigQuery")
-        
+
+        if not initialize_firebase():
+            failure_reasons.append("Failed to initialize Firebase/Firestore")
+        if not initialize_bigquery():
+            failure_reasons.append("Failed to initialize BigQuery")
+
         if not GCP_PROJECT_ID:
             failure_reasons.append("Zmienna środowiskowa GCP_PROJECT nie jest ustawiona.")
         else:
@@ -128,14 +122,22 @@ def initialize_app_services(app: Flask):
                     executor = BybitExecutor(api_key=api_key, api_secret=api_secret, testnet=USE_TESTNET)
                     app.config['BYBIT_EXECUTOR'] = executor
                     logger.info(f"BybitExecutor pomyślnie zainicjalizowany. Tryb Testnet: {USE_TESTNET}")
-                    
-                    # --- NOWY KROK: Inicjalizacja OrderFlow Client ---
-                    orderflow_url = ORDERFLOW_ENGINE_URL
-                    app.config['ORDERFLOW_CLIENT'] = OrderFlowClient(orderflow_url)
-                    logger.info(f"OrderFlow Client zainicjalizowany z URL: {orderflow_url}")
-                
+
+                    # --- NOWY KROK: Inicjalizacja Async OrderFlow Client ---
+                    orderflow_url = os.getenv("ORDERFLOW_ENGINE_URL", ORDERFLOW_ENGINE_URL)
+                    if orderflow_url:
+                        async_client = AsyncOrderFlowClient(orderflow_url, timeout_s=0.5, max_retries=2)
+                        # create sync adapter for use in synchronous handlers
+                        sync_adapter = SyncOrderFlowAdapter(async_client)
+                        app.config['ORDERFLOW_CLIENT'] = sync_adapter
+                        # store async client and loop for graceful shutdown if needed
+                        app.config['ORDERFLOW_ASYNC_CLIENT'] = async_client
+                        logger.info(f"OrderFlow Client (sync adapter) zainicjalizowany z URL: {orderflow_url}")
+                    else:
+                        logger.warning("ORDERFLOW_ENGINE_URL not set; OrderFlow client not initialized.")
+
                 except Exception as e:
-                    failure_reasons.append(f"Błąd inicjalizacji BybitExecutor: {e}")
+                    failure_reasons.append(f"Błąd inicjalizacji BybitExecutor/OrderFlow: {e}")
             else:
                 failure_reasons.append("Nie udało się pobrać kluczy API z Secret Manager.")
 
@@ -147,3 +149,31 @@ def initialize_app_services(app: Flask):
             final_reason = " & ".join(failure_reasons)
             app.config['INITIALIZATION_FAILURE_REASON'] = final_reason
             logger.critical(f"Krytyczny błąd podczas inicjalizacji. Aplikacja będzie zwracać błędy 503. Powód: {final_reason}")
+
+    # Register teardown to close async client gracefully when the process exits
+    @app.teardown_appcontext
+    def _shutdown_orderflow_client(exception=None):
+        try:
+            async_client = app.config.get('ORDERFLOW_ASYNC_CLIENT')
+            if async_client:
+                # attempt to close gracefully
+                try:
+                    # if running in an event loop, schedule close; otherwise run directly
+                    loop = None
+                    try:
+                        import asyncio
+                        loop = asyncio.get_event_loop()
+                    except Exception:
+                        loop = None
+
+                    if loop and loop.is_running():
+                        # schedule close in running loop
+                        asyncio.run_coroutine_threadsafe(async_client.close(), loop)
+                    else:
+                        # run close synchronously
+                        import asyncio
+                        asyncio.run(async_client.close())
+                except Exception:
+                    logger.exception("Failed to close OrderFlow async client cleanly")
+        except Exception:
+            logger.exception("Error during ORDERFLOW client shutdown hook")
