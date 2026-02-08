@@ -9,11 +9,11 @@ logger = logging.getLogger(__name__)
 
 
 def _get_client() -> firestore.Client:
-    global _firestore_client
-    if _firestore_client is None:
-        _firestore_client = firestore.Client()
-    return _firestore_client
-
+    """
+    V7.6: Pobiera poprawnie skonfigurowanego klienta z shared_lib.
+    Eliminuje błąd NameError oraz 404 Database Not Found.
+    """
+    return get_db()
 # -------------------------
 # Basic helpers
 # -------------------------
