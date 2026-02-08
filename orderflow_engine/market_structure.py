@@ -31,3 +31,25 @@ class MarketStructureEngine:
         if self.last_swing_high and current_price > self.last_swing_high:
             return True
         return False
+
+    def get_swing_strength(self) -> int:
+        """
+        Zwraca 'siłę' swing point (ile razy ten poziom był testowany).
+        
+        Returns:
+            1 = Single swing
+            2 = Double bottom/top
+            3+ = Triple+ (Equal Lows/Highs)
+        """
+        if not self.last_swing_low:
+            return 1
+        
+        # Sprawdź ile świec ma low blisko last_swing_low (tolerance 0.15%)
+        tolerance = 0.0015  # 0.15%
+        
+        touches = 0
+        for candle in self.candles:
+            if abs(candle['low'] - self.last_swing_low) / self.last_swing_low < tolerance:
+                touches += 1
+        
+        return min(touches, 5)  # Cap at 5
