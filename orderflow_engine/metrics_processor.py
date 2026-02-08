@@ -308,3 +308,66 @@ class OrderFlowMetrics:
             "dom": {"obi": self.orderbook_snapshots[symbol].obi if symbol in self.orderbook_snapshots else 0},
             "ticker": self.tickers.get(symbol)
         }
+
+    # ============================================================
+    # === PUBLIC GETTERS FOR INTEGRATION (REQUIRED)
+    # ============================================================
+
+    def get_last_price(self, symbol: str) -> Optional[float]:
+        """Zwraca ostatnią cenę markPrice z tickera."""
+        t = self.tickers.get(symbol)
+        return t['price'] if t else None
+
+    def get_last_funding(self, symbol: str) -> float:
+        """Zwraca ostatni funding rate."""
+        t = self.tickers.get(symbol)
+        return t.get('funding_rate', 0.0) if t else 0.0
+
+    def get_tick_size(self, symbol: str) -> float:
+        """
+        Zwraca tickSize.
+        Jeśli nie ma w tickerze, zwróć 0.5 jako fallback.
+        (Docelowo tickSize powinien być pobierany z Firestore lub Bybit API)
+        """
+        t = self.tickers.get(symbol)
+        return t.get('tick_size', 0.5) if t else 0.5
+
+    def get_recent_liquidations(self, symbol: str, window_sec: int = 60):
+        """Zwraca listę likwidacji w formacie zgodnym z SignalContext."""
+        now_ms = int(time.time() * 1000)
+        cutoff = now_ms - (window_sec * 1000)
+        liqs = self.liquidations.get(symbol, [])
+        out = []
+        for e in liqs:
+            if e.time >= cutoff:
+                out.append({
+                    'side': 'LONG' if e.side == 'Buy' else 'SHORT',
+                    'volume_usd': e.value_usd,
+                    'timestamp': datetime.fromtimestamp(e.time / 1000, tz=timezone.utc)
+                })
+        return out
+
+    def get_recent_deltas(self, symbol: str, limit: int = 10):
+        """Zwraca ostatnie punkty delty w formacie wymaganym przez SignalContext."""
+        hist = list(self.delta_history[symbol])
+        hist = hist[-limit:]
+        out = []
+        for d in hist:
+            out.append({
+                'price': d['price'],
+                'delta': d['delta'],
+                'timestamp': datetime.fromtimestamp(d['timestamp'] / 1000, tz=timezone.utc)
+            })
+        return out
+
+    def get_dom_snapshot(self, symbol: str):
+        """Zwraca snapshot DOM w formacie zgodnym z SignalContext."""
+        snap = self.orderbook_snapshots.get(symbol)
+        if not snap:
+            return {'bids': [], 'asks': [], 'obi': 0.0}
+
+        return {
+            'bids': snap.bids,
+            'asks': snap.asks,
+            'obi': snap.obi
+        }
