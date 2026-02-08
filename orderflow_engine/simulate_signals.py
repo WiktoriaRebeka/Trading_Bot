@@ -3,7 +3,6 @@ import asyncio
 import random
 from datetime import datetime, timedelta
 
-from .integration import process_tick_and_maybe_alert
 from .signal_detector import SwingPoint, LiquidationEvent, DeltaPoint, DomSnapshot
 from . import market_structure, metrics_processor
 
@@ -27,7 +26,6 @@ async def run_sim():
         price = 49950.0 + random.uniform(-10, 20)
         tick_size = 0.5
         funding = metrics_processor._mock_funding
-        await process_tick_and_maybe_alert(symbol, price, tick_size, funding)
         await asyncio.sleep(1)
 
 if __name__ == "__main__":

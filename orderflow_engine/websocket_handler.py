@@ -10,9 +10,7 @@ from typing import List, Dict
 from collections import defaultdict
 from orderflow_engine.config_symbols import ALL_SYMBOLS_FOR_WS
 from orderflow_engine.metrics_processor import OrderFlowMetrics
-
-# integracja: wywołanie procesu decyzyjnego (signal_detector integration)
-from orderflow_engine.integration import process_tick_and_maybe_alert
+from orderflow_engine.integration import SignalContextBuilder
 
 logger = logging.getLogger(__name__)
 
@@ -267,13 +265,6 @@ class MultiConnectionWSManager:
                 funding = 0.0
                 tick_size = 0.0
 
-            if price is not None:
-                # Uruchamiamy asynchronicznie proces decyzyjny (nie blokujemy pętli WS)
-                try:
-                    asyncio.create_task(process_tick_and_maybe_alert(symbol, price, tick_size, funding))
-                except Exception:
-                    logger.exception("Failed to schedule process_tick_and_maybe_alert after orderbook")
-
         # ========================================
         # 4. TICKERS (Price, Funding Rate, OI)
         # ========================================
@@ -305,12 +296,6 @@ class MultiConnectionWSManager:
                 tick_size = self.processor.get_tick_size(symbol)
             except Exception:
                 tick_size = 0.0
-
-            # Nie blokujemy pętli — schedule task
-            try:
-                asyncio.create_task(process_tick_and_maybe_alert(symbol, price, tick_size, funding_rate))
-            except Exception:
-                logger.exception("Failed to schedule process_tick_and_maybe_alert after ticker")
 
         else:
             logger.debug(f"[Conn-{connection_id}] Nieznany topic: {topic}")
