@@ -207,56 +207,49 @@ class OrderFlowMetrics:
     # ========================================
     # 4. EXECUTION & LOGGING
     # ========================================
-    def _execute_signal(self, symbol, direction, level, score, liq_v, div):
-        event_id = f"PY-{symbol}-{int(time.time())}"
-        
-        # Przygotuj dane do BigQuery
-        bq_data = {
-            'setup_id': f"AUTO-{event_id}",
-            'event_id': event_id,
-            'symbol': symbol,
-            'direction': direction,
-            'entry': level,
-            'sl': level * 0.994 if direction == "LONG" else level * 1.006,
-            'tp': level * 1.018 if direction == "LONG" else level * 0.982,
-            'liq_volume': liq_v,
-            'delta_div': div['detected'],
-            'delta_strength': div.get('strength', 0),
-            'obi': self.orderbook_snapshots[symbol].obi if symbol in self.orderbook_snapshots else 0,
-            'wall_detected': True, # Uproszczone na potrzeby logowania
-            'funding_rate': self.tickers[symbol].get('funding_rate', 0),
-            'confidence': score
-        }
-        
-        # 1. Zapis do BigQuery
-        try:
-            self.bq_logger.log_setup_signal(bq_data)
-        except Exception as e:
-            logger.error(f"BQ Log Error: {e}")
+    async def _execute_signal_async(self, symbol: str, direction: str, level: float, score: float, liq_v: float, div: dict):
+            """
+            V6.2: Asynchroniczna wysyłka sygnału. 
+            Zapobiega blokowaniu pętli WebSocket (Low Latency).
+            """
+            import aiohttp
+            event_id = f"PY-{symbol}-{int(time.time())}"
+            
+            # Przygotowanie danych dla bot_service
+            payload = {
+                "event_id": event_id,
+                "signal_id": f"AUTO-{event_id}",
+                "symbol": symbol,
+                "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "direction": direction,
+                "entry": level,
+                "sl": level * 0.994 if direction == "LONG" else level * 1.006,
+                "tp": level * 1.018 if direction == "LONG" else level * 0.982,
+                "risk_pct": 0.6,
+                "rr": 3.0,
+                "structure_state": 1 if direction == "LONG" else -1,
+                "risk_usdt": 10.0,
+                # Przekazujemy surowy kontekst dla analityki
+                "raw_context": {
+                    "confidence_score": score,
+                    "liq_volume_usd": liq_v,
+                    "delta_div_detected": div['detected'],
+                    "delta_strength": div.get('strength', 0)
+                }
+            }
 
-        # 2. Wysyłka do Bot Service
-        payload = {
-            "event_id": event_id,
-            "signal_id": bq_data['setup_id'],
-            "symbol": symbol,
-            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-            "direction": direction,
-            "entry": bq_data['entry'],
-            "sl": bq_data['sl'],
-            "tp": bq_data['tp'],
-            "risk_pct": 0.6,
-            "rr": 3.0,
-            "structure_state": 1 if direction == "LONG" else -1,
-            "risk_usdt": 10.0
-        }
-        
-        try:
-            requests.post("https://trading-bot-service-785819958951.europe-central2.run.app/process-alerts", 
-                          json=payload, timeout=5)
-            logger.warning(f"🚀 {symbol} {direction} SIGNAL SENT | Score: {score:.1f}")
-        except Exception as e:
-            logger.error(f"Execution Error: {e}")
-
+            BOT_URL = "https://trading-bot-service-785819958951.europe-central2.run.app/process-alerts"
+            
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(BOT_URL, json=payload, timeout=5) as resp:
+                        if resp.status == 200:
+                            logger.warning(f"🚀 SYGNAŁ WYSŁANY (ASYNC): {symbol} {direction} | Score: {score:.1f}")
+                        else:
+                            text = await resp.text()
+                            logger.error(f"❌ Bot Service Error {resp.status}: {text}")
+            except Exception as e:
+                logger.error(f"❌ Błąd komunikacji async: {e}")
     # ========================================
     # 5. NARZĘDZIA POMOCNICZE (MATH)
     # ========================================

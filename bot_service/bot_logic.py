@@ -42,156 +42,117 @@ def round_price_by_tick(price: float, tick_size: str, direction: str) -> float:
 # =====================================================================
 # === 2. GŁÓWNY SILNIK (PUSH) ===
 # =====================================================================
-def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor):
+def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor) -> None:
     """
-    OBSŁUGA SYGNAŁU PUSH Sierra Chart (TRYB DRY RUN)
-    
-    ZMIANY W WERSJI 2.0:
-    - Dodana walidacja event_id (nie może być pusty)
-    - Uproszczenie parsowania symbolu (bez split, bo Sierra wysyła czysty ticker)
-    - Fix raw_context: wysyłanie dict zamiast json.dumps()
+    V6.2: Autonomous Execution Handler.
+    Eliminuje legacy Sierra/TV, wymusza integralność event_id i wspiera JSON w BigQuery.
     """
-    symbol_raw = None
     try:
-        # Walidacja payloadu
+        # 1. Walidacja modelu danych (Pydantic wymusza event_id)
         alert = AlertData.model_validate(payload)
-        symbol_raw = alert.symbol
-    
-        symbol = symbol_raw.split('_')[0]   # ADAUSDT_PERP_BINANCE → ADAUSDT
+        symbol = alert.symbol
 
-        logger.info(f"[{symbol}] PUSH: Odebrano {alert.direction} (symbol={symbol_raw})")
-        
-        # NOWA WALIDACJA: event_id nie może być pusty
-        if not alert.event_id or len(alert.event_id.strip()) == 0:
-            logger.error(f"[{symbol}] KRYTYCZNY: event_id jest pusty! Odrzucam sygnał.")
+        # Blokada legacy formatów (np. ADAUSDT_PERP_BINANCE)
+        if "_" in symbol:
+            logger.error(f"[{symbol}] ODRZUCONO: Nieprawidłowy format symbolu (legacy suffix detected).")
             return
-        
-        # Sprawdzenie długości event_id (Bybit orderLinkId max 36 znaków)
-        if len(alert.event_id) > 36:
-            logger.error(f"[{symbol}] BŁĄD: event_id za długi ({len(alert.event_id)} znaków, max 36). Odrzucam sygnał.")
-            return
-        
-        # 1. BLOKADA DOUBLE-TRADE
+
+        logger.info(f"[{symbol}] Rozpoczynam procesowanie sygnału. EventID: {alert.event_id}")
+
+        # 2. Blokada double-trade
         if executor.get_open_position_side(symbol):
-            logger.warning(f"[{symbol}] ODRZUCONO: Pozycja jest już otwarta.")
+            logger.warning(f"[{symbol}] POMINIĘTO: Pozycja jest już otwarta.")
             return
-        
-        # 2. POBRANIE PARAMETRÓW Z FIRESTORE
+
+        # 3. Pobranie zasad z Firestore
         rules = get_instrument_rules().get(symbol)
         if not rules:
-            logger.error(f"[{symbol}] Brak zasad handlu w Firestore dla tego symbolu!")
+            logger.error(f"[{symbol}] BŁĄD: Brak zasad handlu (instrument_rules) w Firestore!")
             return
-        
-        tick_size = rules["tickSize"]
-        
-        # --- NOWY KROK: Pobranie metryk z OrderFlow Engine ---
+
+        tick_size = str(rules["tickSize"])
+        qty_step = str(rules["qtyStep"])
+
+        # 4. Pobranie metryk z OrderFlow Engine
         orderflow_client = current_app.config.get('ORDERFLOW_CLIENT')
-        orderflow_metrics = {}
-        base_symbol = symbol
+        of_metrics: Dict[str, Any] = {}
         if orderflow_client:
-            # Przekazujemy symbol bazowy (bez .P) do OrderFlow API
-            metrics = orderflow_client.get_metrics(base_symbol)
-            if metrics and isinstance(metrics, dict):
-                orderflow_metrics = metrics
-                logger.info(f"[{symbol}] Otrzymane metryki z OrderFlow: {orderflow_metrics}")
-            else:
-                logger.warning(f"[{symbol}] OrderFlow zwrócił nieprawidłowe dane: {metrics}")
-        else:
-            logger.warning(f"[{symbol}] OrderFlow Client nie jest dostępny. Używam wartości domyślnych.")
+            of_metrics = orderflow_client.get_metrics(symbol) or {}
         
-        # 3. ZAOKRĄGLANIE CEN
+        # 5. Precyzyjne zaokrąglanie cen i ilości
         is_long = alert.direction.upper() == "LONG"
-        final_entry = round_price_by_tick(alert.entry, tick_size, 'down' if is_long else 'up')
-        final_sl = round_price_by_tick(alert.sl, tick_size, 'up' if is_long else 'down')
-        final_tp = round_price_by_tick(alert.tp, tick_size, 'down' if is_long else 'up')
-        
-        # 4. OBLICZENIE QTY
-        qty = calculate_position_size(
+        f_entry = round_price_by_tick(alert.entry, tick_size, 'down' if is_long else 'up')
+        f_sl = round_price_by_tick(alert.sl, tick_size, 'up' if is_long else 'down')
+        f_tp = round_price_by_tick(alert.tp, tick_size, 'down' if is_long else 'up')
+
+        raw_qty = calculate_position_size(
             risk_per_trade_usdt=alert.risk_usdt,
-            entry_price=final_entry,
-            sl_price=final_sl,
-            qty_step=rules["qtyStep"]
+            entry_price=f_entry,
+            sl_price=f_sl,
+            qty_step=qty_step
         )
-        
-        if not qty or qty <= 0:
-            logger.error(f"[{symbol}] Błąd obliczeń Qty.")
+        final_qty = round_qty_by_step(raw_qty, qty_step)
+
+        if final_qty <= 0:
+            logger.error(f"[{symbol}] BŁĄD: Wielkość pozycji (Qty) po zaokrągleniu wynosi 0.")
             return
-        
-        # 5. PRZYGOTOWANIE PARAMETRÓW ZLECENIA
-        order_link_id = alert.event_id  # Używamy event_id jako orderLinkId
+
+        # 6. Przygotowanie parametrów Bybit
         order_params = {
             "symbol": symbol,
             "side": "Buy" if is_long else "Sell",
             "orderType": "Limit",
-            "qty": str(qty),
-            "price": str(final_entry),
-            "stopLoss": str(final_sl),
-            "takeProfit": str(final_tp),
-            "orderLinkId": order_link_id
+            "qty": str(final_qty),
+            "price": str(f_entry),
+            "stopLoss": str(f_sl),
+            "takeProfit": str(f_tp),
+            "orderLinkId": alert.event_id  # event_id jako klucz śledzenia
         }
-        
-        # --- BLOKADA WYKONANIA (DRY RUN) ---
-        logger.info(f"[{symbol}] DRY RUN SUCCESS! Zlecenie przygotowane: {order_params}")
-        
-        # Zapis do Firestore
-        state_manager.save_active_order(order_link_id, {
+
+        # DRY RUN LOGIC (Do zmiany na executor.place_order po testach)
+        logger.info(f"[{symbol}] DRY RUN: {order_params}")
+
+        # 7. Zarządzanie stanem (Firestore)
+        state_manager.save_active_order(alert.event_id, {
             "symbol": symbol,
             "status": "DRY RUN LOG",
             "direction": alert.direction.upper(),
-            "planned_qty": qty,
+            "planned_qty": final_qty,
             "params": order_params,
             "created_at": datetime.now(timezone.utc),
-            # Zapisujemy metryki z OrderFlow
-            "m2_delta": orderflow_metrics.get("m2_delta", 0.0),
-            "m5_rs_ratio": orderflow_metrics.get("m5_rs_ratio", 0.0),
+            "m2_delta": of_metrics.get("m2_delta", 0.0),
+            "m5_rs_ratio": of_metrics.get("m5_rs_ratio", 0.0),
+            "event_id": alert.event_id
         })
-        
-# PRZYGOTOWANIE DANYCH DO ANALITYKI (BigQuery)
+
+        # 8. Analityka (BigQuery)
         analysis_data = {
             "event_id": alert.event_id,
             "signal_id": alert.signal_id,
-            "symbol": alert.symbol,
+            "symbol": symbol,
             "timestamp": alert.timestamp,
             "direction": alert.direction.upper(),
-            "entry": final_entry,
-            "sl": final_sl,
-            "tp": final_tp,
+            "entry": f_entry,
+            "sl": f_sl,
+            "tp": f_tp,
             "risk_pct": alert.risk_pct,
             "rr": alert.rr,
             "structure_state": alert.structure_state,
-            "bos_high": alert.bos_high,
-            "bos_low": alert.bos_low,
-            "choch_up": alert.choch_up,
-            "choch_down": alert.choch_down,
-            "liquidity_grab_above": alert.liquidity_grab_above,
-            "liquidity_grab_below": alert.liquidity_grab_below,
-            "liquidity_price": alert.liquidity_price,
-            "eqh_detected": alert.eqh_detected,
-            "eql_detected": alert.eql_detected,
             "risk_usdt": alert.risk_usdt,
-            
-            # --- METRYKI ORDERFLOW (V2.1) ---
-            "m2_delta": orderflow_metrics.get("m2_delta", 0.0),
-            "m5_rs_ratio": orderflow_metrics.get("m5_rs_ratio", 0.0),
-            "funding_rate": orderflow_metrics.get("funding_rate", 0.0),   # NOWE
-            "open_interest": orderflow_metrics.get("open_interest", 0.0), # NOWE
-            
+            "m2_delta": of_metrics.get("m2_delta", 0.0),
+            "m5_rs_ratio": of_metrics.get("m5_rs_ratio", 0.0),
+            "funding_rate": of_metrics.get("funding_rate", 0.0),
+            "open_interest": of_metrics.get("open_interest", 0.0),
             "session": alert.session,
             "minute_of_day": alert.minute_of_day,
             "day_of_week": alert.day_of_week,
-            "second": alert.second,
-            "bar_range": alert.bar_range,
-            "ob_range": alert.ob_range,
-            "swing_range": alert.swing_range,
-            "distance_to_liquidity": alert.distance_to_liquidity,
             "volatility_regime": alert.volatility_regime,
-            "raw_context": json.dumps(alert.raw_context)
+            "raw_context": alert.raw_context  # Przekazujemy dict bezpośrednio dla BQ JSON
         }
-        
-        # Wysyłka do BigQuery
+
         log_analysis_result(analysis_data)
-        logger.info(f"[{symbol}] ANALYTICS: Sygnał zapisany w BigQuery (event_id={alert.event_id}).")
-    
+        logger.info(f"[{symbol}] SUKCES: Sygnał przetworzony i zalogowany.")
+
     except Exception as e:
         logger.error(f"KRYTYCZNY BŁĄD w handle_immediate_signal: {e}", exc_info=True)
 

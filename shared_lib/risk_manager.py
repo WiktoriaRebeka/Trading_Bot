@@ -13,17 +13,21 @@ TOTAL_FEE_PERCENT = FEE_MAKER + FEE_TAKER # 0.075%
 
 SLIPPAGE_BUFFER_PERCENT = 0.0005 # 0.05%
 
-def round_quantity_by_step(quantity: float, qty_step: str) -> float:
+def round_qty_by_step(qty: float, qty_step: str) -> float:
     """
-    Zaokrągla ilość (Qty) w dół do najbliższego dozwolonego kroku (step).
+    V4.1: Precyzyjne zaokrąglanie ilości do kroku giełdy (qtyStep).
+    Używa Decimal dla uniknięcia błędów zmiennoprzecinkowych.
     """
+    if not qty_step or float(qty_step) <= 0:
+        return qty
     try:
-        quantity_decimal = Decimal(str(quantity))
-        step_decimal = Decimal(qty_step)
-        quantized_qty = (quantity_decimal / step_decimal).to_integral_value(rounding=ROUND_DOWN) * step_decimal
-        return float(quantized_qty)
+        qty_dec = Decimal(str(qty))
+        step_dec = Decimal(str(qty_step))
+        # Kwantyzacja: obliczamy ile kroków mieści się w ilości i mnożymy przez krok
+        quantized = (qty_dec / step_dec).to_integral_value(rounding=ROUND_DOWN) * step_dec
+        return float(quantized)
     except Exception as e:
-        logger.error(f"Błąd podczas zaokrąglania ilości: {e}", exc_info=True)
+        logging.getLogger(__name__).error(f"Błąd zaokrąglania QTY: {e}")
         return 0.0
 
 
