@@ -4,11 +4,8 @@ from typing import Dict, Any, Iterable, Optional
 from google.cloud import firestore
 from google.api_core.exceptions import GoogleAPICallError, Aborted
 from datetime import datetime, timezone
-
+from shared_lib.firebase_client import get_db
 logger = logging.getLogger(__name__)
-
-# Firestore client (singleton)
-_firestore_client: Optional[firestore.Client] = None
 
 
 def _get_client() -> firestore.Client:
@@ -17,13 +14,11 @@ def _get_client() -> firestore.Client:
         _firestore_client = firestore.Client()
     return _firestore_client
 
-
 # -------------------------
 # Basic helpers
 # -------------------------
 def _collection_active_orders():
     return _get_client().collection("active_orders")
-
 
 # -------------------------
 # Save with transaction (atomic set/update)
