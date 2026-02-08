@@ -110,134 +110,233 @@ def round_price_by_tick(price: float, tick_size: str, direction: str = "none") -
 # =====================================================================
 # === 3. MAIN SIGNAL HANDLER (Autonomous) ===
 # =====================================================================
-
 def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor) -> None:
-    """Procesuje sygnał wejściowy z silnika OrderFlow (dry-run / prepared execution)."""
     start_ts = datetime.now(timezone.utc)
     event_id = "unknown"
     symbol = None
 
+    # ============================================================
+    # 1. Parse alert
+    # ============================================================
     try:
         alert = AlertData.model_validate(payload)
         event_id = alert.event_id
         symbol = alert.symbol
-
-        if "_" in symbol:
-            log_struct("error", "signal_input", "Legacy symbol rejected", symbol=symbol, event_id=event_id)
-            return
-
-        # 1. Double-trade guard (resilient)
-        try:
-            if call_with_retry(executor.get_open_position_side, symbol):
-                log_struct("warning", "signal_input", "Position already open", symbol=symbol, event_id=event_id)
-                return
-        except Exception as e:
-            # If executor check fails, log and abort to be safe
-            log_struct("error", "signal_input", "Executor check failed", symbol=symbol, event_id=event_id, error=str(e))
-            return
-
-        # 2. Rules & Metrics
-        rules = get_instrument_rules().get(symbol)
-        if not rules:
-            log_struct("error", "signal_input", "Rules missing in Firestore", symbol=symbol, event_id=event_id)
-            return
-
-        tick_size = str(rules.get("tickSize"))
-        qty_step = str(rules.get("qtyStep"))
-
-        # Defensive validation
-        try:
-            if Decimal(str(tick_size)) == 0 or Decimal(str(qty_step)) == 0:
-                log_struct("error", "signal_input", "Invalid tick/qty step in rules", symbol=symbol, event_id=event_id, tick_size=tick_size, qty_step=qty_step)
-                return
-        except Exception as e:
-            log_struct("error", "signal_input", "Invalid rules format", symbol=symbol, event_id=event_id, error=str(e))
-            return
-
-        # 3. Rounding & Sizing
-        is_long = alert.direction.upper() == "LONG"
-        f_entry = round_price_by_tick(alert.entry, tick_size, "down" if is_long else "up")
-        f_sl = round_price_by_tick(alert.sl, tick_size, "up" if is_long else "down")
-        f_tp = round_price_by_tick(alert.tp, tick_size, "down" if is_long else "up")
-
-        raw_qty = calculate_position_size(
-            risk_per_trade_usdt=alert.risk_usdt,
-            entry_price=f_entry,
-            sl_price=f_sl,
-            qty_step=qty_step
-        )
-        final_qty = round_qty_by_step(raw_qty, qty_step)
-
-        log_struct("info", "signal_input", "Qty computed", symbol=symbol, event_id=event_id, raw_qty=float(raw_qty), final_qty=final_qty)
-
-        if final_qty <= 0:
-            log_struct("error", "signal_input", "Final Qty is zero", symbol=symbol, event_id=event_id)
-            return
-
-        # 4. Execution Params
-        order_params = {
-            "symbol": symbol,
-            "side": "Buy" if is_long else "Sell",
-            "orderType": "Limit",
-            "qty": str(final_qty),
-            "price": str(f_entry),
-            "stopLoss": str(f_sl),
-            "takeProfit": str(f_tp),
-            "orderLinkId": event_id
-        }
-
-        # --- DRY RUN ---
-        log_struct("info", "execution", "Dry run prepared", symbol=symbol, event_id=event_id, params=order_params)
-
-        # 5. Persistence (Firestore) - prefer transactional save if available
-        state_payload = {
-            "symbol": symbol,
-            "status": "DRY RUN LOG",
-            "direction": alert.direction.upper(),
-            "planned_qty": final_qty,
-            "params": order_params,
-            "event_id": event_id,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "planned_sl_price": f_sl,
-            "planned_tp_price": f_tp
-        }
-
-        try:
-            # Prefer transactional API in state_manager
-            if hasattr(state_manager, "save_active_order_transactional"):
-                state_manager.save_active_order_transactional(event_id, state_payload)
-            else:
-                # fallback to save with retry inside state_manager
-                state_manager.save_active_order(event_id, state_payload)
-        except Exception as e:
-            log_struct("error", "persistence", "Failed to save active order", symbol=symbol, event_id=event_id, error=str(e))
-            return
-
-        # 6. Analytics (BigQuery) - background to avoid blocking
-        analysis_data = {
-            "event_id": event_id,
-            "signal_id": alert.signal_id,
-            "symbol": symbol,
-            "timestamp": alert.timestamp,
-            "direction": alert.direction.upper(),
-            "entry": f_entry,
-            "sl": f_sl,
-            "tp": f_tp,
-            "risk_pct": alert.risk_pct,
-            "rr": alert.rr,
-            "structure_state": alert.structure_state,
-            "risk_usdt": alert.risk_usdt,
-            "raw_context": alert.raw_context if isinstance(alert.raw_context, dict) else {}
-        }
-
-        _bq_executor.submit(_log_analysis_result_bg, analysis_data)
-
-        duration_ms = int((datetime.now(timezone.utc) - start_ts).total_seconds() * 1000)
-        log_struct("info", "signal_input", "Processing completed", symbol=symbol, event_id=event_id, duration_ms=duration_ms)
-
     except Exception as e:
-        logger.exception(json.dumps({"event_id": event_id, "symbol": symbol, "stage": "handle_immediate_signal", "error": str(e)}))
+        logger.exception(json.dumps({
+            "event_id": event_id,
+            "symbol": symbol,
+            "stage": "alert_validation",
+            "error": str(e)
+        }))
+        return
 
+    # ============================================================
+    # 2. Fetch microstructure context from OrderFlow Engine
+    # ============================================================
+    orderflow_client = current_app.config.get("ORDERFLOW_CLIENT")
+    try:
+        micro_ctx = orderflow_client.get_context(symbol)
+        log_struct(
+            "info", "orderflow_context", "Pobrano kontekst mikrostruktury",
+            symbol=symbol, event_id=event_id, context_available=True
+        )
+    except Exception as e:
+        micro_ctx = None
+        log_struct(
+            "warning", "orderflow_context", "Nie udało się pobrać kontekstu",
+            symbol=symbol, event_id=event_id, error=str(e)
+        )
+
+    # ============================================================
+    # 3. Microstructure filters (safety layer)
+    # ============================================================
+    if micro_ctx:
+        obi = micro_ctx["dom"]["obi"]
+        liq_count = len(micro_ctx["liquidations"])
+        delta_points = micro_ctx["delta_points"]
+        last_delta = delta_points[-1]["delta"] if delta_points else 0
+
+        # 1) OBI filter
+        if abs(obi) < 0.1:
+            log_struct("warning", "context_filter", "OBI zbyt słabe — odrzucam sygnał",
+                       symbol=symbol, event_id=event_id, obi=obi)
+            return
+
+        # 2) Liquidations filter
+        if liq_count < 2:
+            log_struct("warning", "context_filter", "Za mało likwidacji — odrzucam sygnał",
+                       symbol=symbol, event_id=event_id, liq_count=liq_count)
+            return
+
+        # 3) Delta filter
+        if abs(last_delta) < 5000:
+            log_struct("warning", "context_filter", "Delta zbyt słaba — odrzucam sygnał",
+                       symbol=symbol, event_id=event_id, last_delta=last_delta)
+            return
+
+    # ============================================================
+    # 4. Microstructure scoring (redundant safety layer)
+    # ============================================================
+    micro_score = 0
+
+    if micro_ctx:
+        # OBI
+        if abs(micro_ctx["dom"]["obi"]) > 0.25:
+            micro_score += 30
+
+        # Liquidations
+        if len(micro_ctx["liquidations"]) >= 3:
+            micro_score += 30
+
+        # Delta
+        if micro_ctx["delta_points"]:
+            if abs(micro_ctx["delta_points"][-1]["delta"]) > 8000:
+                micro_score += 20
+
+        # Structure
+        if micro_ctx["structure"]["last_swing_low"] or micro_ctx["structure"]["last_swing_high"]:
+            micro_score += 20
+
+    log_struct("info", "micro_score", "Microstructure score computed",
+               symbol=symbol, event_id=event_id, micro_score=micro_score)
+
+    if micro_score < 60:
+        log_struct("warning", "micro_score", "Microstructure score too low — rejecting signal",
+                   symbol=symbol, event_id=event_id, micro_score=micro_score)
+        return
+
+    # ============================================================
+    # 5. Double-trade guard
+    # ============================================================
+    try:
+        if call_with_retry(executor.get_open_position_side, symbol):
+            log_struct("warning", "signal_input", "Position already open",
+                       symbol=symbol, event_id=event_id)
+            return
+    except Exception as e:
+        log_struct("error", "signal_input", "Executor check failed",
+                   symbol=symbol, event_id=event_id, error=str(e))
+        return
+
+    # ============================================================
+    # 6. Rules & tick/qty validation
+    # ============================================================
+    rules = get_instrument_rules().get(symbol)
+    if not rules:
+        log_struct("error", "signal_input", "Rules missing in Firestore",
+                   symbol=symbol, event_id=event_id)
+        return
+
+    tick_size = str(rules.get("tickSize"))
+    qty_step = str(rules.get("qtyStep"))
+
+    try:
+        if Decimal(str(tick_size)) == 0 or Decimal(str(qty_step)) == 0:
+            log_struct("error", "signal_input", "Invalid tick/qty step in rules",
+                       symbol=symbol, event_id=event_id,
+                       tick_size=tick_size, qty_step=qty_step)
+            return
+    except Exception as e:
+        log_struct("error", "signal_input", "Invalid rules format",
+                   symbol=symbol, event_id=event_id, error=str(e))
+        return
+
+    # ============================================================
+    # 7. Rounding & Sizing
+    # ============================================================
+    is_long = alert.direction.upper() == "LONG"
+    f_entry = round_price_by_tick(alert.entry, tick_size, "down" if is_long else "up")
+    f_sl = round_price_by_tick(alert.sl, tick_size, "up" if is_long else "down")
+    f_tp = round_price_by_tick(alert.tp, tick_size, "down" if is_long else "up")
+
+    raw_qty = calculate_position_size(
+        risk_per_trade_usdt=alert.risk_usdt,
+        entry_price=f_entry,
+        sl_price=f_sl,
+        qty_step=qty_step
+    )
+    final_qty = round_qty_by_step(raw_qty, qty_step)
+
+    log_struct("info", "signal_input", "Qty computed",
+               symbol=symbol, event_id=event_id,
+               raw_qty=float(raw_qty), final_qty=final_qty)
+
+    if final_qty <= 0:
+        log_struct("error", "signal_input", "Final Qty is zero",
+                   symbol=symbol, event_id=event_id)
+        return
+
+    # ============================================================
+    # 8. Execution params (DRY RUN)
+    # ============================================================
+    order_params = {
+        "symbol": symbol,
+        "side": "Buy" if is_long else "Sell",
+        "orderType": "Limit",
+        "qty": str(final_qty),
+        "price": str(f_entry),
+        "stopLoss": str(f_sl),
+        "takeProfit": str(f_tp),
+        "orderLinkId": event_id
+    }
+
+    log_struct("info", "execution", "Dry run prepared",
+               symbol=symbol, event_id=event_id, params=order_params)
+
+    # ============================================================
+    # 9. Persistence (Firestore)
+    # ============================================================
+    state_payload = {
+        "symbol": symbol,
+        "status": "DRY RUN LOG",
+        "direction": alert.direction.upper(),
+        "planned_qty": final_qty,
+        "params": order_params,
+        "event_id": event_id,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "planned_sl_price": f_sl,
+        "planned_tp_price": f_tp
+    }
+
+    try:
+        if hasattr(state_manager, "save_active_order_transactional"):
+            state_manager.save_active_order_transactional(event_id, state_payload)
+        else:
+            state_manager.save_active_order(event_id, state_payload)
+    except Exception as e:
+        log_struct("error", "persistence", "Failed to save active order",
+                   symbol=symbol, event_id=event_id, error=str(e))
+        return
+
+    # ============================================================
+    # 10. Analytics (BigQuery)
+    # ============================================================
+    analysis_data = {
+        "event_id": event_id,
+        "signal_id": alert.signal_id,
+        "symbol": symbol,
+        "timestamp": alert.timestamp,
+        "direction": alert.direction.upper(),
+        "entry": f_entry,
+        "sl": f_sl,
+        "tp": f_tp,
+        "risk_pct": alert.risk_pct,
+        "rr": alert.rr,
+        "structure_state": alert.structure_state,
+        "risk_usdt": alert.risk_usdt,
+        "raw_context": alert.raw_context if isinstance(alert.raw_context, dict) else {},
+        "microstructure": micro_ctx if micro_ctx else {}
+    }
+
+    _bq_executor.submit(_log_analysis_result_bg, analysis_data)
+
+    # ============================================================
+    # 11. Final log
+    # ============================================================
+    duration_ms = int((datetime.now(timezone.utc) - start_ts).total_seconds() * 1000)
+    log_struct("info", "signal_input", "Processing completed",
+               symbol=symbol, event_id=event_id, duration_ms=duration_ms)
 
 # =====================================================================
 # === 4. ORDER UPDATER (Management) ===
