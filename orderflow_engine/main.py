@@ -1,56 +1,74 @@
 # orderflow_engine/main.py
-# WERSJA: 5.0 - Używa MultiConnectionWSManager
+# WERSJA: 5.2 - FastAPI + Background Engine
 
 import asyncio
 import logging
-import os
-from websocket_handler import MultiConnectionWSManager
-from metrics_processor import OrderFlowMetrics
-from config_symbols import SYMBOLS_TO_WATCH_CLEAN
-from shared_lib.firebase_client import get_firestore_client
+from fastapi import FastAPI, HTTPException
+from contextlib import asynccontextmanager
 
-# Logging setup
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+# IMPORTY ABSOLUTNE (Klucz do sukcesu w Dockerze)
+from orderflow_engine.websocket_handler import MultiConnectionWSManager
+from orderflow_engine.metrics_processor import OrderFlowMetrics
+from orderflow_engine.config_symbols import SYMBOLS_TO_WATCH_CLEAN
+from shared_lib.firebase_client import initialize_firebase, get_db
+
+# Konfiguracja logowania
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-async def main():
-    """
-    Główny entry point OrderFlow Engine V5.0
-    """
-    logger.info("=" * 60)
-    logger.info("🚀 OrderFlow Engine V5.0 - Institutional Footprint Tracker")
-    logger.info("=" * 60)
+# Globalny procesor metryk
+METRICS_PROCESSOR = None
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Zarządza cyklem życia silnika (Start/Stop)"""
+    global METRICS_PROCESSOR
+    logger.info("🚀 Startowanie OrderFlow Engine V5.2...")
     
-    # Inicjalizacja Firestore
-    try:
-        firestore_client = get_firestore_client()
+    # 1. Firebase
+    if initialize_firebase():
+        firestore_client = get_db()
         logger.info("✅ Firestore połączony")
-    except Exception as e:
-        logger.error(f"❌ Błąd połączenia z Firestore: {e}")
+    else:
+        logger.error("❌ Błąd połączenia z Firestore")
         firestore_client = None
+
+    # 2. Inicjalizacja procesora
+    METRICS_PROCESSOR = OrderFlowMetrics(firestore_client=firestore_client)
     
-    # Inicjalizacja Metrics Processor
-    metrics_processor = OrderFlowMetrics(firestore_client=firestore_client)
-    
-    # Inicjalizacja WebSocket Manager
-    logger.info(f"📡 Inicjalizacja WebSocket dla {len(SYMBOLS_TO_WATCH_CLEAN)} symboli...")
+    # 3. Uruchomienie WebSocketów w tle
     ws_manager = MultiConnectionWSManager(
         symbols=SYMBOLS_TO_WATCH_CLEAN,
-        metrics_processor=metrics_processor
+        metrics_processor=METRICS_PROCESSOR
     )
     
-    # Uruchom wszystkie połączenia
-    try:
-        await ws_manager.start_all_connections()
-    except KeyboardInterrupt:
-        logger.info("⚠️  Otrzymano sygnał zatrzymania...")
-        await ws_manager.shutdown()
-    except Exception as e:
-        logger.error(f"❌ Krytyczny błąd: {e}", exc_info=True)
-        await ws_manager.shutdown()
+    # Tworzymy task w tle, żeby nie blokować serwera API
+    bg_task = asyncio.create_task(ws_manager.start_all_connections())
+    
+    yield  # Tutaj aplikacja "żyje"
+    
+    # 4. Shutdown
+    logger.info("🛑 Zamykanie silnika...")
+    await ws_manager.shutdown()
+    bg_task.cancel()
 
-if __name__ == "__main__":
-    asyncio.run(main())
+# --- Aplikacja FastAPI ---
+app = FastAPI(title="OrderFlow Engine V5.2", lifespan=lifespan)
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy", "engine": "active"}
+
+@app.get("/metrics")
+async def get_metrics(symbol: str):
+    """Endpoint dla Bot Service do pobierania metryk"""
+    if METRICS_PROCESSOR is None:
+        raise HTTPException(status_code=503, detail="Silnik jeszcze się inicjalizuje")
+    
+    symbol_clean = symbol.upper().replace('.P', '')
+    # Wywołujemy funkcję get_full_context, którą dopisaliśmy do metrics_processor.py
+    try:
+        return METRICS_PROCESSOR.get_full_context(symbol_clean)
+    except Exception as e:
+        logger.error(f"Błąd pobierania metryk dla {symbol_clean}: {e}")
+        raise HTTPException(status_code=404, detail=f"Brak danych dla symbolu {symbol_clean}")
