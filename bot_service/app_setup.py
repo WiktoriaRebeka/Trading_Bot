@@ -106,11 +106,13 @@ def initialize_app_services(app: Flask):
 
         failure_reasons = []
 
-        if not initialize_firebase():
+# V8.0: BigQuery nie jest krytyczne dla HEALTH CHECKU (nie blokuje startu)
+        if not initialize_firebase(): 
             failure_reasons.append("Failed to initialize Firebase/Firestore")
+        
+        # Próbujemy zainicjalizować BQ, ale to nie jest krytyczny błąd startowy.
         if not initialize_bigquery():
-            failure_reasons.append("Failed to initialize BigQuery")
-
+             logger.warning("BigQuery initialization failed. Reporting will be skipped, but trading core proceeds.")
         if not GCP_PROJECT_ID:
             failure_reasons.append("Zmienna środowiskowa GCP_PROJECT nie jest ustawiona.")
         else:
