@@ -6,7 +6,7 @@ from typing import Dict, Any, Optional, List
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal, ROUND_DOWN, ROUND_UP, getcontext
 from concurrent.futures import ThreadPoolExecutor
-
+from time import perf_counter
 from flask import current_app
 
 # absolutne importy z shared_lib / bot_service
@@ -110,10 +110,14 @@ def round_price_by_tick(price: float, tick_size: str, direction: str = "none") -
 # =====================================================================
 # === 3. MAIN SIGNAL HANDLER (Autonomous) ===
 # =====================================================================
+
+
+
+
 def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor) -> None:
-    start_ts = datetime.now(timezone.utc)
-    event_id = "unknown"
-    symbol = None
+    start_total = perf_counter()
+    event_id = payload.get("event_id", "unknown")
+    symbol = payload.get("symbol", "unknown")
 
     # ============================================================
     # 1. Parse alert
@@ -123,86 +127,95 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor) ->
         event_id = alert.event_id
         symbol = alert.symbol
     except Exception as e:
-        logger.exception(json.dumps({
-            "event_id": event_id,
-            "symbol": symbol,
-            "stage": "alert_validation",
-            "error": str(e)
-        }))
+        log_struct("error", "alert_validation", "Błąd walidacji payloadu", 
+                   event_id=event_id, symbol=symbol, error=str(e))
         return
 
     # ============================================================
     # 2. Fetch microstructure context from OrderFlow Engine
     # ============================================================
     orderflow_client = current_app.config.get("ORDERFLOW_CLIENT")
+    micro_ctx = None
+    t_ctx_start = perf_counter()
+
+    if not orderflow_client:
+        log_struct("error", "orderflow_context", "ORDERFLOW_CLIENT nie jest zainicjalizowany w app.config!", 
+                   symbol=symbol, event_id=event_id)
+        return
+
     try:
+        # To jest punkt, który może blokować (timeout)
         micro_ctx = orderflow_client.get_context(symbol)
-        log_struct(
-            "info", "orderflow_context", "Pobrano kontekst mikrostruktury",
-            symbol=symbol, event_id=event_id, context_available=True
-        )
+        elapsed_ctx = int((perf_counter() - t_ctx_start) * 1000)
+        
+        if not micro_ctx:
+            log_struct("warning", "orderflow_context", "Silnik zwrócił pusty kontekst (None/Empty)", 
+                       symbol=symbol, event_id=event_id, elapsed_ms=elapsed_ctx)
+            return # PRZERWIJ: Nie handlujemy bez danych o mikrostrukturze
+            
+        log_struct("info", "orderflow_context", "Pobrano kontekst pomyślnie", 
+                   symbol=symbol, event_id=event_id, elapsed_ms=elapsed_ctx)
     except Exception as e:
-        micro_ctx = None
-        log_struct(
-            "warning", "orderflow_context", "Nie udało się pobrać kontekstu",
-            symbol=symbol, event_id=event_id, error=str(e)
-        )
+        elapsed_ctx = int((perf_counter() - t_ctx_start) * 1000)
+        log_struct("error", "orderflow_context", "Krytyczny błąd pobierania kontekstu", 
+                   symbol=symbol, event_id=event_id, error=str(e), elapsed_ms=elapsed_ctx)
+        return
 
     # ============================================================
     # 3. Microstructure filters (safety layer)
     # ============================================================
-    if micro_ctx:
-        obi = micro_ctx["dom"]["obi"]
-        liq_count = len(micro_ctx["liquidations"])
-        delta_points = micro_ctx["delta_points"]
-        last_delta = delta_points[-1]["delta"] if delta_points else 0
+    try:
+        # Pobieranie danych z zabezpieczeniem przed brakiem kluczy
+        dom = micro_ctx.get("dom", {})
+        obi = dom.get("obi", 0)
+        liqs = micro_ctx.get("liquidations", [])
+        liq_count = len(liqs)
+        delta_points = micro_ctx.get("delta_points", [])
+        last_delta = delta_points[-1].get("delta", 0) if delta_points else 0
 
         # 1) OBI filter
         if abs(obi) < 0.1:
-            log_struct("warning", "context_filter", "OBI zbyt słabe — odrzucam sygnał",
+            log_struct("warning", "context_filter", "REJECT: OBI zbyt słabe",
                        symbol=symbol, event_id=event_id, obi=obi)
             return
 
         # 2) Liquidations filter
         if liq_count < 2:
-            log_struct("warning", "context_filter", "Za mało likwidacji — odrzucam sygnał",
+            log_struct("warning", "context_filter", "REJECT: Za mało likwidacji",
                        symbol=symbol, event_id=event_id, liq_count=liq_count)
             return
 
         # 3) Delta filter
         if abs(last_delta) < 5000:
-            log_struct("warning", "context_filter", "Delta zbyt słaba — odrzucam sygnał",
+            log_struct("warning", "context_filter", "REJECT: Delta zbyt słaba",
                        symbol=symbol, event_id=event_id, last_delta=last_delta)
             return
+            
+    except Exception as e:
+        log_struct("error", "context_filter", "Błąd podczas procesowania filtrów", 
+                   symbol=symbol, event_id=event_id, error=str(e))
+        return
 
     # ============================================================
-    # 4. Microstructure scoring (redundant safety layer)
+    # 4. Microstructure scoring
     # ============================================================
     micro_score = 0
-
-    if micro_ctx:
-        # OBI
-        if abs(micro_ctx["dom"]["obi"]) > 0.25:
-            micro_score += 30
-
-        # Liquidations
-        if len(micro_ctx["liquidations"]) >= 3:
-            micro_score += 30
-
-        # Delta
-        if micro_ctx["delta_points"]:
-            if abs(micro_ctx["delta_points"][-1]["delta"]) > 8000:
-                micro_score += 20
-
-        # Structure
-        if micro_ctx["structure"]["last_swing_low"] or micro_ctx["structure"]["last_swing_high"]:
-            micro_score += 20
+    # OBI
+    if abs(obi) > 0.25: micro_score += 30
+    # Liquidations
+    if liq_count >= 3: micro_score += 30
+    # Delta
+    if abs(last_delta) > 8000: micro_score += 20
+    # Structure
+    struct = micro_ctx.get("structure", {})
+    if struct.get("last_swing_low") or struct.get("last_swing_high"):
+        micro_score += 20
 
     log_struct("info", "micro_score", "Microstructure score computed",
                symbol=symbol, event_id=event_id, micro_score=micro_score)
 
     if micro_score < 60:
-        log_struct("warning", "micro_score", "Microstructure score too low — rejecting signal",
+        log_struct("warning", "micro_score", "REJECT: Score zbyt niski",
                    symbol=symbol, event_id=event_id, micro_score=micro_score)
         return
 
@@ -211,11 +224,11 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor) ->
     # ============================================================
     try:
         if call_with_retry(executor.get_open_position_side, symbol):
-            log_struct("warning", "signal_input", "Position already open",
+            log_struct("warning", "signal_input", "REJECT: Pozycja już otwarta",
                        symbol=symbol, event_id=event_id)
             return
     except Exception as e:
-        log_struct("error", "signal_input", "Executor check failed",
+        log_struct("error", "signal_input", "Błąd sprawdzania pozycji u brokera",
                    symbol=symbol, event_id=event_id, error=str(e))
         return
 
@@ -224,47 +237,37 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor) ->
     # ============================================================
     rules = get_instrument_rules().get(symbol)
     if not rules:
-        log_struct("error", "signal_input", "Rules missing in Firestore",
+        log_struct("error", "signal_input", "REJECT: Brak zasad (rules) w Firestore",
                    symbol=symbol, event_id=event_id)
         return
 
     tick_size = str(rules.get("tickSize"))
     qty_step = str(rules.get("qtyStep"))
 
-    try:
-        if Decimal(str(tick_size)) == 0 or Decimal(str(qty_step)) == 0:
-            log_struct("error", "signal_input", "Invalid tick/qty step in rules",
-                       symbol=symbol, event_id=event_id,
-                       tick_size=tick_size, qty_step=qty_step)
-            return
-    except Exception as e:
-        log_struct("error", "signal_input", "Invalid rules format",
-                   symbol=symbol, event_id=event_id, error=str(e))
-        return
-
     # ============================================================
     # 7. Rounding & Sizing
     # ============================================================
-    is_long = alert.direction.upper() == "LONG"
-    f_entry = round_price_by_tick(alert.entry, tick_size, "down" if is_long else "up")
-    f_sl = round_price_by_tick(alert.sl, tick_size, "up" if is_long else "down")
-    f_tp = round_price_by_tick(alert.tp, tick_size, "down" if is_long else "up")
+    try:
+        is_long = alert.direction.upper() == "LONG"
+        f_entry = round_price_by_tick(alert.entry, tick_size, "down" if is_long else "up")
+        f_sl = round_price_by_tick(alert.sl, tick_size, "up" if is_long else "down")
+        f_tp = round_price_by_tick(alert.tp, tick_size, "down" if is_long else "up")
 
-    raw_qty = calculate_position_size(
-        risk_per_trade_usdt=alert.risk_usdt,
-        entry_price=f_entry,
-        sl_price=f_sl,
-        qty_step=qty_step
-    )
-    final_qty = round_qty_by_step(raw_qty, qty_step)
+        raw_qty = calculate_position_size(
+            risk_per_trade_usdt=alert.risk_usdt,
+            entry_price=f_entry,
+            sl_price=f_sl,
+            qty_step=qty_step
+        )
+        final_qty = round_qty_by_step(raw_qty, qty_step)
 
-    log_struct("info", "signal_input", "Qty computed",
-               symbol=symbol, event_id=event_id,
-               raw_qty=float(raw_qty), final_qty=final_qty)
-
-    if final_qty <= 0:
-        log_struct("error", "signal_input", "Final Qty is zero",
-                   symbol=symbol, event_id=event_id)
+        if final_qty <= 0:
+            log_struct("error", "signal_input", "REJECT: Obliczone Qty wynosi 0",
+                       symbol=symbol, event_id=event_id, raw_qty=float(raw_qty))
+            return
+    except Exception as e:
+        log_struct("error", "signal_input", "Błąd obliczeń wielkości pozycji", 
+                   symbol=symbol, event_id=event_id, error=str(e))
         return
 
     # ============================================================
@@ -280,9 +283,6 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor) ->
         "takeProfit": str(f_tp),
         "orderLinkId": event_id
     }
-
-    log_struct("info", "execution", "Dry run prepared",
-               symbol=symbol, event_id=event_id, params=order_params)
 
     # ============================================================
     # 9. Persistence (Firestore)
@@ -305,13 +305,14 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor) ->
         else:
             state_manager.save_active_order(event_id, state_payload)
     except Exception as e:
-        log_struct("error", "persistence", "Failed to save active order",
+        log_struct("error", "persistence", "Błąd zapisu do Firestore",
                    symbol=symbol, event_id=event_id, error=str(e))
         return
 
     # ============================================================
     # 10. Analytics (BigQuery)
     # ============================================================
+    t_bq_start = perf_counter()
     analysis_data = {
         "event_id": event_id,
         "signal_id": alert.signal_id,
@@ -329,14 +330,21 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor) ->
         "microstructure": micro_ctx if micro_ctx else {}
     }
 
-    _bq_executor.submit(_log_analysis_result_bg, analysis_data)
+    try:
+        _bq_executor.submit(_log_analysis_result_bg, analysis_data)
+        elapsed_bq = int((perf_counter() - t_bq_start) * 1000)
+        log_struct("info", "bq_dispatch", "Sygnał wysłany do wątku BigQuery", 
+                   event_id=event_id, elapsed_ms=elapsed_bq)
+    except Exception as e:
+        log_struct("error", "bq_dispatch", "Błąd kolejkowania zapisu do BigQuery", 
+                   event_id=event_id, error=str(e))
 
     # ============================================================
     # 11. Final log
     # ============================================================
-    duration_ms = int((datetime.now(timezone.utc) - start_ts).total_seconds() * 1000)
-    log_struct("info", "signal_input", "Processing completed",
-               symbol=symbol, event_id=event_id, duration_ms=duration_ms)
+    total_duration_ms = int((perf_counter() - start_total) * 1000)
+    log_struct("info", "signal_input", "PROCESOWANIE ZAKOŃCZONE SUKCESEM",
+               symbol=symbol, event_id=event_id, total_duration_ms=total_duration_ms)
 
 # =====================================================================
 # === 4. ORDER UPDATER (Management) ===
