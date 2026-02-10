@@ -19,15 +19,11 @@ METRICS_PROCESSOR: OrderFlowMetrics | None = None
 CONTEXT_BUILDER: SignalContextBuilder | None = None
 
 async def fetch_single_backfill(symbol, processor, backfiller, semaphore):
-    """Pobiera historię dla jednego symbolu z użyciem semafora (limit współbieżności)."""
     async with semaphore:
         try:
-            loop = asyncio.get_event_loop()
-            # Pobieramy M1 i D1 równolegle dla tego samego symbolu
-            h_m1_task = loop.run_in_executor(None, backfiller.fetch_history, symbol, '1', 1000)
-            h_d1_task = loop.run_in_executor(None, backfiller.fetch_history, symbol, 'D', 365)
-            
-            h_m1, h_d1 = await asyncio.gather(h_m1_task, h_d1_task)
+            # TERAZ TO JEST PRAWDZIWE ASYNC
+            h_m1 = await backfiller.fetch_history(symbol, '1', 1000)
+            h_d1 = await backfiller.fetch_history(symbol, 'D', 365)
             
             processor.pre_load_history(symbol, h_m1, h_d1)
             logger.info(f"✅ {symbol} Backfill OK.")
