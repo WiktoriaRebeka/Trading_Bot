@@ -1,10 +1,8 @@
 # orderflow_engine/metrics_processor.py
-# WERSJA: 6.1 - ELITE INSTITUTIONAL ENGINE (Full Logic)
+# WERSJA: 7.1 - ELITE INSTITUTIONAL ENGINE (Full Logic + Ingestion Layer)
 
 import time
 import logging
-import requests
-import json
 from collections import defaultdict, deque
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass
@@ -15,12 +13,9 @@ from orderflow_engine.market_structure import MarketStructureEngine
 from orderflow_engine.candle_builder import CandleBuilder
 from orderflow_engine.bigquery_logger import OrderFlowBigQueryLogger
 from orderflow_engine.confidence_scorer import ConfidenceScorer
+from orderflow_engine.integration import update_symbol_context
 
 logger = logging.getLogger(__name__)
-
-# =====================================================================
-# 1. MODELE DANYCH
-# =====================================================================
 
 @dataclass
 class LiquidationEvent:
@@ -50,39 +45,28 @@ class DOMSnapshot:
     bid_walls: List[OrderBookWall]
     ask_walls: List[OrderBookWall]
 
-# =====================================================================
-# 2. GŁÓWNY PROCESOR METRYK
-# =====================================================================
-
 class OrderFlowMetrics:
     def __init__(self, firestore_client=None):
         self.firestore = firestore_client
-        
-        # --- Silniki i Narzędzia ---
         self.builders = defaultdict(lambda: CandleBuilder(""))
         self.engines = defaultdict(lambda: MarketStructureEngine(lookback_bars=500))
         self.bq_logger = OrderFlowBigQueryLogger()
         self.scorer = ConfidenceScorer()
         
-        # --- Bufory pamięci RAM ---
         self.trades = defaultdict(lambda: deque(maxlen=20000))
         self.tickers = {}
         self.liquidations = defaultdict(list)
         self.orderbook_snapshots = {}
         self.delta_history = defaultdict(lambda: deque(maxlen=200))
         
-        # --- Konfiguracja Thresholdów ---
         self.LIQUIDATION_CASCADE_THRESHOLD_USD = 50000
-        self.DOM_WALL_MULTIPLIER = 3.5 # Wykrywa ściany 3.5x większe od średniej
+        self.DOM_WALL_MULTIPLIER = 3.5 
         self.SIGNAL_COOLDOWN_SEC = 300
-        self.MIN_CONFIDENCE_SCORE = 75 # Tylko setupy 75/100 lub lepsze
+        self.MIN_CONFIDENCE_SCORE = 75 
         self.last_signal_time = defaultdict(float)
 
-        logger.info("✅ OrderFlow V6.1: Institutional Engine Active.")
+        logger.info("✅ OrderFlow V7.1: Institutional Engine Active.")
 
-    # ========================================
-    # BACKFILL & HISTORY
-    # ========================================
     def pre_load_history(self, symbol, history_m1, history_d1):
         engine = self.engines[symbol]
         if history_d1:
@@ -90,209 +74,111 @@ class OrderFlowMetrics:
             engine.major_low = min([k['low'] for k in history_d1])
         for c in history_m1:
             engine.update_candles(c['open'], c['high'], c['low'], c['close'], c['ts'])
-        logger.info(f"✅ {symbol} Backfill OK. SL: {engine.last_swing_low}")
 
-    # ========================================
-    # PROCESSING LIVE DATA
-    # ========================================
     def process_trade(self, timestamp: int, symbol: str, side: str, qty: float, price: float):
         self.trades[symbol].append({'timestamp': timestamp, 'side': side, 'qty': qty, 'price': price})
-        
         builder = self.builders[symbol]
         if not builder.symbol: builder.symbol = symbol
         new_candle = builder.process_tick(price, qty, timestamp)
-        
         if new_candle:
-            self.engines[symbol].update_candles(
-                new_candle['open'], new_candle['high'], 
-                new_candle['low'], new_candle['close'], new_candle['ts']
-            )
-        
-        # Aktualizacja historii delty co każdy trade dla precyzji dywergencji
+            self.engines[symbol].update_candles(new_candle['open'], new_candle['high'], new_candle['low'], new_candle['close'], new_candle['ts'])
         delta = self._calculate_delta_window(symbol, 60)
         self.delta_history[symbol].append({'price': price, 'delta': delta, 'timestamp': timestamp})
 
     def process_ticker(self, symbol, price, funding_rate, open_interest, volume_24h):
-        self.tickers[symbol] = {
-            'price': price, 'funding_rate': funding_rate, 
-            'open_interest': open_interest, 'volume_24h': volume_24h
-        }
-        # 🔥 AKTUALIZACJA CACHE DLA BOTA
+        self.tickers[symbol] = {'price': price, 'funding_rate': funding_rate, 'open_interest': open_interest, 'volume_24h': volume_24h}
         self._refresh_context_cache(symbol)
         self._autonomous_scanner(symbol)
 
     def process_liquidation(self, liq):
-        event = LiquidationEvent(
-            liq['symbol'], liq['side'], liq['price'], 
-            liq['qty'], liq['time'], liq['qty'] * liq['price']
-        )
+        event = LiquidationEvent(liq['symbol'], liq['side'], liq['price'], liq['qty'], liq['time'], liq['qty'] * liq['price'])
         self.liquidations[event.symbol].append(event)
         cutoff = int(time.time() * 1000) - 60000
         self.liquidations[event.symbol] = [e for e in self.liquidations[event.symbol] if e.time > cutoff]
-        
         self._check_liquidation_cascade(event.symbol)
-        # 🔥 AKTUALIZACJA CACHE DLA BOTA
         self._refresh_context_cache(event.symbol)
-
 
     def process_orderbook(self, ob_data: dict):
         symbol = ob_data['symbol']
         bids, asks = ob_data['bids'], ob_data['asks']
         if not bids or not asks: return
-
         bid_vol = sum([p * q for p, q in bids[:10]])
         ask_vol = sum([p * q for p, q in asks[:10]])
         obi = (bid_vol - ask_vol) / (bid_vol + ask_vol) if (bid_vol + ask_vol) > 0 else 0
-
         bid_walls = self._detect_walls(bids, 'bid')
         ask_walls = self._detect_walls(asks, 'ask')
-
         mid_price = (bids[0][0] + asks[0][0]) / 2
         for wall in bid_walls: wall.distance_from_mid = mid_price - wall.price
         for wall in ask_walls: wall.distance_from_mid = wall.price - mid_price
-
-        snapshot = DOMSnapshot(
-            symbol=symbol, bids=bids[:10], asks=asks[:10],
-            timestamp=ob_data['timestamp'], obi=obi,
-            best_bid=bids[0][0], best_ask=asks[0][0],
-            bid_walls=bid_walls, ask_walls=ask_walls
-        )
+        snapshot = DOMSnapshot(symbol=symbol, bids=bids[:10], asks=asks[:10], timestamp=ob_data['timestamp'], obi=obi, best_bid=bids[0][0], best_ask=asks[0][0], bid_walls=bid_walls, ask_walls=ask_walls)
         self.orderbook_snapshots[symbol] = snapshot
-        
-        if bid_walls or ask_walls:
-            self._log_dom_walls_to_bq(symbol, snapshot)
-        
-        # 🔥 AKTUALIZACJA CACHE DLA BOTA
+        if bid_walls or ask_walls: self._log_dom_walls_to_bq(symbol, snapshot)
         self._refresh_context_cache(symbol)
 
-    # ========================================
-    # 3. INGESTION LAYER (WARSTWA INGERENCJI)
-    # ========================================
     def _refresh_context_cache(self, symbol: str):
-        """Buduje gotowy snapshot danych dla bota i wysyła do integration.py"""
+        """WARSTWA INGERENCJI: Aktualizuje globalny cache w integration.py"""
         try:
             ticker = self.tickers.get(symbol, {})
             engine = self.engines[symbol]
             dom = self.orderbook_snapshots.get(symbol)
-            
             ctx = {
                 "symbol": symbol,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "price": ticker.get('price'),
                 "funding_rate": ticker.get('funding_rate', 0.0),
-                "dom": {
-                    "obi": dom.obi if dom else 0.0,
-                    "bid_walls": len(dom.bid_walls) if dom else 0,
-                    "ask_walls": len(dom.ask_walls) if dom else 0
-                },
+                "dom": {"obi": dom.obi if dom else 0.0, "bid_walls": len(dom.bid_walls) if dom else 0, "ask_walls": len(dom.ask_walls) if dom else 0},
                 "liquidations": self.get_recent_liquidations(symbol),
-                "structure": {
-                    "last_swing_high": engine.last_swing_high,
-                    "last_swing_low": engine.last_swing_low
-                },
+                "structure": {"last_swing_high": engine.last_swing_high, "last_swing_low": engine.last_swing_low},
                 "delta_points": self.get_recent_deltas(symbol, limit=5)
             }
-            # Wysyłka do globalnego cache'u w integration.py
             update_symbol_context(symbol, ctx)
         except Exception as e:
-            logger.error(f"❌ Błąd odświeżania cache dla {symbol}: {e}")
+            logger.error(f"❌ Context Cache Error {symbol}: {e}")
 
-
-    # ========================================
-    # 3. AUTONOMOUS SCANNER (IF-THEN-ELSE)
-    # ========================================
     def _autonomous_scanner(self, symbol):
         data = self.tickers.get(symbol)
-        if not data or time.time() - self.last_signal_time[symbol] < self.SIGNAL_COOLDOWN_SEC:
-            return
-        
+        if not data or time.time() - self.last_signal_time[symbol] < self.SIGNAL_COOLDOWN_SEC: return
         price = data['price']
         engine = self.engines[symbol]
-        
-        # LAYER 1: Market Structure (Sweep detection)
         if engine.is_sweep_happening(price):
             direction = "LONG" if price < (engine.last_swing_low or 0) else "SHORT"
             self._validate_setup_layers(symbol, direction, price)
 
     def _validate_setup_layers(self, symbol, direction, price):
-        # LAYER 2: Likwidacje (Paliwo)
         recent_liqs = self.liquidations.get(symbol, [])
         liq_vol = sum([l.value_usd for l in recent_liqs])
-        
-        # LAYER 3: Absorpcja (Delta Divergence)
         div = self._detect_delta_divergence(symbol)
-        
-        # LAYER 4: DOM (Obrona)
         dom = self.orderbook_snapshots.get(symbol)
-        
-        # OBLICZANIE CONFIDENCE SCORE
         confidence = self.scorer.calculate({
-            'liquidation_volume_usd': liq_vol,
-            'delta_divergence': div['detected'],
-            'delta_strength': div.get('strength', 0),
-            'obi': abs(dom.obi) if dom else 0,
-            'dom_wall_detected': len(dom.bid_walls if direction == "LONG" else dom.ask_walls) > 0 if dom else False,
-            'structure_strength': self.engines[symbol].get_swing_strength(),
-            'funding_rate': self.tickers[symbol].get('funding_rate', 0),
-            'direction': direction
+            'liquidation_volume_usd': liq_vol, 'delta_divergence': div['detected'], 'delta_strength': div.get('strength', 0),
+            'obi': abs(dom.obi) if dom else 0, 'dom_wall_detected': len(dom.bid_walls if direction == "LONG" else dom.ask_walls) > 0 if dom else False,
+            'structure_strength': self.engines[symbol].get_swing_strength(), 'funding_rate': self.tickers[symbol].get('funding_rate', 0), 'direction': direction
         })
+        if confidence >= self.MIN_CONFIDENCE_SCORE and liq_vol >= self.LIQUIDATION_CASCADE_THRESHOLD_USD:
+            self.last_signal_time[symbol] = time.time()
+            entry_price = dom.best_bid if (dom and direction == "LONG") else price
+            import asyncio
+            asyncio.create_task(self._execute_signal_async(symbol, direction, entry_price, confidence, liq_vol, div))
 
-        # FINALNA DECYZJA
-        if confidence >= self.MIN_CONFIDENCE_SCORE:
-            if liq_vol >= self.LIQUIDATION_CASCADE_THRESHOLD_USD:
-                self.last_signal_time[symbol] = time.time()
-                entry_price = dom.best_bid if (dom and direction == "LONG") else price
-                self._execute_signal(symbol, direction, entry_price, confidence, liq_vol, div)
-
-    # ========================================
-    # 4. EXECUTION & LOGGING
-    # ========================================
     async def _execute_signal_async(self, symbol: str, direction: str, level: float, score: float, liq_v: float, div: dict):
-            """
-            V6.2: Asynchroniczna wysyłka sygnału. 
-            Zapobiega blokowaniu pętli WebSocket (Low Latency).
-            """
-            import aiohttp
-            event_id = f"PY-{symbol}-{int(time.time())}"
-            
-            # Przygotowanie danych dla bot_service
-            payload = {
-                "event_id": event_id,
-                "signal_id": f"AUTO-{event_id}",
-                "symbol": symbol,
-                "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-                "direction": direction,
-                "entry": level,
-                "sl": level * 0.994 if direction == "LONG" else level * 1.006,
-                "tp": level * 1.018 if direction == "LONG" else level * 0.982,
-                "risk_pct": 0.6,
-                "rr": 3.0,
-                "structure_state": 1 if direction == "LONG" else -1,
-                "risk_usdt": 10.0,
-                # Przekazujemy surowy kontekst dla analityki
-                "raw_context": {
-                    "confidence_score": score,
-                    "liq_volume_usd": liq_v,
-                    "delta_div_detected": div['detected'],
-                    "delta_strength": div.get('strength', 0)
-                }
-            }
+        import aiohttp
+        event_id = f"PY-{symbol}-{int(time.time())}"
+        payload = {
+            "event_id": event_id, "signal_id": f"AUTO-{event_id}", "symbol": symbol,
+            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "direction": direction, "entry": level,
+            "sl": level * 0.994 if direction == "LONG" else level * 1.006,
+            "tp": level * 1.018 if direction == "LONG" else level * 0.982,
+            "risk_pct": 0.6, "rr": 3.0, "structure_state": 1 if direction == "LONG" else -1, "risk_usdt": 10.0,
+            "raw_context": {"confidence_score": score, "liq_volume_usd": liq_v, "delta_div_detected": div['detected'], "delta_strength": div.get('strength', 0)}
+        }
+        BOT_URL = "https://trading-bot-service-785819958951.europe-central2.run.app/process-alerts"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(BOT_URL, json=payload, timeout=5) as resp:
+                    if resp.status == 200: logger.warning(f"🚀 SYGNAŁ WYSŁANY: {symbol} {direction} | Score: {score:.1f}")
+        except Exception as e: logger.error(f"❌ Błąd komunikacji async: {e}")
 
-            BOT_URL = "https://trading-bot-service-785819958951.europe-central2.run.app/process-alerts"
-            
-            try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(BOT_URL, json=payload, timeout=5) as resp:
-                        if resp.status == 200:
-                            logger.warning(f"🚀 SYGNAŁ WYSŁANY (ASYNC): {symbol} {direction} | Score: {score:.1f}")
-                        else:
-                            text = await resp.text()
-                            logger.error(f"❌ Bot Service Error {resp.status}: {text}")
-            except Exception as e:
-                logger.error(f"❌ Błąd komunikacji async: {e}")
-    # ========================================
-    # 5. NARZĘDZIA POMOCNICZE (MATH)
-    # ========================================
     def _calculate_delta_window(self, symbol, seconds):
         cutoff = int(time.time() * 1000) - (seconds * 1000)
         recent = [t for t in self.trades[symbol] if t['timestamp'] > cutoff]
@@ -305,23 +191,15 @@ class OrderFlowMetrics:
         avg_s = sum([q for _, q in levels[:20]]) / 20
         walls = []
         for p, q in levels[:20]:
-            if q > avg_s * self.DOM_WALL_MULTIPLIER:
-                walls.append(OrderBookWall(p, q, 0, side))
+            if q > avg_s * self.DOM_WALL_MULTIPLIER: walls.append(OrderBookWall(p, q, 0, side))
         return walls
 
     def _detect_delta_divergence(self, symbol):
         hist = list(self.delta_history[symbol])
         if len(hist) < 30: return {'detected': False}
-        recent = hist[-30:]
-        prices = [d['price'] for d in recent]
-        deltas = [d['delta'] for d in recent]
-        
-        # Bullish: Cena robi niższy dołek, Delta wyższy
-        if prices[-1] < min(prices[-10:-1]) and deltas[-1] > min(deltas[-10:-1]):
-            return {'detected': True, 'type': 'BULLISH', 'strength': abs(deltas[-1] - min(deltas[-10:-1]))}
-        # Bearish: Cena robi wyższy szczyt, Delta niższy
-        if prices[-1] > max(prices[-10:-1]) and deltas[-1] < max(deltas[-10:-1]):
-            return {'detected': True, 'type': 'BEARISH', 'strength': abs(deltas[-1] - max(deltas[-10:-1]))}
+        recent = hist[-30:]; prices = [d['price'] for d in recent]; deltas = [d['delta'] for d in recent]
+        if prices[-1] < min(prices[-10:-1]) and deltas[-1] > min(deltas[-10:-1]): return {'detected': True, 'type': 'BULLISH', 'strength': abs(deltas[-1] - min(deltas[-10:-1]))}
+        if prices[-1] > max(prices[-10:-1]) and deltas[-1] < max(deltas[-10:-1]): return {'detected': True, 'type': 'BEARISH', 'strength': abs(deltas[-1] - max(deltas[-10:-1]))}
         return {'detected': False}
 
     def _check_liquidation_cascade(self, symbol):
@@ -329,85 +207,31 @@ class OrderFlowMetrics:
         if not liqs: return
         total = sum([e.value_usd for e in liqs])
         if total > self.LIQUIDATION_CASCADE_THRESHOLD_USD:
-            self.bq_logger.log_liquidation_cascade({
-                'event_id': f"LIQ-{int(time.time())}", 'symbol': symbol,
-                'cascade_type': 'LONG_CASCADE' if sum([e.value_usd for e in liqs if e.side=='Buy']) > total*0.7 else 'SHORT_CASCADE',
-                'total_volume_usd': total, 'count': len(liqs)
-            })
+            self.bq_logger.log_liquidation_cascade({'event_id': f"LIQ-{int(time.time())}", 'symbol': symbol, 'cascade_type': 'LONG_CASCADE' if sum([e.value_usd for e in liqs if e.side=='Buy']) > total*0.7 else 'SHORT_CASCADE', 'total_volume_usd': total, 'count': len(liqs)})
 
     def _log_dom_walls_to_bq(self, symbol, snapshot):
         for wall in snapshot.bid_walls + snapshot.ask_walls:
-            if wall.distance_from_mid / wall.price < 0.005:
-                self.bq_logger.log_dom_wall({'symbol': symbol, 'side': wall.side.upper(), 'price': wall.price, 'size': wall.size, 'obi': snapshot.obi})
+            if wall.distance_from_mid / wall.price < 0.005: self.bq_logger.log_dom_wall({'symbol': symbol, 'side': wall.side.upper(), 'price': wall.price, 'size': wall.size, 'obi': snapshot.obi})
+
+    def get_last_price(self, symbol: str) -> Optional[float]:
+        t = self.tickers.get(symbol); return t['price'] if t else None
+
+    def get_last_funding(self, symbol: str) -> float:
+        t = self.tickers.get(symbol); return t.get('funding_rate', 0.0) if t else 0.0
+
+    def get_recent_liquidations(self, symbol: str, window_sec: int = 60):
+        now_ms = int(time.time() * 1000); cutoff = now_ms - (window_sec * 1000); liqs = self.liquidations.get(symbol, [])
+        return [{'side': 'LONG' if e.side == 'Buy' else 'SHORT', 'volume_usd': e.value_usd, 'timestamp': datetime.fromtimestamp(e.time / 1000, tz=timezone.utc)} for e in liqs if e.time >= cutoff]
+
+    def get_recent_deltas(self, symbol: str, limit: int = 10):
+        hist = list(self.delta_history[symbol])[-limit:]
+        return [{'price': d['price'], 'delta': d['delta'], 'timestamp': datetime.fromtimestamp(d['timestamp'] / 1000, tz=timezone.utc)} for d in hist]
+
+    def get_dom_snapshot(self, symbol: str):
+        snap = self.orderbook_snapshots.get(symbol)
+        if not snap: return {'bids': [], 'asks': [], 'obi': 0.0}
+        return {'bids': snap.bids, 'asks': snap.asks, 'obi': snap.obi}
 
     def get_full_context(self, symbol):
         engine = self.engines[symbol]
-        return {
-            "symbol": symbol,
-            "structure": {"last_swing_high": engine.last_swing_high, "last_swing_low": engine.last_swing_low},
-            "dom": {"obi": self.orderbook_snapshots[symbol].obi if symbol in self.orderbook_snapshots else 0},
-            "ticker": self.tickers.get(symbol)
-        }
-
-    # ============================================================
-    # === PUBLIC GETTERS FOR INTEGRATION (REQUIRED)
-    # ============================================================
-
-    def get_last_price(self, symbol: str) -> Optional[float]:
-        """Zwraca ostatnią cenę markPrice z tickera."""
-        t = self.tickers.get(symbol)
-        return t['price'] if t else None
-
-    def get_last_funding(self, symbol: str) -> float:
-        """Zwraca ostatni funding rate."""
-        t = self.tickers.get(symbol)
-        return t.get('funding_rate', 0.0) if t else 0.0
-
-    def get_tick_size(self, symbol: str) -> float:
-        """
-        Zwraca tickSize.
-        Jeśli nie ma w tickerze, zwróć 0.5 jako fallback.
-        (Docelowo tickSize powinien być pobierany z Firestore lub Bybit API)
-        """
-        t = self.tickers.get(symbol)
-        return t.get('tick_size', 0.5) if t else 0.5
-
-    def get_recent_liquidations(self, symbol: str, window_sec: int = 60):
-        """Zwraca listę likwidacji w formacie zgodnym z SignalContext."""
-        now_ms = int(time.time() * 1000)
-        cutoff = now_ms - (window_sec * 1000)
-        liqs = self.liquidations.get(symbol, [])
-        out = []
-        for e in liqs:
-            if e.time >= cutoff:
-                out.append({
-                    'side': 'LONG' if e.side == 'Buy' else 'SHORT',
-                    'volume_usd': e.value_usd,
-                    'timestamp': datetime.fromtimestamp(e.time / 1000, tz=timezone.utc)
-                })
-        return out
-
-    def get_recent_deltas(self, symbol: str, limit: int = 10):
-        """Zwraca ostatnie punkty delty w formacie wymaganym przez SignalContext."""
-        hist = list(self.delta_history[symbol])
-        hist = hist[-limit:]
-        out = []
-        for d in hist:
-            out.append({
-                'price': d['price'],
-                'delta': d['delta'],
-                'timestamp': datetime.fromtimestamp(d['timestamp'] / 1000, tz=timezone.utc)
-            })
-        return out
-
-    def get_dom_snapshot(self, symbol: str):
-        """Zwraca snapshot DOM w formacie zgodnym z SignalContext."""
-        snap = self.orderbook_snapshots.get(symbol)
-        if not snap:
-            return {'bids': [], 'asks': [], 'obi': 0.0}
-
-        return {
-            'bids': snap.bids,
-            'asks': snap.asks,
-            'obi': snap.obi
-        }
+        return {"symbol": symbol, "structure": {"last_swing_high": engine.last_swing_high, "last_swing_low": engine.last_swing_low}, "dom": {"obi": self.orderbook_snapshots[symbol].obi if symbol in self.orderbook_snapshots else 0}, "ticker": self.tickers.get(symbol)}
