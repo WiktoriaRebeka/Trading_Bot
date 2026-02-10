@@ -25,11 +25,6 @@ def initialize_bigquery() -> bool:
         
         dataset_ref = client.dataset(constants.BIGQUERY_DATASET_ID)
         
-        analytical_table_id = constants.BIGQUERY_ANALYTICAL_TABLE_ID
-        ANALYTICAL_TABLE_REF = dataset_ref.table(analytical_table_id)
-        client.get_table(ANALYTICAL_TABLE_REF)
-        logger.info(f"[BQ_INIT] Pomyślnie zweryfikowano tabelę analityczną: {analytical_table_id}")
-        
         real_trades_table_id = constants.BIGQUERY_REAL_TRADES_TABLE_ID
         REAL_TRADES_TABLE_REF = dataset_ref.table(real_trades_table_id)
         client.get_table(REAL_TRADES_TABLE_REF)
