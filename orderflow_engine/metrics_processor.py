@@ -117,6 +117,8 @@ class OrderFlowMetrics:
             'price': price, 'funding_rate': funding_rate, 
             'open_interest': open_interest, 'volume_24h': volume_24h
         }
+        # 🔥 AKTUALIZACJA CACHE DLA BOTA
+        self._refresh_context_cache(symbol)
         self._autonomous_scanner(symbol)
 
     def process_liquidation(self, liq):
@@ -128,8 +130,10 @@ class OrderFlowMetrics:
         cutoff = int(time.time() * 1000) - 60000
         self.liquidations[event.symbol] = [e for e in self.liquidations[event.symbol] if e.time > cutoff]
         
-        # Sprawdzaj kaskady likwidacji niezależnie od setupów (zapis do BQ)
         self._check_liquidation_cascade(event.symbol)
+        # 🔥 AKTUALIZACJA CACHE DLA BOTA
+        self._refresh_context_cache(event.symbol)
+
 
     def process_orderbook(self, ob_data: dict):
         symbol = ob_data['symbol']
@@ -157,6 +161,42 @@ class OrderFlowMetrics:
         
         if bid_walls or ask_walls:
             self._log_dom_walls_to_bq(symbol, snapshot)
+        
+        # 🔥 AKTUALIZACJA CACHE DLA BOTA
+        self._refresh_context_cache(symbol)
+
+    # ========================================
+    # 3. INGESTION LAYER (WARSTWA INGERENCJI)
+    # ========================================
+    def _refresh_context_cache(self, symbol: str):
+        """Buduje gotowy snapshot danych dla bota i wysyła do integration.py"""
+        try:
+            ticker = self.tickers.get(symbol, {})
+            engine = self.engines[symbol]
+            dom = self.orderbook_snapshots.get(symbol)
+            
+            ctx = {
+                "symbol": symbol,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "price": ticker.get('price'),
+                "funding_rate": ticker.get('funding_rate', 0.0),
+                "dom": {
+                    "obi": dom.obi if dom else 0.0,
+                    "bid_walls": len(dom.bid_walls) if dom else 0,
+                    "ask_walls": len(dom.ask_walls) if dom else 0
+                },
+                "liquidations": self.get_recent_liquidations(symbol),
+                "structure": {
+                    "last_swing_high": engine.last_swing_high,
+                    "last_swing_low": engine.last_swing_low
+                },
+                "delta_points": self.get_recent_deltas(symbol, limit=5)
+            }
+            # Wysyłka do globalnego cache'u w integration.py
+            update_symbol_context(symbol, ctx)
+        except Exception as e:
+            logger.error(f"❌ Błąd odświeżania cache dla {symbol}: {e}")
+
 
     # ========================================
     # 3. AUTONOMOUS SCANNER (IF-THEN-ELSE)

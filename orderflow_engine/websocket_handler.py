@@ -74,30 +74,34 @@ class MultiConnectionWSManager:
 
     async def _websocket_listener_for_batch(self, symbols_batch: List[str], connection_id: int):
         async with ClientSession() as session:
-            async with session.ws_connect(
-                BYBIT_WS_URL,
-                heartbeat=20,
-                autoping=True
-            ) as ws:
-
-                topics = self._build_topics_for_symbols(symbols_batch)
-                await ws.send_json({"op": "subscribe", "args": topics})
-                logger.info(f"[Conn-{connection_id}] Subskrypcja aktywna dla: {symbols_batch}")
-
-                async for message in ws:
-                    if not self.is_running: break
-
-                    if message.type == WSMsgType.TEXT:
-                        try:
+            try:
+                async with session.ws_connect(BYBIT_WS_URL, heartbeat=20, autoping=True) as ws:
+                    topics = []
+                    for s in symbols_batch:
+                        topics.extend([f"publicTrade.{s}", f"tickers.{s}", f"liquidation.{s}", f"orderbook.50.{s}"])
+                    
+                    # TO JEST SYGNAŁ DO GIEŁDY
+                    logger.info(f"[Conn-{connection_id}] WYSYŁAM SYGNAŁ SUBSKRYPCJI dla {symbols_batch}")
+                    await ws.send_json({"op": "subscribe", "args": topics})
+                    
+                    async for message in ws:
+                        if not self.is_running: break
+                        if message.type == WSMsgType.TEXT:
                             data = json.loads(message.data)
+                            
+                            # Logowanie potwierdzenia od giełdy
+                            if "op" in data and data.get("success") is True:
+                                logger.info(f"[Conn-{connection_id}] Subskrypcja POTWIERDZONA przez Bybit")
+                                continue
+
                             if "topic" in data:
                                 await self._process_message(data, connection_id)
-                        except Exception as e:
-                            logger.error(f"[Conn-{connection_id}] Błąd dekodowania JSON: {e}")
-
-                    elif message.type in (WSMsgType.CLOSED, WSMsgType.ERROR):
-                        logger.warning(f"[Conn-{connection_id}] Połączenie przerwane (Type: {message.type})")
-                        break
+                        elif message.type in (WSMsgType.CLOSED, WSMsgType.ERROR):
+                            logger.warning(f"[Conn-{connection_id}] Połączenie zamknięte: {message.data}")
+                            break
+            except Exception as e:
+                logger.error(f"[Conn-{connection_id}] Błąd połączenia: {e}")
+                raise # Pozwól pętli nadrzędnej obsłużyć reconnect
 
     def _build_topics_for_symbols(self, symbols: List[str]) -> List[str]:
         topics = []

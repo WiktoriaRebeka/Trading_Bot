@@ -1,10 +1,11 @@
 # orderflow_engine/integration.py
-# WERSJA POPRAWIONA - Kompletny pipeline generowania alertów
+# WERSJA 7.1 - Pełna integracja: Ingestion Layer (Cache) + Signal Detector
 
 import logging
 import time
+import threading
 from datetime import datetime, timezone
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from orderflow_engine.metrics_processor import OrderFlowMetrics
 from orderflow_engine.signal_detector import (
@@ -23,10 +24,28 @@ from orderflow_engine.bot_sender import send_alert_to_bot
 
 logger = logging.getLogger(__name__)
 
+# ============================================================
+# === INGESTION LAYER STATE (Global Cache for Bot Service) ===
+# ============================================================
+_context_lock = threading.Lock()
+_symbol_context_cache: Dict[str, Dict[str, Any]] = {}
+
+def update_symbol_context(symbol: str, ctx: Dict[str, Any]) -> None:
+    """Aktualizuje globalny stan mikrostruktury dla danego symbolu."""
+    with _context_lock:
+        _symbol_context_cache[symbol.upper()] = ctx
+
+def get_global_context(symbol: str) -> Optional[Dict[str, Any]]:
+    """Pobiera najświeższy stan dla bot_service (używane przez API /context)."""
+    with _context_lock:
+        return _symbol_context_cache.get(symbol.upper())
+
 
 class SignalContextBuilder:
     """
-    Buduje pełny kontekst sygnału dla signal_detector.
+    Buduje konteksty:
+    1. Dla bot_service (Ingestion / API)
+    2. Dla signal_detector (Internal Logic)
     """
 
     def __init__(self, metrics: OrderFlowMetrics):
@@ -34,8 +53,15 @@ class SignalContextBuilder:
 
     def build_context(self, symbol: str) -> Dict[str, Any]:
         """
-        Zwraca kontekst mikrostruktury dla bot_service (endpoint /context/{symbol})
+        Zwraca kontekst mikrostruktury dla bot_service (endpoint /context/{symbol}).
+        Najpierw sprawdza cache (Ingestion Layer), jeśli pusty - buduje go z metrics.
         """
+        # 1. Próba pobrania z cache (Low Latency)
+        cached = get_global_context(symbol)
+        if cached:
+            return cached
+
+        # 2. Fallback: Budowanie kontekstu od zera (np. tuż po restarcie silnika)
         now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
         last_price = self.metrics.get_last_price(symbol)
@@ -56,25 +82,22 @@ class SignalContextBuilder:
             "funding_rate": funding,
             "open_interest": ticker.get("open_interest"),
             "volume_24h": ticker.get("volume_24h"),
-
             "structure": {
                 "last_swing_high": structure.get("last_swing_high"),
                 "last_swing_low": structure.get("last_swing_low"),
             },
-
             "dom": {
                 "obi": dom_ctx.get("obi", 0.0),
                 "bids": dom.get("bids", []),
                 "asks": dom.get("asks", []),
             },
-
             "liquidations": liqs,
             "delta_points": deltas,
         }
 
     def build_signal_context(self, symbol: str, direction: str) -> SignalContext:
         """
-        Buduje SignalContext dla signal_detector.
+        Buduje SignalContext dla wewnętrznej logiki signal_detector.
         """
         engine = self.metrics.engines[symbol]
         current_price = self.metrics.get_last_price(symbol)
@@ -136,17 +159,7 @@ class SignalContextBuilder:
 async def evaluate_and_maybe_alert(symbol: str, processor: OrderFlowMetrics):
     """
     Główna funkcja decyzyjna — wywoływana po każdym ticku/orderbooku.
-    
-    KOMPLETNY PIPELINE:
-    1. Sprawdź warunki strukturalne (sweep)
-    2. Sprawdź likwidacje (min 50k USD)
-    3. Sprawdź delta divergence
-    4. Sprawdź DOM wall + OBI
-    5. Oblicz confidence score (min 70)
-    6. Zbuduj alert payload
-    7. Wyślij do bot_service
     """
-    
     builder = SignalContextBuilder(processor)
     
     # Sprawdź obie strony (LONG i SHORT)
@@ -185,7 +198,7 @@ async def evaluate_and_maybe_alert(symbol: str, processor: OrderFlowMetrics):
                 liq_ok=True,
                 delta_ok=True,
                 dom_ok=True,
-                structure_quality=1.0  # TODO: get from MarketStructureEngine
+                structure_quality=1.0
             )
             
             if score < 70:
