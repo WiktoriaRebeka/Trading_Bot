@@ -86,8 +86,12 @@ class OrderFlowMetrics:
         self.delta_history[symbol].append({'price': price, 'delta': delta, 'timestamp': timestamp})
 
     def process_ticker(self, symbol, price, funding_rate, open_interest, volume_24h):
-        self.tickers[symbol] = {'price': price, 'funding_rate': funding_rate, 'open_interest': open_interest, 'volume_24h': volume_24h}
-        self._refresh_context_cache(symbol)
+        self.tickers[symbol] = {
+            'price': price, 'funding_rate': funding_rate, 
+            'open_interest': open_interest, 'volume_24h': volume_24h
+        }
+        # To wywołanie gwarantuje, że bot_service widzi aktualną cenę
+        self._refresh_context_cache(symbol) 
         self._autonomous_scanner(symbol)
 
     def process_liquidation(self, liq):
