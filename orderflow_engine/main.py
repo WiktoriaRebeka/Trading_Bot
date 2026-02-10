@@ -19,76 +19,59 @@ METRICS_PROCESSOR: OrderFlowMetrics | None = None
 CONTEXT_BUILDER: SignalContextBuilder | None = None
 
 async def fetch_single_backfill(symbol, processor, backfiller, semaphore):
+    """Pobiera historię z mechanizmem ponawiania (Retry)."""
     async with semaphore:
-        try:
-            # TERAZ TO JEST PRAWDZIWE ASYNC
-            h_m1 = await backfiller.fetch_history(symbol, '1', 1000)
-            h_d1 = await backfiller.fetch_history(symbol, 'D', 365)
-            
-            processor.pre_load_history(symbol, h_m1, h_d1)
-            logger.info(f"✅ {symbol} Backfill OK.")
-        except Exception as e:
-            logger.error(f"❌ Błąd backfillu dla {symbol}: {e}")
+        for attempt in range(3): # 3 próby dla każdego symbolu
+            try:
+                h_m1 = await backfiller.fetch_history(symbol, '1', 1000)
+                await asyncio.sleep(0.2) # Oddech dla API
+                h_d1 = await backfiller.fetch_history(symbol, 'D', 365)
+                
+                processor.pre_load_history(symbol, h_m1, h_d1)
+                logger.info(f"✅ {symbol} Backfill OK.")
+                return # Sukces
+            except Exception as e:
+                if attempt < 2:
+                    await asyncio.sleep(1 * (attempt + 1)) # Progresywny delay
+                else:
+                    logger.error(f"❌ Błąd backfillu dla {symbol} po 3 próbach: {e}")
 
 async def run_backfill_in_background(processor: OrderFlowMetrics):
-    """Pobiera historię dla wszystkich symboli równolegle (max 5 naraz)."""
     backfiller = HistoryBackfiller()
-    # Limitujemy do 5 zapytań naraz, żeby Bybit nie zablokował nam IP (Rate Limit)
-    semaphore = asyncio.Semaphore(5) 
+    semaphore = asyncio.Semaphore(3) # Zmniejszamy do 3, żeby nie drażnić Bybit Rate Limit
     
-    logger.info(f"📥 Rozpoczynam RÓWNOLEGŁY Backfill dla {len(SYMBOLS_TO_WATCH_CLEAN)} symboli...")
-    
-    tasks = [
-        fetch_single_backfill(symbol, processor, backfiller, semaphore) 
-        for symbol in SYMBOLS_TO_WATCH_CLEAN
-    ]
-    
+    logger.info(f"📥 Rozpoczynam Backfill dla {len(SYMBOLS_TO_WATCH_CLEAN)} symboli...")
+    tasks = [fetch_single_backfill(symbol, processor, backfiller, semaphore) for symbol in SYMBOLS_TO_WATCH_CLEAN]
     await asyncio.gather(*tasks)
     logger.info("🚀 WSZYSTKIE SYMBOLE ZAŁADOWANE. Bot jest w pełni gotowy.")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global METRICS_PROCESSOR, CONTEXT_BUILDER
-    logger.info("🚀 Starting OrderFlow Engine V7.3 (Parallel Startup)...")
+    logger.info("🚀 Starting OrderFlow Engine V7.4 (Resilient Startup)...")
 
-    if not initialize_firebase():
-        logger.error("❌ Błąd krytyczny: Brak połączenia z Firestore.")
-    
+    initialize_firebase()
     METRICS_PROCESSOR = OrderFlowMetrics(firestore_client=get_db())
     CONTEXT_BUILDER = SignalContextBuilder(METRICS_PROCESSOR)
 
-    # 1. Uruchomienie WebSocketów (NATYCHMIAST)
-    ws_manager = MultiConnectionWSManager(
-        symbols=SYMBOLS_TO_WATCH_CLEAN,
-        metrics_processor=METRICS_PROCESSOR,
-    )
+    ws_manager = MultiConnectionWSManager(symbols=SYMBOLS_TO_WATCH_CLEAN, metrics_processor=METRICS_PROCESSOR)
     ws_task = asyncio.create_task(ws_manager.start_all_connections())
-
-    # 2. Uruchomienie Backfillu (RÓWNOLEGLE W TLE)
     backfill_task = asyncio.create_task(run_backfill_in_background(METRICS_PROCESSOR))
 
     yield
-
-    logger.info("🛑 Zamykanie silnika...")
     ws_manager.is_running = False
-    ws_task.cancel()
-    backfill_task.cancel()
 
-app = FastAPI(title="OrderFlow Engine V7.3", lifespan=lifespan)
+app = FastAPI(title="OrderFlow Engine V7.4", lifespan=lifespan)
 
 @app.get("/health")
-async def health():
-    return {"status": "healthy"}
+async def health(): return {"status": "healthy"}
 
 @app.get("/context/{symbol}")
 async def get_signal_context(symbol: str):
     symbol_clean = symbol.upper().replace(".P", "")
     ctx = get_global_context(symbol_clean)
-    if ctx:
-        return JSONResponse(content={"status": "ok", "data": ctx})
-    
+    if ctx: return JSONResponse(content={"status": "ok", "data": ctx})
     if CONTEXT_BUILDER:
         ctx = CONTEXT_BUILDER.build_context(symbol_clean)
         return JSONResponse(content={"status": "ok", "data": ctx})
-    
     raise HTTPException(status_code=503, detail="Engine not ready")
