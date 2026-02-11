@@ -111,142 +111,51 @@ def round_price_by_tick(price: float, tick_size: str, direction: str = "none") -
 # === 3. MAIN SIGNAL HANDLER (Autonomous) ===
 # =====================================================================
 
-
-
-
 def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor) -> None:
     start_total = perf_counter()
     event_id = payload.get("event_id", "unknown")
     symbol = payload.get("symbol", "unknown")
 
-    # ============================================================
-    # 1. Parse alert
-    # ============================================================
+    # 1. Walidacja Alertu
     try:
         alert = AlertData.model_validate(payload)
-        event_id = alert.event_id
-        symbol = alert.symbol
     except Exception as e:
         log_struct("error", "alert_validation", "Błąd walidacji payloadu", 
                    event_id=event_id, symbol=symbol, error=str(e))
         return
 
-    # ============================================================
-    # 2. Fetch microstructure context from OrderFlow Engine
-    # ============================================================
+    # 2. Pobieranie Kontekstu
     orderflow_client = current_app.config.get("ORDERFLOW_CLIENT")
     micro_ctx = None
-    t_ctx_start = perf_counter()
+    if orderflow_client:
+        try:
+            micro_ctx = orderflow_client.get_context(symbol)
+        except Exception as e:
+            log_struct("error", "orderflow_context", "Błąd pobierania kontekstu", 
+                       symbol=symbol, event_id=event_id, error=str(e))
 
-    if not orderflow_client:
-        log_struct("error", "orderflow_context", "ORDERFLOW_CLIENT nie jest zainicjalizowany w app.config!", 
-                   symbol=symbol, event_id=event_id)
-        return
-
-    try:
-        # To jest punkt, który może blokować (timeout)
-        micro_ctx = orderflow_client.get_context(symbol)
-        elapsed_ctx = int((perf_counter() - t_ctx_start) * 1000)
-        
-        if not micro_ctx:
-            log_struct("warning", "orderflow_context", "Silnik zwrócił pusty kontekst (None/Empty)", 
-                       symbol=symbol, event_id=event_id, elapsed_ms=elapsed_ctx)
-            return # PRZERWIJ: Nie handlujemy bez danych o mikrostrukturze
-            
-        log_struct("info", "orderflow_context", "Pobrano kontekst pomyślnie", 
-                   symbol=symbol, event_id=event_id, elapsed_ms=elapsed_ctx)
-    except Exception as e:
-        elapsed_ctx = int((perf_counter() - t_ctx_start) * 1000)
-        log_struct("error", "orderflow_context", "Krytyczny błąd pobierania kontekstu", 
-                   symbol=symbol, event_id=event_id, error=str(e), elapsed_ms=elapsed_ctx)
-        return
-
-    # ============================================================
-    # 3. Microstructure filters (safety layer)
-    # ============================================================
-    try:
-        # Pobieranie danych z zabezpieczeniem przed brakiem kluczy
-        dom = micro_ctx.get("dom", {})
-        obi = dom.get("obi", 0)
-        liqs = micro_ctx.get("liquidations", [])
-        liq_count = len(liqs)
-        delta_points = micro_ctx.get("delta_points", [])
-        last_delta = delta_points[-1].get("delta", 0) if delta_points else 0
-
-        # 1) OBI filter
-        if abs(obi) < 0.1:
-            log_struct("warning", "context_filter", "REJECT: OBI zbyt słabe",
-                       symbol=symbol, event_id=event_id, obi=obi)
-            return
-
-        # 2) Liquidations filter
-        if liq_count < 2:
-            log_struct("warning", "context_filter", "REJECT: Za mało likwidacji",
-                       symbol=symbol, event_id=event_id, liq_count=liq_count)
-            return
-
-        # 3) Delta filter
-        if abs(last_delta) < 5000:
-            log_struct("warning", "context_filter", "REJECT: Delta zbyt słaba",
-                       symbol=symbol, event_id=event_id, last_delta=last_delta)
-            return
-            
-    except Exception as e:
-        log_struct("error", "context_filter", "Błąd podczas procesowania filtrów", 
-                   symbol=symbol, event_id=event_id, error=str(e))
-        return
-
-    # ============================================================
-    # 4. Microstructure scoring
-    # ============================================================
-    micro_score = 0
-    # OBI
-    if abs(obi) > 0.25: micro_score += 30
-    # Liquidations
-    if liq_count >= 3: micro_score += 30
-    # Delta
-    if abs(last_delta) > 8000: micro_score += 20
-    # Structure
-    struct = micro_ctx.get("structure", {})
-    if struct.get("last_swing_low") or struct.get("last_swing_high"):
-        micro_score += 20
-
-    log_struct("info", "micro_score", "Microstructure score computed",
-               symbol=symbol, event_id=event_id, micro_score=micro_score)
-
-    if micro_score < 60:
-        log_struct("warning", "micro_score", "REJECT: Score zbyt niski",
-                   symbol=symbol, event_id=event_id, micro_score=micro_score)
-        return
-
-    # ============================================================
-    # 5. Double-trade guard
-    # ============================================================
+    # 3. Double-trade guard
     try:
         if call_with_retry(executor.get_open_position_side, symbol):
             log_struct("warning", "signal_input", "REJECT: Pozycja już otwarta",
                        symbol=symbol, event_id=event_id)
             return
     except Exception as e:
-        log_struct("error", "signal_input", "Błąd sprawdzania pozycji u brokera",
+        log_struct("error", "signal_input", "Błąd sprawdzania pozycji",
                    symbol=symbol, event_id=event_id, error=str(e))
         return
 
-    # ============================================================
-    # 6. Rules & tick/qty validation
-    # ============================================================
+    # 4. Rules & tick/qty validation
     rules = get_instrument_rules().get(symbol)
     if not rules:
-        log_struct("error", "signal_input", "REJECT: Brak zasad (rules) w Firestore",
+        log_struct("error", "signal_input", "REJECT: Brak zasad w Firestore",
                    symbol=symbol, event_id=event_id)
         return
 
     tick_size = str(rules.get("tickSize"))
     qty_step = str(rules.get("qtyStep"))
 
-    # ============================================================
-    # 7. Rounding & Sizing
-    # ============================================================
+    # 5. Rounding & Sizing
     try:
         is_long = alert.direction.upper() == "LONG"
         f_entry = round_price_by_tick(alert.entry, tick_size, "down" if is_long else "up")
@@ -262,17 +171,15 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor) ->
         final_qty = round_qty_by_step(raw_qty, qty_step)
 
         if final_qty <= 0:
-            log_struct("error", "signal_input", "REJECT: Obliczone Qty wynosi 0",
-                       symbol=symbol, event_id=event_id, raw_qty=float(raw_qty))
+            log_struct("error", "signal_input", "REJECT: Qty wynosi 0",
+                       symbol=symbol, event_id=event_id)
             return
     except Exception as e:
-        log_struct("error", "signal_input", "Błąd obliczeń wielkości pozycji", 
+        log_struct("error", "signal_input", "Błąd obliczeń", 
                    symbol=symbol, event_id=event_id, error=str(e))
         return
 
-    # ============================================================
-    # 8. Execution params (DRY RUN)
-    # ============================================================
+    # 6. Execution params
     order_params = {
         "symbol": symbol,
         "side": "Buy" if is_long else "Sell",
@@ -284,12 +191,10 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor) ->
         "orderLinkId": event_id
     }
 
-    # ============================================================
-    # 9. Persistence (Firestore)
-    # ============================================================
+    # 7. Persistence & Execution (FIX BUG #1)
     state_payload = {
         "symbol": symbol,
-        "status": "DRY RUN LOG",
+        "status": "PLACING",
         "direction": alert.direction.upper(),
         "planned_qty": final_qty,
         "params": order_params,
@@ -300,19 +205,24 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor) ->
     }
 
     try:
-        if hasattr(state_manager, "save_active_order_transactional"):
-            state_manager.save_active_order_transactional(event_id, state_payload)
+        state_manager.save_active_order_transactional(event_id, state_payload)
+        
+        # REALNE WYSŁANIE ZLECENIA
+        result = call_with_retry(executor.place_order, order_params)
+        
+        if result and result.get("orderId"):
+            state_manager.update_active_order(event_id, {"status": "PLACED", "orderId": result.get("orderId")})
+            log_struct("info", "execution", "Zlecenie wysłane pomyślnie", symbol=symbol, event_id=event_id)
         else:
-            state_manager.save_active_order(event_id, state_payload)
+            state_manager.update_active_order(event_id, {"status": "PLACEMENT_FAILED"})
+            log_struct("error", "execution", "Bybit nie zwrócił orderId", symbol=symbol, event_id=event_id)
+            
     except Exception as e:
-        log_struct("error", "persistence", "Błąd zapisu do Firestore",
-                   symbol=symbol, event_id=event_id, error=str(e))
+        state_manager.update_active_order(event_id, {"status": "ERROR", "error": str(e)})
+        log_struct("error", "execution", "Krytyczny błąd egzekucji", symbol=symbol, event_id=event_id, error=str(e))
         return
 
-    # ============================================================
-    # 10. Analytics (BigQuery)
-    # ============================================================
-    t_bq_start = perf_counter()
+    # 8. Analytics (BigQuery)
     analysis_data = {
         "event_id": event_id,
         "signal_id": alert.signal_id,
@@ -329,23 +239,8 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor) ->
         "raw_context": alert.raw_context if isinstance(alert.raw_context, dict) else {},
         "microstructure": micro_ctx if micro_ctx else {}
     }
-
-    try:
-        _bq_executor.submit(_log_analysis_result_bg, analysis_data)
-        elapsed_bq = int((perf_counter() - t_bq_start) * 1000)
-        log_struct("info", "bq_dispatch", "Sygnał wysłany do wątku BigQuery", 
-                   event_id=event_id, elapsed_ms=elapsed_bq)
-    except Exception as e:
-        log_struct("error", "bq_dispatch", "Błąd kolejkowania zapisu do BigQuery", 
-                   event_id=event_id, error=str(e))
-
-    # ============================================================
-    # 11. Final log
-    # ============================================================
-    total_duration_ms = int((perf_counter() - start_total) * 1000)
-    log_struct("info", "signal_input", "PROCESOWANIE ZAKOŃCZONE SUKCESEM",
-               symbol=symbol, event_id=event_id, total_duration_ms=total_duration_ms)
-
+    _bq_executor.submit(_log_analysis_result_bg, analysis_data)
+    
 # =====================================================================
 # === 4. ORDER UPDATER (Management) ===
 # =====================================================================

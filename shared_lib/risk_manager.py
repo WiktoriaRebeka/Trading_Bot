@@ -61,7 +61,7 @@ def calculate_position_size(
     ideal_qty = position_value_usdt / entry_price
     
     # 5. Zaokrąglij ilość w dół do najbliższego dozwolonego kroku
-    final_qty = round_quantity_by_step(ideal_qty, qty_step)
+    final_qty = round_qty_by_step(ideal_qty, qty_step)
     
     logger.info(
         f"Obliczanie wielkości pozycji (z buforem na poślizg): Ryzyko={risk_per_trade_usdt} USDT, "

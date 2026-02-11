@@ -225,12 +225,18 @@ class OrderFlowMetrics:
 
     def get_recent_liquidations(self, symbol: str, window_sec: int = 60):
         now_ms = int(time.time() * 1000); cutoff = now_ms - (window_sec * 1000); liqs = self.liquidations.get(symbol, [])
-        return [{'side': 'LONG' if e.side == 'Buy' else 'SHORT', 'volume_usd': e.value_usd, 'timestamp': datetime.fromtimestamp(e.time / 1000, tz=timezone.utc)} for e in liqs if e.time >= cutoff]
-
+        return [{
+            'side': 'LONG' if e.side == 'Buy' else 'SHORT', 
+            'volume_usd': e.value_usd, 
+            'timestamp': datetime.fromtimestamp(e.time / 1000, tz=timezone.utc).isoformat() # FIX: ISO string
+        } for e in liqs if e.time >= cutoff]
     def get_recent_deltas(self, symbol: str, limit: int = 10):
         hist = list(self.delta_history[symbol])[-limit:]
-        return [{'price': d['price'], 'delta': d['delta'], 'timestamp': datetime.fromtimestamp(d['timestamp'] / 1000, tz=timezone.utc)} for d in hist]
-
+        return [{
+            'price': d['price'], 
+            'delta': d['delta'], 
+            'timestamp': datetime.fromtimestamp(d['timestamp'] / 1000, tz=timezone.utc).isoformat() # FIX: ISO string
+        } for d in hist]
     def get_dom_snapshot(self, symbol: str):
         snap = self.orderbook_snapshots.get(symbol)
         if not snap: return {'bids': [], 'asks': [], 'obi': 0.0}

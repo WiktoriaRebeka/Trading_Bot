@@ -87,8 +87,7 @@ class BybitExecutor:
         api_symbol = symbol.replace('.P', '')
         payload = {"category": "linear", "symbol": api_symbol, "side": params['side'], "orderType": params['orderType'], "qty": str(params['qty'])}
         
-        optional_params = ["price", "stopLoss", "slTriggerBy", "orderLinkId", "timeInForce"]
-        
+        optional_params = ["price", "stopLoss", "takeProfit", "slTriggerBy", "orderLinkId", "timeInForce"]
         for param in optional_params:
             if param in params:
                 payload[param] = str(params[param])

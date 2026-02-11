@@ -10,26 +10,19 @@ class CandleBuilder:
         self.current_candle = None
 
     def process_tick(self, price, qty, ts_ms):
-        """
-        Główna logika lepienia świecy.
-        Zwraca kompletną świecę (dict), jeśli właśnie zamknęła się minuta.
-        """
-        # Oblicz start minuty dla tego ticka (np. 10:05:42 -> 10:05:00)
+
         candle_start_ms = (ts_ms // self.interval) * self.interval
-        
         completed_candle = None
 
         if self.current_candle is None:
-            # Pierwszy tick w historii bota
             self._start_new_candle(candle_start_ms, price)
-        
+            self.current_candle['volume'] += qty
+    
         elif candle_start_ms > self.current_candle['ts']:
-            # Tick należy już do nowej minuty -> Zamykamy starą świecę
             completed_candle = self.current_candle
             self._start_new_candle(candle_start_ms, price)
-        
+            self.current_candle['volume'] += qty
         else:
-            # Kontynuujemy aktualną świecę
             self.current_candle['high'] = max(self.current_candle['high'], price)
             self.current_candle['low'] = min(self.current_candle['low'], price)
             self.current_candle['close'] = price
