@@ -121,9 +121,9 @@ class MultiConnectionWSManager:
         elif topic.startswith("liquidation."):
             liq = payload if isinstance(payload, dict) else payload[0]
             self.processor.process_liquidation({
-                'symbol': liq.get('symbol'), 
-                'side': 'LONG' if liq.get('side') == 'Buy' else 'SHORT',
-                'price': float(liq.get('price', 0)), 
+                'symbol': liq.get('symbol'),
+                'side': liq.get('side'),
+                'price': float(liq.get('price', 0)),
                 'qty': float(liq.get('size', 0)),
                 'time': int(liq.get('updatedTime', time.time() * 1000))
             })

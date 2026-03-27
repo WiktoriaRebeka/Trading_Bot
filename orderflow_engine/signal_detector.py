@@ -81,9 +81,9 @@ def check_liquidations(ctx: SignalContext,
     MAX_LIQUIDATION_AGE_SECONDS = float(lookback_s)
 
     if ctx.direction == "LONG":
-        target_side = "LONG"
+        target_side = "Sell"
     else:
-        target_side = "SHORT"
+        target_side = "Buy"
 
     now_utc = datetime.utcnow()
     vol = 0.0
