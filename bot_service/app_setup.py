@@ -1,4 +1,5 @@
 # Lokalizacja: bot_service/app_setup.py
+import asyncio
 import logging
 import os
 import uuid
@@ -51,7 +52,7 @@ def register_endpoints(app: Flask):
 
         try:
             executor = app.config.get('BYBIT_EXECUTOR')
-            handle_immediate_signal(alert_payload, executor)
+            asyncio.run(handle_immediate_signal(alert_payload, executor))
             return jsonify({"status": "success"}), 200
         except Exception as e:
             logger.error(f"Błąd endpointu: {e}")

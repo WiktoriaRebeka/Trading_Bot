@@ -1,8 +1,9 @@
 # Lokalizacja: bot_service/bot_logic.py
+import asyncio
 import logging
 import json
 import time
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Callable, Awaitable, TypeVar
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal, ROUND_DOWN, ROUND_UP, getcontext
 from concurrent.futures import ThreadPoolExecutor
@@ -55,6 +56,29 @@ def call_with_retry(fn, *args, retries: int = 3, backoff: float = 0.3, **kwargs)
                 logger.error(json.dumps({"stage": "executor_failed", "fn": getattr(fn, "__name__", str(fn)), "error": str(e)}))
                 raise
             time.sleep(backoff * (2 ** (attempt - 1)))
+
+
+T = TypeVar("T")
+
+
+async def async_call_with_retry(
+    factory: Callable[[], Awaitable[T]],
+    *,
+    event_id: str,
+    retries: int = 3,
+    backoff: float = 0.3,
+) -> T:
+    """Retry z asyncio.sleep (bez time.sleep) — każdy log zawiera event_id."""
+    for attempt in range(1, retries + 1):
+        try:
+            return await factory()
+        except Exception as e:
+            logger.warning(f"[{event_id}] async_call_with_retry attempt {attempt}/{retries}: {e}")
+            if attempt >= retries:
+                logger.error(f"[{event_id}] async_call_with_retry exhausted after {retries} attempts: {e}")
+                raise
+            await asyncio.sleep(backoff * (2 ** (attempt - 1)))
+    raise RuntimeError(f"[{event_id}] async_call_with_retry: unreachable")
 
 
 def log_struct(level: str, stage: str, msg: str, **fields):
@@ -111,92 +135,89 @@ def round_price_by_tick(price: float, tick_size: str, direction: str = "none") -
 # === 3. MAIN SIGNAL HANDLER (Autonomous) ===
 # =====================================================================
 
-def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor) -> None:
+async def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor) -> None:
     start_total = perf_counter()
     event_id = payload.get("event_id", "unknown")
     symbol = payload.get("symbol", "unknown")
 
-    # 1. Walidacja Alertu
+    # 1. Walidacja sygnału
     try:
-        alert = AlertData.model_validate(payload)
+        signal = AlertData.model_validate(payload)
     except Exception as e:
-        log_struct("error", "alert_validation", "Błąd walidacji payloadu", 
-                   event_id=event_id, symbol=symbol, error=str(e))
+        logger.error(f"[{event_id}] alert_validation: Błąd walidacji payloadu symbol={symbol} error={e}")
         return
 
-    # 2. Pobieranie Kontekstu
+    # 2. Pobieranie kontekstu OrderFlow (opcjonalnie)
     orderflow_client = current_app.config.get("ORDERFLOW_CLIENT")
     micro_ctx = None
     if orderflow_client:
         try:
-            micro_ctx = orderflow_client.get_context(symbol)
+            micro_ctx = await asyncio.to_thread(orderflow_client.get_context, symbol)
         except Exception as e:
-            log_struct("error", "orderflow_context", "Błąd pobierania kontekstu", 
-                       symbol=symbol, event_id=event_id, error=str(e))
+            logger.error(f"[{event_id}] orderflow_context: Błąd pobierania kontekstu symbol={symbol} error={e}")
 
     # 3. Double-trade guard
     try:
-        if call_with_retry(executor.get_open_position_side, symbol):
-            log_struct("warning", "signal_input", "REJECT: Pozycja już otwarta",
-                       symbol=symbol, event_id=event_id)
+
+        async def _fetch_open_side() -> Optional[str]:
+            return await asyncio.to_thread(executor.get_open_position_side, symbol)
+
+        open_side = await async_call_with_retry(_fetch_open_side, event_id=event_id)
+        if open_side:
+            logger.warning(f"[{event_id}] signal_input: REJECT — pozycja już otwarta symbol={symbol} open_side={open_side}")
             return
     except Exception as e:
-        log_struct("error", "signal_input", "Błąd sprawdzania pozycji",
-                   symbol=symbol, event_id=event_id, error=str(e))
+        logger.error(f"[{event_id}] signal_input: Błąd sprawdzania pozycji symbol={symbol} error={e}")
         return
 
-    # 4. Rules & tick/qty validation
-    rules = get_instrument_rules().get(symbol)
+    # 4. Reguły instrumentu (Firestore)
+    rules_map = await asyncio.to_thread(get_instrument_rules)
+    rules = rules_map.get(symbol)
     if not rules:
-        log_struct("error", "signal_input", "REJECT: Brak zasad w Firestore",
-                   symbol=symbol, event_id=event_id)
+        logger.error(f"[{event_id}] signal_input: REJECT — brak zasad instrument_rules w Firestore symbol={symbol}")
         return
 
     tick_size = str(rules.get("tickSize"))
     qty_step = str(rules.get("qtyStep"))
 
-    # 5. Rounding & Sizing
+    # 5. Kalkulacja rozmiaru pozycji (risk_manager)
     try:
-        is_long = alert.direction.upper() == "LONG"
-        f_entry = round_price_by_tick(alert.entry, tick_size, "down" if is_long else "up")
-        f_sl = round_price_by_tick(alert.sl, tick_size, "up" if is_long else "down")
-        f_tp = round_price_by_tick(alert.tp, tick_size, "down" if is_long else "up")
+        is_long = signal.direction.upper() == "LONG"
+        f_entry = round_price_by_tick(signal.entry, tick_size, "down" if is_long else "up")
+        f_sl = round_price_by_tick(signal.sl, tick_size, "up" if is_long else "down")
+        f_tp = round_price_by_tick(signal.tp, tick_size, "down" if is_long else "up")
 
         raw_qty = calculate_position_size(
-            risk_per_trade_usdt=alert.risk_usdt,
+            risk_per_trade_usdt=signal.risk_usdt,
             entry_price=f_entry,
             sl_price=f_sl,
             qty_step=qty_step
         )
-        final_qty = round_qty_by_step(raw_qty, qty_step)
+        calculated_qty = round_qty_by_step(raw_qty, qty_step)
 
-        if final_qty <= 0:
-            log_struct("error", "signal_input", "REJECT: Qty wynosi 0",
-                       symbol=symbol, event_id=event_id)
+        if calculated_qty <= 0:
+            logger.error(f"[{event_id}] signal_input: REJECT — qty wynosi 0 symbol={symbol}")
             return
     except Exception as e:
-        log_struct("error", "signal_input", "Błąd obliczeń", 
-                   symbol=symbol, event_id=event_id, error=str(e))
+        logger.error(f"[{event_id}] signal_input: Błąd obliczeń rozmiaru symbol={symbol} error={e}")
         return
 
-    # 6. Execution params
+    # 6. Parametry zlecenia (Market) + stan Firestore
     order_params = {
         "symbol": symbol,
         "side": "Buy" if is_long else "Sell",
-        "orderType": "Limit",
-        "qty": str(final_qty),
-        "price": str(f_entry),
+        "orderType": "Market",
+        "qty": str(calculated_qty),
         "stopLoss": str(f_sl),
         "takeProfit": str(f_tp),
         "orderLinkId": event_id
     }
 
-    # 7. Persistence & Execution (FIX BUG #1)
     state_payload = {
         "symbol": symbol,
         "status": "PLACING",
-        "direction": alert.direction.upper(),
-        "planned_qty": final_qty,
+        "direction": signal.direction.upper(),
+        "planned_qty": calculated_qty,
         "params": order_params,
         "event_id": event_id,
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -204,42 +225,70 @@ def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor) ->
         "planned_tp_price": f_tp
     }
 
+    await asyncio.to_thread(state_manager.save_active_order_transactional, event_id, state_payload)
+    logger.info(f"[{event_id}] state: zapisano active_order PLACING (Market) symbol={symbol}")
+
+    # 7. Egzekucja: async place_order (HTTP w wątku w executorze)
     try:
-        state_manager.save_active_order_transactional(event_id, state_payload)
-        
-        # REALNE WYSŁANIE ZLECENIA
-        result = call_with_retry(executor.place_order, order_params)
-        
-        if result and result.get("orderId"):
-            state_manager.update_active_order(event_id, {"status": "PLACED", "orderId": result.get("orderId")})
-            log_struct("info", "execution", "Zlecenie wysłane pomyślnie", symbol=symbol, event_id=event_id)
+
+        async def _place() -> Optional[Dict[str, str]]:
+            return await executor.place_order(
+                symbol=signal.symbol,
+                side="Buy" if is_long else "Sell",
+                qty=calculated_qty,
+                order_type="Market",
+                take_profit=f_tp,
+                stop_loss=f_sl,
+                event_id=event_id,
+            )
+
+        order_result = await async_call_with_retry(_place, event_id=event_id)
+        logger.info(f"[{event_id}] place_order result: {order_result}")
+
+        if order_result and order_result.get("orderId"):
+            await asyncio.to_thread(
+                state_manager.update_active_order,
+                event_id,
+                {"status": "PLACED", "orderId": order_result.get("orderId")},
+            )
+            logger.info(f"[{event_id}] execution: zlecenie Market wysłane orderId={order_result.get('orderId')} symbol={symbol}")
         else:
-            state_manager.update_active_order(event_id, {"status": "PLACEMENT_FAILED"})
-            log_struct("error", "execution", "Bybit nie zwrócił orderId", symbol=symbol, event_id=event_id)
-            
+            await asyncio.to_thread(
+                state_manager.update_active_order,
+                event_id,
+                {"status": "PLACEMENT_FAILED"},
+            )
+            logger.error(f"[{event_id}] execution: Bybit nie zwrócił orderId symbol={symbol}")
+
     except Exception as e:
-        state_manager.update_active_order(event_id, {"status": "ERROR", "error": str(e)})
-        log_struct("error", "execution", "Krytyczny błąd egzekucji", symbol=symbol, event_id=event_id, error=str(e))
+        await asyncio.to_thread(
+            state_manager.update_active_order,
+            event_id,
+            {"status": "ERROR", "error": str(e)},
+        )
+        logger.error(f"[{event_id}] execution: krytyczny błąd egzekucji symbol={symbol} error={e}")
         return
 
-    # 8. Analytics (BigQuery)
+    # 8. Analytics (BigQuery) — cykl log-pnl pozostaje osobno (/log-pnl)
     analysis_data = {
         "event_id": event_id,
-        "signal_id": alert.signal_id,
+        "signal_id": signal.signal_id,
         "symbol": symbol,
-        "timestamp": alert.timestamp,
-        "direction": alert.direction.upper(),
+        "timestamp": signal.timestamp,
+        "direction": signal.direction.upper(),
         "entry": f_entry,
         "sl": f_sl,
         "tp": f_tp,
-        "risk_pct": alert.risk_pct,
-        "rr": alert.rr,
-        "structure_state": alert.structure_state,
-        "risk_usdt": alert.risk_usdt,
-        "raw_context": alert.raw_context if isinstance(alert.raw_context, dict) else {},
+        "risk_pct": signal.risk_pct,
+        "rr": signal.rr,
+        "structure_state": signal.structure_state,
+        "risk_usdt": signal.risk_usdt,
+        "raw_context": signal.raw_context if isinstance(signal.raw_context, dict) else {},
         "microstructure": micro_ctx if micro_ctx else {}
     }
     _bq_executor.submit(_log_analysis_result_bg, analysis_data)
+    elapsed_ms = (perf_counter() - start_total) * 1000.0
+    logger.info(f"[{event_id}] handle_immediate_signal zakończone w {elapsed_ms:.1f} ms")
     
 # =====================================================================
 # === 4. ORDER UPDATER (Management) ===

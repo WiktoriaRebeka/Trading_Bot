@@ -1,5 +1,6 @@
 # Lokalizacja: bot_service/bybit_executor.py
 
+import asyncio
 import logging
 import time
 import hmac
@@ -73,7 +74,7 @@ class BybitExecutor:
             logger.error(f"Nieoczekiwany błąd w _send_request: {e}", exc_info=True)
             raise
   
-    def place_order(self, params: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    def place_order_sync(self, params: Dict[str, Any]) -> Optional[Dict[str, str]]:
         symbol = params.get('symbol')
         if not symbol:
             logger.error("Brak 'symbol' w parametrach zlecenia.")
@@ -105,6 +106,31 @@ class BybitExecutor:
         except Exception as e:
             logger.critical(f"[{symbol}] KRYTYCZNY BŁĄD podczas składania zlecenia: {e}", exc_info=True)
             raise
+
+    async def place_order(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        qty: float,
+        order_type: str = "Market",
+        take_profit: Optional[float] = None,
+        stop_loss: Optional[float] = None,
+        event_id: Optional[str] = None,
+    ) -> Optional[Dict[str, str]]:
+        params: Dict[str, Any] = {
+            "symbol": symbol,
+            "side": side,
+            "orderType": order_type,
+            "qty": qty,
+        }
+        if take_profit is not None:
+            params["takeProfit"] = take_profit
+        if stop_loss is not None:
+            params["stopLoss"] = stop_loss
+        if event_id:
+            params["orderLinkId"] = event_id
+        return await asyncio.to_thread(self.place_order_sync, params)
 
     def set_trailing_stop_for_position(self, symbol: str, trailing_stop: str) -> bool:
         api_symbol = symbol.replace('.P', '')
