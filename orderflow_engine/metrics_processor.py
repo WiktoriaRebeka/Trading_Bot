@@ -1,6 +1,7 @@
 # orderflow_engine/metrics_processor.py
 # WERSJA: 7.1 - ELITE INSTITUTIONAL ENGINE (Full Logic + Ingestion Layer)
 
+import os
 import time
 import logging
 from collections import defaultdict, deque
@@ -64,6 +65,12 @@ class OrderFlowMetrics:
         self.SIGNAL_COOLDOWN_SEC = 300
         self.MIN_CONFIDENCE_SCORE = 75 
         self.last_signal_time = defaultdict(float)
+
+        self.bot_url = os.environ.get(
+            "BOT_SERVICE_URL",
+            "https://trading-bot-service-785819958951.europe-central2.run.app/process-alerts"
+        )
+        logger.info(f"[MetricsProcessor] BOT_SERVICE_URL={'env' if os.environ.get('BOT_SERVICE_URL') else 'fallback'}: {self.bot_url}")
 
         logger.info("✅ OrderFlow V7.1: Institutional Engine Active.")
 
@@ -176,7 +183,7 @@ class OrderFlowMetrics:
             "risk_pct": 0.6, "rr": 3.0, "structure_state": 1 if direction == "LONG" else -1, "risk_usdt": 10.0,
             "raw_context": {"confidence_score": score, "liq_volume_usd": liq_v, "delta_div_detected": div['detected'], "delta_strength": div.get('strength', 0)}
         }
-        BOT_URL = "https://trading-bot-service-785819958951.europe-central2.run.app/process-alerts"
+        BOT_URL = self.bot_url
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(BOT_URL, json=payload, timeout=5) as resp:
