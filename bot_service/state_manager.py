@@ -120,7 +120,9 @@ def get_active_order_by_sl_order_id(sl_order_id: str) -> Optional[Dict[str, Any]
         q = _collection_active_orders().where("slOrderId", "==", sl_order_id).limit(1)
         docs = list(q.stream())
         if docs:
-            return docs[0].to_dict()
+            data = docs[0].to_dict()
+            data['id'] = docs[0].id
+            return data
         return None
     except Exception as e:
         logger.exception(f"[state_manager] Failed to get active order by slOrderId {sl_order_id}: {e}")
@@ -152,7 +154,9 @@ def get_latest_active_order_for_symbol(symbol: str, side: str) -> Optional[Dict[
         q = _collection_active_orders().where("symbol", "==", symbol).where("direction", "==", side).order_by("created_at", direction=firestore.Query.DESCENDING).limit(1)
         docs = list(q.stream())
         if docs:
-            return docs[0].to_dict()
+            data = docs[0].to_dict()
+            data['id'] = docs[0].id
+            return data
         return None
     except Exception as e:
         logger.exception(f"[state_manager] Failed to get latest active order for {symbol}: {e}")
