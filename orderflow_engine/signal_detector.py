@@ -3,9 +3,12 @@
 # ============================================
 
 from dataclasses import dataclass
-from typing import List, Literal, Optional
-from datetime import datetime, timedelta
+from typing import Any, Dict, List, Literal, Optional
+from datetime import datetime
+import logging
 import uuid
+
+logger = logging.getLogger(__name__)
 
 Direction = Literal["LONG", "SHORT"]
 
@@ -43,10 +46,11 @@ class DomSnapshot:
 
 @dataclass
 class SignalContext:
+    symbol: str
     direction: Direction
     current_price: float
     swing_point: SwingPoint
-    liquidations: List[LiquidationEvent]
+    liquidations: List[Dict[str, Any]]
     recent_deltas: List[DeltaPoint]
     dom_snapshot: DomSnapshot
     funding_rate: float
@@ -74,22 +78,50 @@ def detect_liquidity_sweep(ctx: SignalContext) -> bool:
 def check_liquidations(ctx: SignalContext,
                        lookback_s: int = 60,
                        min_volume_usd: float = 50_000.0) -> bool:
-
-    now = datetime.utcnow()
-    cutoff = now - timedelta(seconds=lookback_s)
+    MAX_LIQUIDATION_AGE_SECONDS = float(lookback_s)
 
     if ctx.direction == "LONG":
-        side = "LONG"
+        target_side = "LONG"
     else:
-        side = "SHORT"
+        target_side = "SHORT"
 
-    vol = sum(
-        l.volume_usd
-        for l in ctx.liquidations
-        if l.side == side and l.timestamp >= cutoff
-    )
+    now_utc = datetime.utcnow()
+    vol = 0.0
+    symbol = ctx.symbol
 
-    return vol >= min_volume_usd
+    for liquidation_data in ctx.liquidations:
+        liq_time_ms = int(liquidation_data.get("T") or liquidation_data.get("time") or 0)
+        event_id = f"liq_{symbol}_{liq_time_ms}"
+
+        if liquidation_data.get("side") != target_side:
+            logger.debug(
+                f"[{event_id}] check_liquidations: skip — side mismatch (want {target_side})"
+            )
+            continue
+
+        liq_time = datetime.utcfromtimestamp(liq_time_ms / 1000.0)
+        age_seconds = (now_utc - liq_time).total_seconds()
+
+        if age_seconds > MAX_LIQUIDATION_AGE_SECONDS:
+            logger.info(
+                f"[{event_id}] check_liquidations: excluded — age_seconds={age_seconds:.3f} "
+                f"> MAX_LIQUIDATION_AGE_SECONDS={MAX_LIQUIDATION_AGE_SECONDS}"
+            )
+            continue
+
+        vol += float(liquidation_data.get("volume_usd", 0.0))
+
+    ok = vol >= min_volume_usd
+    summary_eid = f"liq_{symbol}_check_{int(now_utc.timestamp() * 1000)}"
+    if not ok:
+        logger.info(
+            f"[{summary_eid}] check_liquidations: volume_usd={vol:.2f} < min_volume_usd={min_volume_usd}"
+        )
+    else:
+        logger.info(
+            f"[{summary_eid}] check_liquidations: pass — volume_usd={vol:.2f} >= min_volume_usd={min_volume_usd}"
+        )
+    return ok
 
 
 # ============================================================
@@ -240,7 +272,7 @@ def build_alert_payload(symbol: str,
         "structure_state": "SWEEP",
         "raw_context": {
             "sweep_price": ctx.swing_point.price,
-            "liquidations": [l.__dict__ for l in ctx.liquidations],
+            "liquidations": list(ctx.liquidations),
             "deltas": [d.__dict__ for d in ctx.recent_deltas],
             "obi": ctx.dom_snapshot.obi,
             "funding_rate": ctx.funding_rate

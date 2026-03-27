@@ -11,7 +11,7 @@ from typing import Dict, Any, Optional
 from orderflow_engine.signal_detector import (
     detect_liquidity_sweep, check_liquidations, check_delta_divergence,
     check_dom_wall, compute_confidence_score, SignalContext, SwingPoint,
-    LiquidationEvent, DeltaPoint, DomSnapshot
+    DeltaPoint, DomSnapshot
 )
 from orderflow_engine.bot_sender import send_alert_to_bot
 
@@ -68,9 +68,10 @@ class SignalContextBuilder:
         dom_raw = self.metrics.get_dom_snapshot(symbol)
         
         return SignalContext(
+            symbol=symbol,
             direction=direction, current_price=current_price,
             swing_point=SwingPoint(price=swing_price, timestamp=datetime.now(timezone.utc)),
-            liquidations=[LiquidationEvent(side=l['side'], volume_usd=l['volume_usd'], timestamp=l['timestamp']) for l in liqs_raw],
+            liquidations=list(liqs_raw),
             recent_deltas=[DeltaPoint(price=d['price'], delta=d['delta'], timestamp=d['timestamp']) for d in deltas_raw],
             dom_snapshot=DomSnapshot(bids=dom_raw.get('bids', []), asks=dom_raw.get('asks', []), obi=dom_raw.get('obi', 0.0)),
             funding_rate=self.metrics.get_last_funding(symbol)
@@ -97,7 +98,7 @@ async def evaluate_and_maybe_alert(symbol: str, processor):
                 "sl": entry * 0.994 if direction == "LONG" else entry * 1.006,
                 "tp": entry * 1.018 if direction == "LONG" else entry * 0.982,
                 "risk_pct": 0.6, "rr": 3.0, "risk_usdt": 10.0, "structure_state": 1 if direction == "LONG" else -1,
-                "raw_context": {"confidence_score": score, "obi": ctx.dom_snapshot.obi, "liq_vol": sum(l.volume_usd for l in ctx.liquidations)}
+                "raw_context": {"confidence_score": score, "obi": ctx.dom_snapshot.obi, "liq_vol": sum(float(l.get("volume_usd", 0)) for l in ctx.liquidations)}
             }
             await send_alert_to_bot(alert)
             processor.last_signal_time[symbol] = time.time()
