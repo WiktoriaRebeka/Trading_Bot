@@ -92,7 +92,10 @@ class BybitExecutor:
         for param in optional_params:
             if param in params:
                 payload[param] = str(params[param])
-                
+
+        if params.get("takeProfit") or params.get("stopLoss"):
+            payload["tpslMode"] = "Full"
+
         logger.info(f"[{symbol}] Wysyłanie zlecenia do Bybit: {payload}")
         try:
             result = self._send_request("POST", "/v5/order/create", params=payload)
