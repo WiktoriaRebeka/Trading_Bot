@@ -51,32 +51,16 @@ def get_bigquery_client() -> bigquery.Client:
 
 def log_analysis_result(result_data: Dict[str, Any]):
     """
-    Zapisuje wynik analizy sygnału do BigQuery.
-    
-    ZMIANA: Używa 'event_id' zamiast 'alert_id' (zgodnie ze schematem BigQuery).
+    Loguje dane analityczne sygnału do Cloud Logging.
+    BigQuery insert wyłączony do czasu utworzenia tabeli market_structure_signals.
     """
-    # POPRAWKA: alert_id → event_id
     event_id = result_data.get('event_id', 'unknown')
-    logger.info(f"[BQ_LOGGER][{event_id}] Rozpoczynam proces zapisu wyniku do BigQuery.")
-    
-    try:
-        client = get_bigquery_client()
-    except RuntimeError as e:
-        logger.error(f"[BQ_LOGGER][{event_id}] Nie można zalogować wyniku: {e}")
-        return
-    
-    try:
-        rows_to_insert = [result_data]
-        errors = client.insert_rows_json(ANALYTICAL_TABLE_REF, rows_to_insert)
-        
-        if not errors:
-            logger.info(f"[BQ_LOGGER][{event_id}] SUKCES! Rekord zapisany w BigQuery.")
-        else:
-            logger.error(f"[BQ_LOGGER][{event_id}] Błąd podczas wstawiania wierszy: {errors}")
-    
-    except GoogleAPICallError as e:
-        # POPRAWKA: event_id zamiast alert_id
-        logger.error(f"[BQ_LOGGER][{event_id}] Błąd API BigQuery podczas zapisu: {e}", exc_info=True)
-    except Exception as e:
-        # POPRAWKA: event_id zamiast alert_id
-        logger.error(f"[BQ_LOGGER][{event_id}] Krytyczny błąd podczas zapisu: {e}", exc_info=True)
+    logger.info(
+        f"[SIGNAL_ANALYTICS][{event_id}] "
+        f"symbol={result_data.get('symbol')} "
+        f"direction={result_data.get('direction')} "
+        f"entry={result_data.get('entry')} "
+        f"sl={result_data.get('sl')} "
+        f"tp={result_data.get('tp')} "
+        f"score={(result_data.get('raw_context') or {}).get('confidence_score', 0):.1f}"
+    )
