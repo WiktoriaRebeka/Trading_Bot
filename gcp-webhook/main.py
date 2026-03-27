@@ -17,7 +17,10 @@ logger = logging.getLogger(__name__)
 PROJECT_ID = os.environ.get('GCP_PROJECT', 'trading-bot-463318')
 DATABASE_NAME = "trading-bot-data"
 WEBHOOK_SECRET = os.environ.get('WEBHOOK_SECRET_TOKEN', '').strip()
-BOT_SERVICE_URL = "https://trading-bot-service-785819958951.europe-central2.run.app/process-alerts"
+BOT_SERVICE_URL = os.environ.get(
+    "BOT_SERVICE_URL",
+    "https://trading-bot-service-785819958951.europe-central2.run.app/process-alerts"
+)
 
 db = None
 

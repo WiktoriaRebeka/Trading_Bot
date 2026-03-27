@@ -1,14 +1,18 @@
 # orderflow_engine/bot_sender.py
 # WERSJA 1.0 - Asynchroniczna wysyłka alertów do bot_service
 
+import os
 import aiohttp
 import logging
 from typing import Dict, Any
 
-logger = logging.getLogger(__name__)
+BOT_SERVICE_URL = os.environ.get(
+    "BOT_SERVICE_URL",
+    "https://trading-bot-service-785819958951.europe-central2.run.app/process-alerts"
+)
 
-# URL bot_service (zgodnie z constants.py)
-BOT_SERVICE_URL = "https://trading-bot-service-785819958951.europe-central2.run.app/process-alerts"
+logger = logging.getLogger(__name__)
+logger.info(f"[bot_sender] BOT_SERVICE_URL={'env' if os.environ.get('BOT_SERVICE_URL') else 'fallback'}: {BOT_SERVICE_URL}")
 
 
 async def send_alert_to_bot(alert_payload: Dict[str, Any]) -> bool:
