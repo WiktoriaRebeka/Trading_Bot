@@ -169,8 +169,8 @@ def check_delta_divergence(ctx: SignalContext) -> bool:
 # ============================================================
 
 def check_dom_wall(ctx: SignalContext,
-                   min_obi_long: float = 0.3,
-                   max_obi_short: float = -0.3,
+                   min_obi_long: float = 0.4,
+                   max_obi_short: float = -0.4,
                    depth_levels: int = 10,
                    min_wall_multiplier: float = 2.0) -> bool:
 
@@ -182,11 +182,17 @@ def check_dom_wall(ctx: SignalContext,
 
     if ctx.direction == "LONG":
         if ctx.dom_snapshot.obi < min_obi_long:
+            logger.debug(
+                f"[{ctx.symbol}] check_dom_wall: False — OBI={ctx.dom_snapshot.obi:.3f} < {min_obi_long}"
+            )
             return False
         return sum_bids >= min_wall_multiplier * sum_asks
 
     else:  # SHORT
         if ctx.dom_snapshot.obi > max_obi_short:
+            logger.debug(
+                f"[{ctx.symbol}] check_dom_wall: False — OBI={ctx.dom_snapshot.obi:.3f} > {max_obi_short}"
+            )
             return False
         return sum_asks >= min_wall_multiplier * sum_bids
 
