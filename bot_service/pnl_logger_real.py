@@ -137,9 +137,9 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
             "realized_rrr": safe_round(realized_rrr, 4), # RRR z mniejszą precyzją
             
             # --- MAPOWANIE DANYCH Z SIERRY (z active_order_data) ---
-            "alert_entry_price": safe_round(active_order_data.get("entry")) if active_order_data else None,
-            "alert_sl_price": safe_round(active_order_data.get("sl")) if active_order_data else None,
-            "alert_tp_price": safe_round(active_order_data.get("tp")) if active_order_data else None,
+            "alert_entry_price": safe_round(active_order_data.get("planned_entry_price")) if active_order_data else None,
+            "alert_sl_price": safe_round(active_order_data.get("planned_sl_price")) if active_order_data else None,
+            "alert_tp_price": safe_round(active_order_data.get("planned_tp_price")) if active_order_data else None,
             "timestamp_signal": active_order_data.get("timestamp") if active_order_data else None, # NOWE POLE
             
             # Planned (ceny po zaokrągleniu)
