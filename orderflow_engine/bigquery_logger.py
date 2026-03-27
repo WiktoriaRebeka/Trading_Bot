@@ -5,6 +5,8 @@ from google.cloud import bigquery
 from datetime import datetime
 import logging
 
+from shared_lib import constants
+
 logger = logging.getLogger(__name__)
 
 class OrderFlowBigQueryLogger:
@@ -18,7 +20,7 @@ class OrderFlowBigQueryLogger:
     
     def __init__(self, project_id='trading-bot-463318'):
         self.client = bigquery.Client(project=project_id)
-        self.dataset = 'trading_data'
+        self.dataset = constants.BIGQUERY_DATASET_ID
     
     def log_setup_signal(self, signal_data):
         """
