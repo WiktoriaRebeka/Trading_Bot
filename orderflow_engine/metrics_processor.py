@@ -60,7 +60,10 @@ class OrderFlowMetrics:
         self.orderbook_snapshots = {}
         self.delta_history = defaultdict(lambda: deque(maxlen=200))
         
-        self.LIQUIDATION_CASCADE_THRESHOLD_USD = 50000
+        self.LIQUIDATION_CASCADE_THRESHOLD_USD = int(
+            os.environ.get("LIQ_CASCADE_THRESHOLD_USD", "10000")
+        )
+        logger.info(f"[MetricsProcessor] LIQ_CASCADE_THRESHOLD_USD={self.LIQUIDATION_CASCADE_THRESHOLD_USD}")
         self.DOM_WALL_MULTIPLIER = 3.5 
         self.SIGNAL_COOLDOWN_SEC = 300
         self.MIN_CONFIDENCE_SCORE = 75 

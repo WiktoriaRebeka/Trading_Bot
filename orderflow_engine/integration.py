@@ -77,13 +77,30 @@ class SignalContextBuilder:
             funding_rate=self.metrics.get_last_funding(symbol)
         )
 
+
+def _get_min_liq_volume(symbol: str) -> float:
+    """Próg likwidacji dostosowany do klasy aktywu."""
+    BTC_ETH = {"BTCUSDT", "ETHUSDT", "BTCPERP", "ETHPERP"}
+    MID_CAPS = {"SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT"}
+    if symbol.upper() in BTC_ETH:
+        return 75_000.0
+    elif symbol.upper() in MID_CAPS:
+        return 25_000.0
+    else:
+        return 10_000.0
+
+
 async def evaluate_and_maybe_alert(symbol: str, processor):
+    COOLDOWN_SEC = 300
+    if time.time() - processor.last_signal_time.get(symbol, 0) < COOLDOWN_SEC:
+        logger.debug(f"[evaluate] {symbol}: cooldown aktywny, pomijam")
+        return
     builder = SignalContextBuilder(processor)
     for direction in ["LONG", "SHORT"]:
         try:
             ctx = builder.build_signal_context(symbol, direction)
             if not detect_liquidity_sweep(ctx): continue
-            if not check_liquidations(ctx, min_volume_usd=50000.0): continue
+            if not check_liquidations(ctx, min_volume_usd=_get_min_liq_volume(symbol)): continue
             if not check_delta_divergence(ctx): continue
             if not check_dom_wall(ctx): continue
             
