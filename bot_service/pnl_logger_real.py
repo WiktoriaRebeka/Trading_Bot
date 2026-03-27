@@ -57,14 +57,14 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
     if not acquire_lock_for_order(order_id):
         return False
 
-    # Używamy 'alert_id' jako klucza dopasowania, jak w Twojej działającej wersji
-    is_matched = bool(active_order_data and 'alert_id' in active_order_data)
-    alert_id = active_order_data.get('alert_id', 'UNMATCHED_OR_MANUAL') if active_order_data else 'UNMATCHED_OR_MANUAL'
+    # Używamy 'event_id' jako klucza dopasowania (zapis w active_orders z handle_immediate_signal)
+    is_matched = bool(active_order_data and 'event_id' in active_order_data)
+    alert_id = active_order_data.get('event_id', 'UNMATCHED_OR_MANUAL') if active_order_data else 'UNMATCHED_OR_MANUAL'
     
     if not is_matched:
         logger.warning(f"{log_prefix} ⚠️ Transakcja UNMATCHED – zapisuję z oznaczeniem.")
     else:
-        logger.info(f"{log_prefix} ✅ Zlecenie dopasowane (alert_id: {active_order_data.get('id', 'unknown')}).")
+        logger.info(f"{log_prefix} ✅ Zlecenie dopasowane (event_id: {alert_id}).")
 
     try:
         # --- Funkcja pomocnicza do bezpiecznego zaokrąglania ---
