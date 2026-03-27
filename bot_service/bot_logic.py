@@ -221,6 +221,7 @@ async def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecut
         "params": order_params,
         "event_id": event_id,
         "created_at": datetime.now(timezone.utc).isoformat(),
+        "planned_entry_price": f_entry,
         "planned_sl_price": f_sl,
         "planned_tp_price": f_tp
     }
@@ -341,6 +342,26 @@ def update_filled_orders(executor: BybitExecutor):
                         'position_opened_at': datetime.now(timezone.utc).isoformat()
                     })
                     log_struct("info", "updater", "Order moved to OPEN", symbol=symbol, event_id=order_link_id, slOrderId=sl_id)
+
+                    # Aktywacja Trailing Stop po potwierdzeniu wejścia
+                    try:
+                        planned_sl = data.get('planned_sl_price')
+                        planned_entry = data.get('planned_entry_price') or data.get('params', {}).get('price')
+                        if planned_sl and planned_entry:
+                            sl_distance = abs(float(planned_entry) - float(planned_sl))
+                            trailing_distance = str(round(sl_distance, 4))
+                            ts_result = call_with_retry(
+                                executor.set_trailing_stop_for_position,
+                                symbol,
+                                trailing_distance
+                            )
+                            if ts_result:
+                                state_manager.update_active_order(order_link_id, {'trailing_stop_set': True, 'trailing_distance': trailing_distance})
+                                log_struct("info", "trailing_stop", "Trailing Stop aktywowany", symbol=symbol, event_id=order_link_id, distance=trailing_distance)
+                            else:
+                                log_struct("warning", "trailing_stop", "Trailing Stop nie ustawiony", symbol=symbol, event_id=order_link_id)
+                    except Exception as e:
+                        log_struct("error", "trailing_stop", "Błąd ustawiania Trailing Stop", symbol=symbol, event_id=order_link_id, error=str(e))
                 else:
                     state_manager.update_active_order(order_link_id, {'status': 'CLOSED_UNVERIFIED'})
                     log_struct("error", "updater", "Filled but no position found", symbol=symbol, event_id=order_link_id)

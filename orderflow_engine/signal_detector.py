@@ -131,23 +131,37 @@ def check_liquidations(ctx: SignalContext,
 def check_delta_divergence(ctx: SignalContext) -> bool:
     """
     LONG:
-      - cena robi LL
-      - delta robi HL
+      - cena robi LL względem min z ostatnich 9 świec (okno -10:-1)
+      - delta rośnie względem min delty w tym samym oknie (bullish divergence)
     SHORT:
-      - cena robi HH
-      - delta robi LH
+      - cena robi HH względem max z ostatnich 9 świec
+      - delta spada względem max delty (bearish divergence)
     """
-    if len(ctx.recent_deltas) < 2:
+    if len(ctx.recent_deltas) < 10:
         return False
 
-    last = ctx.recent_deltas[-1]
-    prev = ctx.recent_deltas[-2]
+    recent = ctx.recent_deltas[-30:] if len(ctx.recent_deltas) >= 30 else ctx.recent_deltas
+    prices = [d.price for d in recent]
+    deltas = [d.delta for d in recent]
 
     if ctx.direction == "LONG":
-        return last.price < prev.price and last.delta > prev.delta
-
+        # Cena robi nowe minimum, delta rośnie (bullish divergence)
+        price_new_low = prices[-1] < min(prices[-10:-1])
+        delta_rising = deltas[-1] > min(deltas[-10:-1])
+        result = price_new_low and delta_rising
     else:  # SHORT
-        return last.price > prev.price and last.delta < prev.delta
+        # Cena robi nowe maksimum, delta spada (bearish divergence)
+        price_new_high = prices[-1] > max(prices[-10:-1])
+        delta_falling = deltas[-1] < max(deltas[-10:-1])
+        result = price_new_high and delta_falling
+
+    if not result:
+        logger.debug(
+            f"[{ctx.symbol}] check_delta_divergence: False — "
+            f"direction={ctx.direction}, samples={len(recent)}, "
+            f"last_price={prices[-1]:.4f}, last_delta={deltas[-1]:.2f}"
+        )
+    return result
 
 
 # ============================================================

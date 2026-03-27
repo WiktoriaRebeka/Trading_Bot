@@ -64,7 +64,7 @@ class SignalContextBuilder:
         swing_price = (engine.last_swing_low if direction == "LONG" else engine.last_swing_high) or current_price
         
         liqs_raw = self.metrics.get_recent_liquidations(symbol)
-        deltas_raw = self.metrics.get_recent_deltas(symbol)
+        deltas_raw = self.metrics.get_recent_deltas(symbol, limit=30)
         dom_raw = self.metrics.get_dom_snapshot(symbol)
         
         return SignalContext(
