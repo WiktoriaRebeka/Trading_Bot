@@ -29,7 +29,11 @@ def initialize_bigquery() -> bool:
         REAL_TRADES_TABLE_REF = dataset_ref.table(real_trades_table_id)
         client.get_table(REAL_TRADES_TABLE_REF)
         logger.info(f"[BQ_INIT] Pomyślnie zweryfikowano tabelę transakcji rzeczywistych: {real_trades_table_id}")
-        
+
+        analytical_table_id = constants.BIGQUERY_REAL_TRADES_TABLE_ID
+        ANALYTICAL_TABLE_REF = dataset_ref.table(analytical_table_id)
+        logger.info(f"[BQ_INIT] ANALYTICAL_TABLE_REF ustawiony na: {analytical_table_id}")
+
         bigquery_client = client
         logger.info(f"[BQ_INIT] Klient BigQuery pomyślnie zainicjalizowany. Lokalizacja: {DATASET_LOCATION}")
         return True
