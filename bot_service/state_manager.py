@@ -106,7 +106,9 @@ def get_active_order_by_id(order_link_id: str) -> Optional[Dict[str, Any]]:
     try:
         doc = _collection_active_orders().document(order_link_id).get()
         if doc.exists:
-            return doc.to_dict()
+            data = doc.to_dict()
+            data['id'] = doc.id
+            return data
         return None
     except Exception as e:
         logger.exception(f"[state_manager] Failed to get active order by id {order_link_id}: {e}")
