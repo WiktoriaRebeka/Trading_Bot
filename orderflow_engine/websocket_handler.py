@@ -112,10 +112,14 @@ class MultiConnectionWSManager:
         # 1. PUBLIC TRADES
         if topic.startswith("publicTrade."):
             for t in payload:
-                self.processor.process_trade(
-                    timestamp=int(t["T"]), symbol=t["s"], side=t["S"],
-                    qty=float(t["v"]), price=float(t["p"])
-                )
+                try:
+                    self.processor.process_trade(
+                        timestamp=int(t["T"]), symbol=t["s"], side=t["S"],
+                        qty=float(t["v"]), price=float(t["p"])
+                    )
+                except Exception as e:
+                    logger.warning(f"[Conn-{connection_id}] Błąd przetwarzania ticku: {e} | dane: {t}")
+                    continue
 
         # 2. LIQUIDATIONS
         elif topic.startswith("liquidation."):
