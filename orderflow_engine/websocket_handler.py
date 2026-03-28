@@ -66,7 +66,7 @@ class MultiConnectionWSManager:
         """Obsługa pojedynczego połączenia WebSocket."""
         async with ClientSession() as session:
             try:
-                async with session.ws_connect(BYBIT_WS_URL, heartbeat=20, autoping=True) as ws:
+                async with session.ws_connect(BYBIT_WS_URL) as ws:
                     topics = []
                     for s in symbols_batch:
                         topics.extend([f"publicTrade.{s}", f"tickers.{s}", f"orderbook.50.{s}"])
@@ -89,7 +89,6 @@ class MultiConnectionWSManager:
                         if not self.is_running: break
                         if message.type == WSMsgType.TEXT:
                             data = json.loads(message.data)
-                            logger.info(f"[Conn-{connection_id}] RAW_MSG keys={list(data.keys())[:5]}")
 
                             # Potwierdzenie subskrypcji
                             if "op" in data:
