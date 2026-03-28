@@ -43,15 +43,22 @@ async def run_backfill_in_background(processor: OrderFlowMetrics):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global METRICS_PROCESSOR, CONTEXT_BUILDER
-    logger.info("🚀 Starting OrderFlow Engine V7.5...")
-    initialize_firebase()
-    METRICS_PROCESSOR = OrderFlowMetrics(firestore_client=get_db())
-    CONTEXT_BUILDER = SignalContextBuilder(METRICS_PROCESSOR)
-    ws_manager = MultiConnectionWSManager(symbols=SYMBOLS_TO_WATCH_CLEAN, metrics_processor=METRICS_PROCESSOR)
-    asyncio.create_task(ws_manager.start_all_connections())
-    asyncio.create_task(run_backfill_in_background(METRICS_PROCESSOR))
+    ws_manager = None
+    try:
+        logger.info("🚀 Starting OrderFlow Engine V7.5...")
+        initialize_firebase()
+        METRICS_PROCESSOR = OrderFlowMetrics(firestore_client=get_db())
+        CONTEXT_BUILDER = SignalContextBuilder(METRICS_PROCESSOR)
+        ws_manager = MultiConnectionWSManager(symbols=SYMBOLS_TO_WATCH_CLEAN, metrics_processor=METRICS_PROCESSOR)
+        asyncio.create_task(ws_manager.start_all_connections())
+        asyncio.create_task(run_backfill_in_background(METRICS_PROCESSOR))
+        logger.info("✅ OrderFlow Engine startup complete")
+    except Exception as e:
+        logger.critical(f"💀 STARTUP FAILED: {e}", exc_info=True)
     yield
-    ws_manager.is_running = False
+    logger.info("🛑 OrderFlow Engine shutting down")
+    if ws_manager is not None:
+        ws_manager.is_running = False
 
 app = FastAPI(title="OrderFlow Engine V7.5", lifespan=lifespan)
 

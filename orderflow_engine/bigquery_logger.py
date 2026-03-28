@@ -19,7 +19,15 @@ class OrderFlowBigQueryLogger:
     """
     
     def __init__(self, project_id='trading-bot-463318'):
-        self.client = bigquery.Client(project=project_id)
+        try:
+            self.client = bigquery.Client(project=project_id)
+            logger.info(f"[BQ] BigQuery client initialized for project: {project_id}")
+        except Exception as e:
+            logger.error(
+                f"[BQ] Failed to initialize BigQuery client: {e}. "
+                f"BigQuery logging will be disabled."
+            )
+            self.client = None
         self.dataset = constants.BIGQUERY_DATASET_ID
     
     def log_setup_signal(self, signal_data):
@@ -28,6 +36,9 @@ class OrderFlowBigQueryLogger:
         
         WAŻNE: Używamy istniejącej tabeli, nie tworzymy nowej!
         """
+        if self.client is None:
+            logger.warning("[BQ] BigQuery client not available, skipping.")
+            return
         table_id = f"{self.dataset}.market_structure_signals"
         
         row = {
@@ -97,6 +108,9 @@ class OrderFlowBigQueryLogger:
     
     def log_liquidation_cascade(self, event_data):
         """Zapisuje liquidation cascade event (NOWA TABELA)"""
+        if self.client is None:
+            logger.warning("[BQ] BigQuery client not available, skipping.")
+            return
         table_id = f"{self.dataset}.liquidation_events"
         
         row = {
@@ -118,6 +132,9 @@ class OrderFlowBigQueryLogger:
     
     def log_dom_wall(self, wall_data):
         """Zapisuje DOM wall event (NOWA TABELA)"""
+        if self.client is None:
+            logger.warning("[BQ] BigQuery client not available, skipping.")
+            return
         table_id = f"{self.dataset}.dom_events"
         
         row = {

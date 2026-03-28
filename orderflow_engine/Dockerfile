@@ -14,5 +14,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY shared_lib/ ./shared_lib/
 COPY orderflow_engine/ ./orderflow_engine/
 
-# Uruchomienie serwera
-CMD ["uvicorn", "orderflow_engine.main:app", "--host", "0.0.0.0", "--port", "8080"]
+# Uruchomienie serwera (PORT z env Cloud Run, domyślnie 8080)
+CMD ["sh", "-c", "uvicorn orderflow_engine.main:app --host 0.0.0.0 --port ${PORT:-8080}"]
