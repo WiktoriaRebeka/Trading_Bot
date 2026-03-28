@@ -102,6 +102,9 @@ class MultiConnectionWSManager:
                             if "topic" in data:
                                 await self._process_message(data, connection_id)
 
+                        elif message.type == WSMsgType.BINARY:
+                            logger.warning(f"[Conn-{connection_id}] BINARY_MSG len={len(message.data)}")
+
                         elif message.type in (WSMsgType.CLOSED, WSMsgType.ERROR):
                             logger.warning(f"[Conn-{connection_id}] Połączenie zamknięte przez serwer")
                             break
