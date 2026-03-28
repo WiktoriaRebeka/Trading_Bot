@@ -142,16 +142,18 @@ class MultiConnectionWSManager:
                     continue
 
         # 2. LIQUIDATIONS
-        elif topic.startswith("liquidation."):
-            liq = payload if isinstance(payload, dict) else payload[0]
-            self.processor.process_liquidation({
-                'symbol': liq.get('symbol'),
-                'side': liq.get('side'),
-                'price': float(liq.get('price', 0)),
-                'qty': float(liq.get('size', 0)),
-                'time': int(liq.get('updatedTime', time.time() * 1000))
-            })
-            await self._trigger_evaluation(symbol)
+        elif topic == "allLiquidation":
+            items = payload if isinstance(payload, list) else [payload]
+            for liq in items:
+                liq_symbol = liq.get('symbol', 'unknown')
+                self.processor.process_liquidation({
+                    'symbol': liq_symbol,
+                    'side': liq.get('side'),
+                    'price': float(liq.get('price', 0)),
+                    'qty': float(liq.get('size', 0)),
+                    'time': int(liq.get('updatedTime', time.time() * 1000))
+                })
+                await self._trigger_evaluation(liq_symbol)
 
         # 3. ORDERBOOK
         elif topic.startswith("orderbook."):
