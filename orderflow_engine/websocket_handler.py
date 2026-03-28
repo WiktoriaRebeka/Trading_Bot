@@ -69,7 +69,8 @@ class MultiConnectionWSManager:
                 async with session.ws_connect(BYBIT_WS_URL, heartbeat=20, autoping=True) as ws:
                     topics = []
                     for s in symbols_batch:
-                        topics.extend([f"publicTrade.{s}", f"tickers.{s}", f"liquidation.{s}", f"orderbook.50.{s}"])
+                        topics.extend([f"publicTrade.{s}", f"tickers.{s}", f"orderbook.50.{s}"])
+                    topics.append("allLiquidation")
                     
                     await ws.send_json({"op": "subscribe", "args": topics})
                     logger.info(f"[Conn-{connection_id}] WYSYŁAM SUBSKRYPCJĘ dla {symbols_batch}")
