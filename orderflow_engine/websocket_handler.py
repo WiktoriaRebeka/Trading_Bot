@@ -86,6 +86,7 @@ class MultiConnectionWSManager:
                 try:
                     async for raw_message in ws:
                         if not self.is_running: break
+                        logger.info(f"[Conn-{connection_id}] MSG type={type(raw_message).__name__} len={len(raw_message)}")
                         if isinstance(raw_message, bytes):
                             logger.warning(f"[Conn-{connection_id}] BINARY_MSG len={len(raw_message)}")
                             continue
