@@ -67,11 +67,15 @@ class MultiConnectionWSManager:
             async with websockets.connect(BYBIT_WS_URL, ping_interval=None) as ws:
                 topics = []
                 for s in symbols_batch:
-                    topics.extend([f"publicTrade.{s}", f"tickers.{s}", f"orderbook.50.{s}"])
-                topics.append("allLiquidation")
+                    topics.extend([
+                        f"publicTrade.{s}",
+                        f"tickers.{s}",
+                        f"orderbook.50.{s}",
+                        f"allLiquidation.{s}",
+                    ])
 
                 await ws.send(json.dumps({"op": "subscribe", "args": topics}))
-                logger.info(f"[Conn-{connection_id}] WYSYŁAM SUBSKRYPCJĘ dla {symbols_batch}")
+                logger.info(f"[Conn-{connection_id}] WYSYŁAM SUBSKRYPCJĘ ({len(topics)} tematów) dla {symbols_batch}")
 
                 async def _bybit_ping_loop():
                     while self.is_running:
@@ -93,10 +97,20 @@ class MultiConnectionWSManager:
                         data = json.loads(raw_message)
 
                         if "op" in data:
-                            if data.get("success") is True:
-                                logger.info(f"[Conn-{connection_id}] Subskrypcja POTWIERDZONA dla {symbols_batch}")
+                            op = data.get("op")
+                            if op == "subscribe":
+                                if data.get("success") is True:
+                                    logger.info(
+                                        f"[Conn-{connection_id}] Subskrypcja POTWIERDZONA dla {symbols_batch}"
+                                    )
+                                else:
+                                    logger.error(
+                                        f"[Conn-{connection_id}] Subskrypcja ODRZUCONA: {data}"
+                                    )
+                            elif op == "ping":
+                                pass
                             else:
-                                logger.error(f"[Conn-{connection_id}] Subskrypcja ODRZUCONA: {data}")
+                                logger.debug(f"[Conn-{connection_id}] Wiadomość sterująca op={op}: {data}")
                             continue
 
                         if "topic" in data:
@@ -135,17 +149,17 @@ class MultiConnectionWSManager:
                     logger.warning(f"[Conn-{connection_id}] Błąd przetwarzania ticku: {e} | dane: {t}")
                     continue
 
-        # 2. LIQUIDATIONS
-        elif topic == "allLiquidation":
+        # 2. LIQUIDATIONS (v5: allLiquidation.{symbol}, pola T,s,S,v,p)
+        elif topic.startswith("allLiquidation."):
             items = payload if isinstance(payload, list) else [payload]
             for liq in items:
-                liq_symbol = liq.get('symbol', 'unknown')
+                liq_symbol = liq.get("s") or liq.get("symbol", "unknown")
                 self.processor.process_liquidation({
                     'symbol': liq_symbol,
-                    'side': liq.get('side'),
-                    'price': float(liq.get('price', 0)),
-                    'qty': float(liq.get('size', 0)),
-                    'time': int(liq.get('updatedTime', time.time() * 1000))
+                    'side': liq.get("S") or liq.get("side"),
+                    'price': float(liq.get("p", liq.get("price", 0))),
+                    'qty': float(liq.get("v", liq.get("size", 0))),
+                    'time': int(liq.get("T", liq.get("updatedTime", time.time() * 1000)))
                 })
                 await self._trigger_evaluation(liq_symbol)
 
