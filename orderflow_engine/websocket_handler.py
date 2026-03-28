@@ -1,10 +1,9 @@
 # orderflow_engine/websocket_handler.py
 import asyncio
-import aiohttp
 import json
 import logging
 import time
-from aiohttp import WSMsgType, ClientSession
+import websockets
 from typing import List, Dict
 
 from orderflow_engine.metrics_processor import OrderFlowMetrics
@@ -64,54 +63,49 @@ class MultiConnectionWSManager:
 
     async def _websocket_listener_for_batch(self, symbols_batch: List[str], connection_id: int):
         """Obsługa pojedynczego połączenia WebSocket."""
-        async with ClientSession() as session:
-            try:
-                async with session.ws_connect(BYBIT_WS_URL) as ws:
-                    topics = []
-                    for s in symbols_batch:
-                        topics.extend([f"publicTrade.{s}", f"tickers.{s}", f"orderbook.50.{s}"])
-                    topics.append("allLiquidation")
-                    
-                    await ws.send_json({"op": "subscribe", "args": topics})
-                    logger.info(f"[Conn-{connection_id}] WYSYŁAM SUBSKRYPCJĘ dla {symbols_batch}")
+        try:
+            async with websockets.connect(BYBIT_WS_URL, ping_interval=None) as ws:
+                topics = []
+                for s in symbols_batch:
+                    topics.extend([f"publicTrade.{s}", f"tickers.{s}", f"orderbook.50.{s}"])
+                topics.append("allLiquidation")
 
-                    async def _bybit_ping_loop():
-                        while self.is_running:
-                            try:
-                                await asyncio.sleep(20)
-                                await ws.send_json({"op": "ping"})
-                            except Exception:
-                                break
+                await ws.send(json.dumps({"op": "subscribe", "args": topics}))
+                logger.info(f"[Conn-{connection_id}] WYSYŁAM SUBSKRYPCJĘ dla {symbols_batch}")
 
-                    ping_task = asyncio.create_task(_bybit_ping_loop())
-
-                    async for message in ws:
-                        if not self.is_running: break
-                        if message.type == WSMsgType.TEXT:
-                            data = json.loads(message.data)
-
-                            # Potwierdzenie subskrypcji
-                            if "op" in data:
-                                if data.get("success") is True:
-                                    logger.info(f"[Conn-{connection_id}] Subskrypcja POTWIERDZONA dla {symbols_batch}")
-                                else:
-                                    logger.error(f"[Conn-{connection_id}] Subskrypcja ODRZUCONA: {data}")
-                                continue
-
-                            # Przetwarzanie danych rynkowych
-                            if "topic" in data:
-                                await self._process_message(data, connection_id)
-
-                        elif message.type == WSMsgType.BINARY:
-                            logger.warning(f"[Conn-{connection_id}] BINARY_MSG len={len(message.data)}")
-
-                        elif message.type in (WSMsgType.CLOSED, WSMsgType.ERROR):
-                            logger.warning(f"[Conn-{connection_id}] Połączenie zamknięte przez serwer")
+                async def _bybit_ping_loop():
+                    while self.is_running:
+                        try:
+                            await asyncio.sleep(20)
+                            await ws.send(json.dumps({"op": "ping"}))
+                        except Exception:
                             break
 
+                ping_task = asyncio.create_task(_bybit_ping_loop())
+
+                try:
+                    async for raw_message in ws:
+                        if not self.is_running: break
+                        if isinstance(raw_message, bytes):
+                            logger.warning(f"[Conn-{connection_id}] BINARY_MSG len={len(raw_message)}")
+                            continue
+                        data = json.loads(raw_message)
+
+                        if "op" in data:
+                            if data.get("success") is True:
+                                logger.info(f"[Conn-{connection_id}] Subskrypcja POTWIERDZONA dla {symbols_batch}")
+                            else:
+                                logger.error(f"[Conn-{connection_id}] Subskrypcja ODRZUCONA: {data}")
+                            continue
+
+                        if "topic" in data:
+                            await self._process_message(data, connection_id)
+                finally:
                     ping_task.cancel()
-            except Exception as e:
-                logger.error(f"[Conn-{connection_id}] Błąd połączenia: {e}")
+        except websockets.exceptions.ConnectionClosed:
+            logger.warning(f"[Conn-{connection_id}] Połączenie zamknięte przez serwer")
+        except Exception as e:
+            logger.error(f"[Conn-{connection_id}] Błąd połączenia: {e}")
 
     async def _process_message(self, data: dict, connection_id: int):
         """Główny punkt wejścia dla danych z giełdy."""
