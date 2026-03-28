@@ -88,6 +88,7 @@ class MultiConnectionWSManager:
                         if not self.is_running: break
                         if message.type == WSMsgType.TEXT:
                             data = json.loads(message.data)
+                            logger.info(f"[Conn-{connection_id}] RAW_MSG keys={list(data.keys())[:5]}")
 
                             # Potwierdzenie subskrypcji
                             if "op" in data:
