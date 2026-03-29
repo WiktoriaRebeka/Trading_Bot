@@ -26,6 +26,9 @@ class HistoryBackfiller:
                         data = await response.json()
                         if data.get("retCode") == 0 and data.get("result"):
                             klines = data["result"]["list"][::-1]
+                            if not klines:
+                                logger.warning(f"⚠️ Backfill {symbol}: retCode=0 ale pusta lista klines")
+                                return []
                             return [{
                                 'ts': int(k[0]),
                                 'open': float(k[1]),
@@ -34,8 +37,10 @@ class HistoryBackfiller:
                                 'close': float(k[4]),
                                 'volume': float(k[5])
                             } for k in klines]
+                        else:
+                            logger.error(f"❌ Backfill {symbol}: retCode={data.get('retCode')} retMsg={data.get('retMsg')} result={bool(data.get('result'))}")
                     else:
-                        logger.error(f"❌ Bybit API Error {symbol}: {response.status}")
+                        logger.error(f"❌ Bybit API Error {symbol}: HTTP {response.status}")
         except Exception as e:
             logger.error(f"❌ Błąd backfillu dla {symbol}: {type(e).__name__}: {e}", exc_info=True)
         return []
