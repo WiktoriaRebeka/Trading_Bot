@@ -37,8 +37,12 @@ async def run_backfill_in_background(processor: OrderFlowMetrics):
     semaphore = asyncio.Semaphore(2) # Bezpieczne tempo dla Bybit
     logger.info(f"📥 Start Backfill dla {len(SYMBOLS_TO_WATCH_CLEAN)} symboli...")
     tasks = [fetch_single_backfill(symbol, processor, backfiller, semaphore) for symbol in SYMBOLS_TO_WATCH_CLEAN]
-    await asyncio.gather(*tasks)
-    logger.info("🚀 SYSTEM GOTOWY - Wszystkie dane załadowane.")
+    try:
+        await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=120)
+        logger.info("🚀 SYSTEM GOTOWY - Wszystkie dane załadowane.")
+    except asyncio.TimeoutError:
+        logger.warning("⚠️ Backfill timeout po 120s — system startuje bez pełnej historii")
+        logger.info("🚀 SYSTEM GOTOWY - Start bez backfillu.")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
