@@ -1,6 +1,7 @@
 # orderflow_engine/main.py
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
@@ -18,31 +19,96 @@ logger = logging.getLogger(__name__)
 METRICS_PROCESSOR: OrderFlowMetrics | None = None
 CONTEXT_BUILDER: SignalContextBuilder | None = None
 
+
 async def fetch_single_backfill(symbol, processor, backfiller, semaphore):
     async with semaphore:
         for attempt in range(3):
             try:
-                h_m1 = await backfiller.fetch_history(symbol, '1', 1000)
-                await asyncio.sleep(0.5) # Oddech dla API Bybit
-                h_d1 = await backfiller.fetch_history(symbol, 'D', 365)
-                processor.pre_load_history(symbol, h_m1, h_d1)
-                logger.info(f"✅ {symbol} Backfill OK.")
-                return 
+                r_m1 = await backfiller.fetch_history(symbol, '1', 1000)
+                await asyncio.sleep(0.5)  # Oddech dla API Bybit
+                r_d1 = await backfiller.fetch_history(symbol, 'D', 365)
+
+                if not r_m1.ok or not r_m1.rows:
+                    logger.warning(
+                        f"⚠️ Backfill {symbol}: M1 nieudany lub pusty (ok={r_m1.ok}, n={len(r_m1.rows)}), "
+                        f"próba {attempt + 1}/3"
+                    )
+                    await asyncio.sleep(2 * (attempt + 1))
+                    continue
+                if not r_d1.ok or not r_d1.rows:
+                    logger.warning(
+                        f"⚠️ Backfill {symbol}: D1 nieudany lub pusty (ok={r_d1.ok}, n={len(r_d1.rows)}), "
+                        f"próba {attempt + 1}/3"
+                    )
+                    await asyncio.sleep(2 * (attempt + 1))
+                    continue
+
+                processor.pre_load_history(symbol, r_m1.rows, r_d1.rows)
+                logger.info(f"✅ {symbol} Backfill OK (M1={len(r_m1.rows)} D1={len(r_d1.rows)}).")
+                return
             except Exception as e:
+                logger.warning(
+                    f"⚠️ Backfill {symbol} próba {attempt + 1}/3: {type(e).__name__}: {e}",
+                    exc_info=True,
+                )
                 await asyncio.sleep(2 * (attempt + 1))
-        logger.error(f"❌ Błąd backfillu {symbol} po 3 próbach.")
+        logger.error(f"❌ Błąd backfillu {symbol} po 3 próbach (brak poprawnych danych M1/D1).")
+
+
+def _backfill_gather_timeout_sec(num_symbols: int) -> int:
+    raw = os.environ.get("BACKFILL_GATHER_TIMEOUT")
+    if raw is not None and raw.strip().isdigit():
+        return max(60, int(raw))
+    return max(300, min(900, num_symbols * 10))
+
 
 async def run_backfill_in_background(processor: OrderFlowMetrics):
-    backfiller = HistoryBackfiller()
-    semaphore = asyncio.Semaphore(2) # Bezpieczne tempo dla Bybit
-    logger.info(f"📥 Start Backfill dla {len(SYMBOLS_TO_WATCH_CLEAN)} symboli...")
-    tasks = [fetch_single_backfill(symbol, processor, backfiller, semaphore) for symbol in SYMBOLS_TO_WATCH_CLEAN]
-    try:
-        await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=120)
+    semaphore = asyncio.Semaphore(2)  # Bezpieczne tempo dla Bybit
+    symbols = SYMBOLS_TO_WATCH_CLEAN
+    gather_timeout = _backfill_gather_timeout_sec(len(symbols))
+    logger.info(f"📥 Start Backfill dla {len(symbols)} symboli (timeout gather={gather_timeout}s)...")
+
+    async with HistoryBackfiller() as backfiller:
+        task_objs = [
+            asyncio.create_task(fetch_single_backfill(symbol, processor, backfiller, semaphore))
+            for symbol in symbols
+        ]
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(*task_objs, return_exceptions=True),
+                timeout=gather_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"⚠️ Backfill timeout po {gather_timeout}s — anulowanie pozostałych tasków, "
+                "system startuje bez pełnej historii"
+            )
+            for t in task_objs:
+                if not t.done():
+                    t.cancel()
+            results = await asyncio.gather(*task_objs, return_exceptions=True)
+            for sym, res in zip(symbols, results):
+                if isinstance(res, asyncio.CancelledError):
+                    logger.debug(f"Backfill {sym}: anulowano (timeout)")
+                elif isinstance(res, BaseException):
+                    logger.error(
+                        f"❌ Backfill task {sym} po anulowaniu: {type(res).__name__}: {res}",
+                        exc_info=(type(res), res, res.__traceback__),
+                    )
+            logger.info("🚀 SYSTEM GOTOWY - Start bez backfillu.")
+            return
+
+        for sym, res in zip(symbols, results):
+            if isinstance(res, asyncio.CancelledError):
+                logger.debug(f"Backfill {sym}: anulowano")
+            elif isinstance(res, BaseException):
+                logger.error(
+                    f"❌ Backfill task wyjątek {sym}: {type(res).__name__}: {res}",
+                    exc_info=(type(res), res, res.__traceback__),
+                )
+
         logger.info("🚀 SYSTEM GOTOWY - Wszystkie dane załadowane.")
-    except asyncio.TimeoutError:
-        logger.warning("⚠️ Backfill timeout po 120s — system startuje bez pełnej historii")
-        logger.info("🚀 SYSTEM GOTOWY - Start bez backfillu.")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
