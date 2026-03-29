@@ -64,7 +64,13 @@ class MultiConnectionWSManager:
     async def _websocket_listener_for_batch(self, symbols_batch: List[str], connection_id: int):
         """Obsługa pojedynczego połączenia WebSocket."""
         try:
-            async with websockets.connect(BYBIT_WS_URL, ping_interval=None) as ws:
+            async with websockets.connect(
+                BYBIT_WS_URL,
+                ping_interval=20,
+                ping_timeout=10,
+                open_timeout=30,
+                close_timeout=10,
+            ) as ws:
                 topics = []
                 for s in symbols_batch:
                     topics.extend([
