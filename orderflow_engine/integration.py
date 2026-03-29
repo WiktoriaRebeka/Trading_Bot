@@ -61,7 +61,11 @@ class SignalContextBuilder:
         """Buduje SignalContext dla wewnętrznej logiki signal_detector."""
         engine = self.metrics.engines[symbol]
         current_price = self.metrics.get_last_price(symbol)
-        swing_price = (engine.last_swing_low if direction == "LONG" else engine.last_swing_high) or current_price
+        raw_swing = engine.last_swing_low if direction == "LONG" else engine.last_swing_high
+        if raw_swing is None:
+            logger.debug(f"[{symbol}] {direction}: brak swing point — pomijam ewaluację")
+            return None
+        swing_price = raw_swing
         
         liqs_raw = self.metrics.get_recent_liquidations(symbol)
         deltas_raw = self.metrics.get_recent_deltas(symbol, limit=30)
@@ -99,6 +103,8 @@ async def evaluate_and_maybe_alert(symbol: str, processor):
     for direction in ["LONG", "SHORT"]:
         try:
             ctx = builder.build_signal_context(symbol, direction)
+            if ctx is None:
+                continue
             
             if not detect_liquidity_sweep(ctx):
                 logger.info(f"[FILTER] {symbol} {direction}: ❌ liquidity_sweep FAILED")
