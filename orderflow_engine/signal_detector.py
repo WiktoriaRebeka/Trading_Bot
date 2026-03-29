@@ -76,14 +76,14 @@ def detect_liquidity_sweep(ctx: SignalContext) -> bool:
 # ============================================================
 
 def check_liquidations(ctx: SignalContext,
-                       lookback_s: int = 60,
+                       lookback_s: int = 300,
                        min_volume_usd: float = 50_000.0) -> bool:
     MAX_LIQUIDATION_AGE_SECONDS = float(lookback_s)
 
     if ctx.direction == "LONG":
-        target_side = "Sell"
+        target_sides = {"sell", "Sell", "SELL"}
     else:
-        target_side = "Buy"
+        target_sides = {"buy", "Buy", "BUY"}
 
     now_utc = datetime.utcnow()
     vol = 0.0
@@ -93,9 +93,10 @@ def check_liquidations(ctx: SignalContext,
         liq_time_ms = int(liquidation_data.get("T") or liquidation_data.get("time") or 0)
         event_id = f"liq_{symbol}_{liq_time_ms}"
 
-        if liquidation_data.get("side") != target_side:
+        raw_side = str(liquidation_data.get("side") or "")
+        if raw_side not in target_sides:
             logger.debug(
-                f"[{event_id}] check_liquidations: skip — side mismatch (want {target_side})"
+                f"[{event_id}] check_liquidations: skip — side mismatch (want {target_sides})"
             )
             continue
 
