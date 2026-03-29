@@ -54,12 +54,15 @@ class MultiConnectionWSManager:
 
     async def _maintain_connection_for_batch(self, symbols_batch: List[str], connection_id: int):
         """Pętla utrzymująca połączenie (Auto-reconnect)."""
+        delay = RECONNECT_DELAY_SECONDS
         while self.is_running:
             try:
                 await self._websocket_listener_for_batch(symbols_batch, connection_id)
+                delay = RECONNECT_DELAY_SECONDS  # reset po udanym połączeniu
             except Exception as e:
-                logger.error(f"[Conn-{connection_id}] Błąd pętli: {e}. Reconnect za {RECONNECT_DELAY_SECONDS}s")
-                await asyncio.sleep(RECONNECT_DELAY_SECONDS)
+                logger.error(f"[Conn-{connection_id}] Błąd pętli: {e}. Reconnect za {delay}s")
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 60)  # max 60s backoff
 
     async def _websocket_listener_for_batch(self, symbols_batch: List[str], connection_id: int):
         """Obsługa pojedynczego połączenia WebSocket."""
@@ -127,6 +130,7 @@ class MultiConnectionWSManager:
             logger.warning(f"[Conn-{connection_id}] Połączenie zamknięte przez serwer")
         except Exception as e:
             logger.error(f"[Conn-{connection_id}] Błąd połączenia: {e}")
+            raise  # propaguj do _maintain_connection_for_batch
 
     async def _process_message(self, data: dict, connection_id: int):
         """Główny punkt wejścia dla danych z giełdy."""
