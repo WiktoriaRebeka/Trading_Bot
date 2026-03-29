@@ -2,12 +2,19 @@
 # WERSJA 2.0 - Używa istniejących tabel
 
 from google.cloud import bigquery
+import json
 from datetime import datetime
 import logging
 
 from shared_lib import constants
 
 logger = logging.getLogger(__name__)
+
+
+def _json_default(obj):
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
 class OrderFlowBigQueryLogger:
     """
@@ -147,6 +154,7 @@ class OrderFlowBigQueryLogger:
         }
         
         try:
+            row = json.loads(json.dumps(row, default=_json_default))
             errors = self.client.insert_rows_json(table_id, [row])
         except Exception as e:
             logger.error(f"❌ DOM event log error: {e}")
