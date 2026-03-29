@@ -19,8 +19,9 @@ class HistoryBackfiller:
             "limit": limit
         }
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(self.endpoint, params=params, timeout=10) as response:
+            timeout = aiohttp.ClientTimeout(total=15)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(self.endpoint, params=params) as response:
                     if response.status == 200:
                         data = await response.json()
                         if data.get("retCode") == 0 and data.get("result"):
