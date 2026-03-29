@@ -99,14 +99,35 @@ async def evaluate_and_maybe_alert(symbol: str, processor):
     for direction in ["LONG", "SHORT"]:
         try:
             ctx = builder.build_signal_context(symbol, direction)
-            if not detect_liquidity_sweep(ctx): continue
-            if not check_liquidations(ctx, min_volume_usd=_get_min_liq_volume(symbol)): continue
-            if not check_delta_divergence(ctx): continue
-            if not check_dom_wall(ctx): continue
+            
+            if not detect_liquidity_sweep(ctx):
+                logger.info(f"[FILTER] {symbol} {direction}: ❌ liquidity_sweep FAILED")
+                continue
+            logger.info(f"[FILTER] {symbol} {direction}: ✅ liquidity_sweep OK")
+            
+            liq_threshold = _get_min_liq_volume(symbol)
+            if not check_liquidations(ctx, min_volume_usd=liq_threshold):
+                liq_vol = sum(float(l.get('volume_usd', 0)) for l in ctx.liquidations)
+                logger.info(f"[FILTER] {symbol} {direction}: ❌ liquidations FAILED vol={liq_vol:.0f} threshold={liq_threshold:.0f}")
+                continue
+            logger.info(f"[FILTER] {symbol} {direction}: ✅ liquidations OK")
+            
+            if not check_delta_divergence(ctx):
+                logger.info(f"[FILTER] {symbol} {direction}: ❌ delta_divergence FAILED")
+                continue
+            logger.info(f"[FILTER] {symbol} {direction}: ✅ delta_divergence OK")
+            
+            if not check_dom_wall(ctx):
+                logger.info(f"[FILTER] {symbol} {direction}: ❌ dom_wall FAILED")
+                continue
+            logger.info(f"[FILTER] {symbol} {direction}: ✅ dom_wall OK")
             
             score = compute_confidence_score(ctx, liq_ok=True, delta_ok=True, dom_ok=True)
-            if score < 70: continue
-            
+            if score < 70:
+                logger.info(f"[FILTER] {symbol} {direction}: ❌ score FAILED score={score:.1f} < 70")
+                continue
+            logger.info(f"[FILTER] {symbol} {direction}: ✅ score OK score={score:.1f}")
+
             entry = ctx.current_price
             alert = {
                 "event_id": f"{symbol}-{int(time.time())}", "signal_id": f"AUTO-{symbol}-{entry}",
