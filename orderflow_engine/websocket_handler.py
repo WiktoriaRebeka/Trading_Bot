@@ -126,8 +126,9 @@ class MultiConnectionWSManager:
                             await self._process_message(data, connection_id)
                 finally:
                     ping_task.cancel()
-        except websockets.exceptions.ConnectionClosed:
-            logger.warning(f"[Conn-{connection_id}] Połączenie zamknięte przez serwer")
+        except websockets.exceptions.ConnectionClosed as e:
+            logger.warning(f"[Conn-{connection_id}] Połączenie zamknięte przez serwer: {e}")
+            raise
         except Exception as e:
             logger.error(f"[Conn-{connection_id}] Błąd połączenia: {e}")
             raise  # propaguj do _maintain_connection_for_batch
