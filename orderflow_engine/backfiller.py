@@ -36,5 +36,5 @@ class HistoryBackfiller:
                     else:
                         logger.error(f"❌ Bybit API Error {symbol}: {response.status}")
         except Exception as e:
-            logger.error(f"❌ Błąd backfillu dla {symbol}: {e}")
+            logger.error(f"❌ Błąd backfillu dla {symbol}: {type(e).__name__}: {e}", exc_info=True)
         return []
