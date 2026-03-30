@@ -156,7 +156,11 @@ class MultiConnectionWSManager:
 
     async def _process_message(self, data: dict, connection_id: int):
         """Główny punkt wejścia dla danych z giełdy."""
-        # --- TELEMETRIA ---
+        topic: str = data.get("topic", "")
+        payload = data.get("data")
+        if not payload:
+            return
+
         self._msg_count += 1
         now = time.time()
         if now - self._last_telemetry_time > 30:
@@ -164,10 +168,7 @@ class MultiConnectionWSManager:
             self._msg_count = 0
             self._last_telemetry_time = now
 
-        topic: str = data.get("topic", "")
         symbol = topic.split('.')[-1] if '.' in topic else "unknown"
-        payload = data.get("data")
-        if not payload: return
 
         # 1. PUBLIC TRADES
         if topic.startswith("publicTrade."):
