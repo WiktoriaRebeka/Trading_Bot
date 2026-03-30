@@ -107,7 +107,7 @@ class OrderFlowMetrics:
     def process_liquidation(self, liq):
         event = LiquidationEvent(liq['symbol'], liq['side'], liq['price'], liq['qty'], liq['time'], liq['qty'] * liq['price'])
         self.liquidations[event.symbol].append(event)
-        cutoff = int(time.time() * 1000) - 60000
+        cutoff = int(time.time() * 1000) - 300000
         self.liquidations[event.symbol] = [e for e in self.liquidations[event.symbol] if e.time > cutoff]
         self._check_liquidation_cascade(event.symbol)
         self._refresh_context_cache(event.symbol)
@@ -233,7 +233,7 @@ class OrderFlowMetrics:
     def get_last_funding(self, symbol: str) -> float:
         t = self.tickers.get(symbol); return t.get('funding_rate', 0.0) if t else 0.0
 
-    def get_recent_liquidations(self, symbol: str, window_sec: int = 60):
+    def get_recent_liquidations(self, symbol: str, window_sec: int = 300):
         now_ms = int(time.time() * 1000); cutoff = now_ms - (window_sec * 1000); liqs = self.liquidations.get(symbol, [])
         return [{
             'side': e.side,
