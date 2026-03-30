@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import threading
 import time
 import websockets
 from typing import List, Dict
@@ -22,10 +23,11 @@ class OrderBookThrottler:
         self.throttle_seconds = throttle_seconds
 
     def should_process(self, symbol: str) -> bool:
+        sym = str(symbol).upper()
         now = time.time()
-        last = self.last_processed.get(symbol, 0)
+        last = self.last_processed.get(sym, 0)
         if now - last >= self.throttle_seconds:
-            self.last_processed[symbol] = now
+            self.last_processed[sym] = now
             return True
         return False
 
@@ -36,6 +38,7 @@ class MultiConnectionWSManager:
         self.is_running = True
         self.ob_throttler = OrderBookThrottler(throttle_seconds=1.0)
         self._last_evaluation_time: Dict[str, float] = {}
+        self._eval_throttle_lock = threading.Lock()
         
         # TELEMETRIA
         self._msg_count = 0
@@ -197,18 +200,22 @@ class MultiConnectionWSManager:
             await self._trigger_evaluation(symbol)
 
     async def _trigger_evaluation(self, symbol: str):
-        """Uruchamia silnik decyzyjny z dławieniem (throttle)."""
-        now = time.time()
-        if now - self._last_evaluation_time.get(symbol, 0) >= EVALUATION_THROTTLE_SEC:
-            self._last_evaluation_time[symbol] = now
-            asyncio.create_task(self._safe_evaluate(symbol))
+        """Uruchamia silnik decyzyjny z dławieniem (throttle). Lock zapobiega lawinie tasków z równoległych wiadomości WS."""
+        sym = str(symbol).upper()
+        with self._eval_throttle_lock:
+            now = time.time()
+            if now - self._last_evaluation_time.get(sym, 0) < EVALUATION_THROTTLE_SEC:
+                return
+            self._last_evaluation_time[sym] = now
+        asyncio.create_task(self._safe_evaluate(sym))
 
     async def _safe_evaluate(self, symbol: str):
         """Bezpieczne wywołanie analizy sygnału."""
+        sym = str(symbol).upper()
         try:
-            await evaluate_and_maybe_alert(symbol, self.processor)
+            await evaluate_and_maybe_alert(sym, self.processor)
         except Exception as e:
-            logger.error(f"❌ Błąd ewaluacji dla {symbol}: {e}")
+            logger.error(f"❌ Błąd ewaluacji dla {sym}: {e}")
 
     async def shutdown(self):
         """Zamknięcie managera."""
