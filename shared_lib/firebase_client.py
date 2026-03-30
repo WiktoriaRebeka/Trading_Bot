@@ -19,13 +19,24 @@ def initialize_firebase() -> bool:
         database_id = "trading-bot-data"
         logger.info(f"Inicjalizacja klienta Firestore dla projektu '{project_id}' i bazy '{database_id}'...")
         db_client = firestore.Client(project=project_id, database=database_id)
-        db_client.collection('_test_connection_').limit(1).get()
         logger.info("Inicjalizacja Firestore zakończona sukcesem.")
         return True
     except Exception as e:
         logger.critical(f"KRYTYCZNY BŁĄD: Inicjalizacja klienta Firestore nie powiodła się: {e}", exc_info=True)
         db_client = None
         return False
+
+
+def verify_firestore_connection() -> bool:
+    """Pierwszy RPC do Firestore (blokujący) — wywołuj z asyncio.to_thread, nie na pętli zdarzeń."""
+    try:
+        get_db().collection("_test_connection_").limit(1).get()
+        logger.info("Weryfikacja połączenia Firestore (testowy odczyt) zakończona sukcesem.")
+        return True
+    except Exception as e:
+        logger.critical(f"KRYTYCZNY BŁĄD: Weryfikacja Firestore nie powiodła się: {e}", exc_info=True)
+        return False
+
 
 def get_db() -> firestore.Client:
     """Zwraca zainicjalizowanego klienta Firestore lub zgłasza wyjątek, jeśli inicjalizacja się nie powiodła."""

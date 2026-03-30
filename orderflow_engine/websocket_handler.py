@@ -75,9 +75,10 @@ class MultiConnectionWSManager:
         """Obsługa pojedynczego połączenia WebSocket."""
         try:
             if connection_id not in self._ws_handshake_ok:
-                stagger = float(os.environ.get("WS_CONN_STAGGER_SEC", "2.0"))
-                cap = float(os.environ.get("WS_CONN_STAGGER_CAP_SEC", "50"))
-                jitter = float(os.environ.get("WS_CONN_STAGGER_JITTER_SEC", "2.5"))
+                # Domyślnie umiarkowany stagger (~12 s do ostatniego z 25 połączeń) — duże wartości blokują start i kumulują się z limitami Bybit.
+                stagger = float(os.environ.get("WS_CONN_STAGGER_SEC", "0.45"))
+                cap = float(os.environ.get("WS_CONN_STAGGER_CAP_SEC", "12"))
+                jitter = float(os.environ.get("WS_CONN_STAGGER_JITTER_SEC", "0.9"))
                 wait_s = min(connection_id * stagger, cap) + random.uniform(0, max(0.0, jitter))
             else:
                 base = float(os.environ.get("WS_RECONNECT_JITTER_BASE_SEC", "2.0"))

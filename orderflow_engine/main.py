@@ -13,9 +13,11 @@ from orderflow_engine.backfiller import HistoryBackfiller
 from orderflow_engine.integration import (
     SignalContextBuilder,
     get_global_context,
+    load_remote_context_firestore,
+    prime_context_memory,
     set_context_firestore_client,
 )
-from shared_lib.firebase_client import initialize_firebase, get_db
+from shared_lib.firebase_client import initialize_firebase, get_db, verify_firestore_connection
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -120,7 +122,10 @@ async def lifespan(app: FastAPI):
     ws_manager = None
     try:
         logger.info("🚀 Starting OrderFlow Engine V7.5...")
-        initialize_firebase()
+        if not await asyncio.to_thread(initialize_firebase):
+            raise RuntimeError("initialize_firebase() zwróciło False — brak klienta Firestore")
+        if not await asyncio.to_thread(verify_firestore_connection):
+            raise RuntimeError("verify_firestore_connection() nie powiodło się")
         db = get_db()
         set_context_firestore_client(db)
         METRICS_PROCESSOR = OrderFlowMetrics(firestore_client=db)
@@ -145,6 +150,11 @@ async def health(): return {"status": "healthy"}
 async def get_signal_context(symbol: str):
     symbol_clean = symbol.upper().replace(".P", "")
     ctx = get_global_context(symbol_clean)
+    if ctx is None:
+        remote = await asyncio.to_thread(load_remote_context_firestore, symbol_clean)
+        if remote:
+            prime_context_memory(symbol_clean, remote)
+            ctx = remote
     if ctx: return JSONResponse(content={"status": "ok", "data": ctx})
     if CONTEXT_BUILDER:
         ctx = CONTEXT_BUILDER.build_context(symbol_clean)

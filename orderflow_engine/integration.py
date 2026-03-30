@@ -4,6 +4,7 @@
 import logging
 import math
 import os
+import queue
 import time
 import threading
 from datetime import datetime, timezone
@@ -37,12 +38,19 @@ CONTEXT_FIRESTORE_MIN_INTERVAL_SEC = float(
 ORDERFLOW_CONTEXT_USE_FIRESTORE = os.environ.get(
     "ORDERFLOW_CONTEXT_USE_FIRESTORE", "true"
 ).strip().lower() in ("1", "true", "yes", "on")
+CONTEXT_FS_QUEUE_MAX = int(os.environ.get("CONTEXT_FS_QUEUE_MAX", "2000"))
+
+_fs_write_queue: Optional[queue.Queue] = None
+_fs_writer_thread: Optional[threading.Thread] = None
+_fs_writer_lock = threading.Lock()
 
 
 def set_context_firestore_client(client) -> None:
     """Wywołaj z main po initialize_firestore — współdzielony kontekst między replikami Cloud Run."""
     global _firestore_client
     _firestore_client = client
+    if client is not None and ORDERFLOW_CONTEXT_USE_FIRESTORE:
+        _ensure_firestore_writer_thread()
 
 
 def _sanitize_for_firestore(obj: Any) -> Any:
@@ -57,6 +65,61 @@ def _sanitize_for_firestore(obj: Any) -> Any:
     return obj
 
 
+def _firestore_writer_main() -> None:
+    from google.cloud import firestore as gcf
+
+    while True:
+        item = _fs_write_queue.get()
+        sym_log = item[0] if (item is not None and isinstance(item, tuple) and len(item) >= 1) else "?"
+        try:
+            if item is None:
+                return
+            sym, ctx = item
+            client = _firestore_client
+            if client is None:
+                continue
+            payload = _sanitize_for_firestore(ctx)
+            ref = client.collection(ORDERFLOW_CONTEXT_FS_COLLECTION).document(sym)
+            ref.set(
+                {"data": payload, "updated_at": gcf.SERVER_TIMESTAMP, "symbol": sym},
+                merge=False,
+            )
+        except Exception as e:
+            logger.warning("Firestore context persist failed symbol=%s: %s", sym_log, e)
+        finally:
+            _fs_write_queue.task_done()
+
+
+def _ensure_firestore_writer_thread() -> None:
+    global _fs_write_queue, _fs_writer_thread
+    with _fs_writer_lock:
+        if _fs_writer_thread is not None and _fs_writer_thread.is_alive():
+            return
+        _fs_write_queue = queue.Queue(maxsize=CONTEXT_FS_QUEUE_MAX)
+        _fs_writer_thread = threading.Thread(
+            target=_firestore_writer_main,
+            name="orderflow-fs-context-writer",
+            daemon=True,
+        )
+        _fs_writer_thread.start()
+        logger.info("Uruchomiono wątek zapisu kontekstu do Firestore (poza pętlą asyncio).")
+
+
+def _enqueue_symbol_context_firestore(sym: str, ctx: Dict[str, Any]) -> None:
+    if not ORDERFLOW_CONTEXT_USE_FIRESTORE or _firestore_client is None:
+        return
+    _ensure_firestore_writer_thread()
+    assert _fs_write_queue is not None
+    try:
+        _fs_write_queue.put_nowait((sym, ctx))
+    except queue.Full:
+        logger.warning(
+            "Kolejka zapisu Firestore pełna (max=%s), pomijam persist symbol=%s",
+            CONTEXT_FS_QUEUE_MAX,
+            sym,
+        )
+
+
 def _persist_symbol_context_firestore(sym: str, ctx: Dict[str, Any]) -> None:
     if not ORDERFLOW_CONTEXT_USE_FIRESTORE or _firestore_client is None:
         return
@@ -65,17 +128,7 @@ def _persist_symbol_context_firestore(sym: str, ctx: Dict[str, Any]) -> None:
         if now - _last_firestore_persist_ts.get(sym, 0) < CONTEXT_FIRESTORE_MIN_INTERVAL_SEC:
             return
         _last_firestore_persist_ts[sym] = now
-    try:
-        from google.cloud import firestore as gcf
-
-        payload = _sanitize_for_firestore(ctx)
-        ref = _firestore_client.collection(ORDERFLOW_CONTEXT_FS_COLLECTION).document(sym)
-        ref.set(
-            {"data": payload, "updated_at": gcf.SERVER_TIMESTAMP, "symbol": sym},
-            merge=False,
-        )
-    except Exception as e:
-        logger.warning("Firestore context persist failed symbol=%s: %s", sym, e)
+    _enqueue_symbol_context_firestore(sym, ctx)
 
 
 def _load_symbol_context_firestore(sym: str) -> Optional[Dict[str, Any]]:
@@ -101,19 +154,22 @@ def update_symbol_context(symbol: str, ctx: Dict[str, Any]) -> None:
     _persist_symbol_context_firestore(sym, ctx)
 
 
+def prime_context_memory(symbol: str, ctx: Dict[str, Any]) -> None:
+    """Wypełnia cache RAM bez ponownego zapisu do Firestore (np. po odczycie z innej repliki)."""
+    with _context_lock:
+        _symbol_context_cache[symbol.upper()] = ctx
+
+
+def load_remote_context_firestore(symbol: str) -> Optional[Dict[str, Any]]:
+    """Blokujący odczyt z Firestore — używaj wyłącznie przez asyncio.to_thread w handlerze HTTP."""
+    return _load_symbol_context_firestore(symbol.upper())
+
+
 def get_global_context(symbol: str) -> Optional[Dict[str, Any]]:
-    """Pobiera najświeższy stan dla bot_service (używane przez API /context)."""
+    """Wyłącznie cache w RAM — nigdy synchronicznego Firestore (ścieżka WebSocket / hot path)."""
     sym = symbol.upper()
     with _context_lock:
-        hit = _symbol_context_cache.get(sym)
-        if hit:
-            return hit
-    remote = _load_symbol_context_firestore(sym)
-    if remote:
-        with _context_lock:
-            _symbol_context_cache[sym] = remote
-        return remote
-    return None
+        return _symbol_context_cache.get(sym)
 
 
 class SignalContextBuilder:
