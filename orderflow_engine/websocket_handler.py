@@ -100,10 +100,11 @@ class MultiConnectionWSManager:
                 logger.info(f"[Conn-{connection_id}] WYSYŁAM SUBSKRYPCJĘ ({len(topics)} tematów) dla {symbols_batch}")
 
                 async def _bybit_ping_loop():
+                    """Bybit V5 public: JSON {"op":"ping"} — wymagane okresowo; najpierw ping, potem odstęp 20s."""
                     while self.is_running:
                         try:
-                            await asyncio.sleep(20)
                             await ws.send(json.dumps({"op": "ping"}))
+                            await asyncio.sleep(20)
                         except Exception:
                             break
 
