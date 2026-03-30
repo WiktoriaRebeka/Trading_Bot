@@ -10,7 +10,11 @@ from orderflow_engine.websocket_handler import MultiConnectionWSManager
 from orderflow_engine.metrics_processor import OrderFlowMetrics
 from orderflow_engine.config_symbols import ALL_SYMBOLS_FOR_WS
 from orderflow_engine.backfiller import HistoryBackfiller
-from orderflow_engine.integration import SignalContextBuilder, get_global_context
+from orderflow_engine.integration import (
+    SignalContextBuilder,
+    get_global_context,
+    set_context_firestore_client,
+)
 from shared_lib.firebase_client import initialize_firebase, get_db
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -117,7 +121,9 @@ async def lifespan(app: FastAPI):
     try:
         logger.info("🚀 Starting OrderFlow Engine V7.5...")
         initialize_firebase()
-        METRICS_PROCESSOR = OrderFlowMetrics(firestore_client=get_db())
+        db = get_db()
+        set_context_firestore_client(db)
+        METRICS_PROCESSOR = OrderFlowMetrics(firestore_client=db)
         CONTEXT_BUILDER = SignalContextBuilder(METRICS_PROCESSOR)
         ws_manager = MultiConnectionWSManager(symbols=ALL_SYMBOLS_FOR_WS, metrics_processor=METRICS_PROCESSOR)
         asyncio.create_task(ws_manager.start_all_connections())

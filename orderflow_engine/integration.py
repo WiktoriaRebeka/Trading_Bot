@@ -2,6 +2,8 @@
 # WERSJA 7.2 - Ingestion Layer State Management
 
 import logging
+import math
+import os
 import time
 import threading
 from datetime import datetime, timezone
@@ -22,16 +24,96 @@ logger = logging.getLogger(__name__)
 # ============================================================
 _context_lock = threading.Lock()
 _symbol_context_cache: Dict[str, Dict[str, Any]] = {}
+_fs_persist_lock = threading.Lock()
+_last_firestore_persist_ts: Dict[str, float] = {}
+_firestore_client = None
+
+ORDERFLOW_CONTEXT_FS_COLLECTION = os.environ.get(
+    "ORDERFLOW_CONTEXT_FS_COLLECTION", "orderflow_symbol_context"
+)
+CONTEXT_FIRESTORE_MIN_INTERVAL_SEC = float(
+    os.environ.get("CONTEXT_FIRESTORE_MIN_INTERVAL_SEC", "0.25")
+)
+ORDERFLOW_CONTEXT_USE_FIRESTORE = os.environ.get(
+    "ORDERFLOW_CONTEXT_USE_FIRESTORE", "true"
+).strip().lower() in ("1", "true", "yes", "on")
+
+
+def set_context_firestore_client(client) -> None:
+    """Wywołaj z main po initialize_firestore — współdzielony kontekst między replikami Cloud Run."""
+    global _firestore_client
+    _firestore_client = client
+
+
+def _sanitize_for_firestore(obj: Any) -> Any:
+    if isinstance(obj, dict):
+        return {str(k): _sanitize_for_firestore(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize_for_firestore(x) for x in obj]
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    return obj
+
+
+def _persist_symbol_context_firestore(sym: str, ctx: Dict[str, Any]) -> None:
+    if not ORDERFLOW_CONTEXT_USE_FIRESTORE or _firestore_client is None:
+        return
+    now = time.time()
+    with _fs_persist_lock:
+        if now - _last_firestore_persist_ts.get(sym, 0) < CONTEXT_FIRESTORE_MIN_INTERVAL_SEC:
+            return
+        _last_firestore_persist_ts[sym] = now
+    try:
+        from google.cloud import firestore as gcf
+
+        payload = _sanitize_for_firestore(ctx)
+        ref = _firestore_client.collection(ORDERFLOW_CONTEXT_FS_COLLECTION).document(sym)
+        ref.set(
+            {"data": payload, "updated_at": gcf.SERVER_TIMESTAMP, "symbol": sym},
+            merge=False,
+        )
+    except Exception as e:
+        logger.warning("Firestore context persist failed symbol=%s: %s", sym, e)
+
+
+def _load_symbol_context_firestore(sym: str) -> Optional[Dict[str, Any]]:
+    if not ORDERFLOW_CONTEXT_USE_FIRESTORE or _firestore_client is None:
+        return None
+    try:
+        snap = _firestore_client.collection(ORDERFLOW_CONTEXT_FS_COLLECTION).document(sym).get()
+        if not snap.exists:
+            return None
+        data = snap.to_dict() or {}
+        ctx = data.get("data")
+        return ctx if isinstance(ctx, dict) else None
+    except Exception as e:
+        logger.warning("Firestore context read failed symbol=%s: %s", sym, e)
+        return None
+
 
 def update_symbol_context(symbol: str, ctx: Dict[str, Any]) -> None:
     """Aktualizuje globalny stan mikrostruktury dla danego symbolu."""
+    sym = symbol.upper()
     with _context_lock:
-        _symbol_context_cache[symbol.upper()] = ctx
+        _symbol_context_cache[sym] = ctx
+    _persist_symbol_context_firestore(sym, ctx)
+
 
 def get_global_context(symbol: str) -> Optional[Dict[str, Any]]:
     """Pobiera najświeższy stan dla bot_service (używane przez API /context)."""
+    sym = symbol.upper()
     with _context_lock:
-        return _symbol_context_cache.get(symbol.upper())
+        hit = _symbol_context_cache.get(sym)
+        if hit:
+            return hit
+    remote = _load_symbol_context_firestore(sym)
+    if remote:
+        with _context_lock:
+            _symbol_context_cache[sym] = remote
+        return remote
+    return None
 
 
 class SignalContextBuilder:

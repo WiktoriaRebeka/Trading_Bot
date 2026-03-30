@@ -5,7 +5,7 @@ import os
 import time
 import logging
 from collections import defaultdict, deque
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple, Any, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -69,6 +69,7 @@ class OrderFlowMetrics:
         self.tickers = {}
         self.liquidations = defaultdict(list)
         self.orderbook_snapshots = {}
+        self.orderbook_levels_50: Dict[str, Tuple[List[Tuple[float, float]], List[Tuple[float, float]]]] = {}
         self.delta_history = defaultdict(lambda: deque(maxlen=200))
         
         self.LIQUIDATION_CASCADE_THRESHOLD_USD = int(
@@ -84,6 +85,10 @@ class OrderFlowMetrics:
         self.LIQ_INGEST_LOG_INTERVAL_SEC = float(
             os.environ.get("LIQ_INGEST_LOG_INTERVAL_SEC", "60")
         )
+        self.ORDERBOOK_CONTEXT_REFRESH_SEC = float(
+            os.environ.get("ORDERBOOK_CONTEXT_REFRESH_SEC", "0.2")
+        )
+        self._orderbook_ctx_refresh_at: Dict[str, float] = {}
 
         self.bot_url = os.environ.get(
             "BOT_SERVICE_URL",
@@ -182,10 +187,52 @@ class OrderFlowMetrics:
                 sym, len(buf), total_usd, event.value_usd, event.side,
             )
 
+    @staticmethod
+    def _sort_ob_side(levels: List[Tuple[float, float]], *, bids_side: bool, depth: int) -> List[Tuple[float, float]]:
+        if not levels:
+            return []
+        key = (lambda x: -x[0]) if bids_side else (lambda x: x[0])
+        return sorted(levels, key=key)[:depth]
+
+    def _merge_ob_side(
+        self,
+        prev: List[Tuple[float, float]],
+        updates: Iterable[Tuple[float, float]],
+        *,
+        bids_side: bool,
+        depth: int = 50,
+    ) -> List[Tuple[float, float]]:
+        book: Dict[float, float] = {float(p): float(q) for p, q in prev}
+        for p, q in updates:
+            pf, qf = float(p), float(q)
+            if qf <= 0:
+                book.pop(pf, None)
+            else:
+                book[pf] = qf
+        items = sorted(book.items(), key=lambda x: (-x[0] if bids_side else x[0]))
+        return [(p, q) for p, q in items[:depth]]
+
     def process_orderbook(self, ob_data: dict):
         symbol = str(ob_data["symbol"]).upper()
-        bids, asks = ob_data['bids'], ob_data['asks']
-        if not bids or not asks: return
+        msg_type = str(ob_data.get("msg_type") or "snapshot").lower()
+        raw_b: List[Tuple[float, float]] = list(ob_data.get("bids") or [])
+        raw_a: List[Tuple[float, float]] = list(ob_data.get("asks") or [])
+        prev_full = self.orderbook_levels_50.get(symbol)
+
+        if msg_type == "delta":
+            if prev_full is None:
+                return
+            pb, pa = prev_full
+            merged_b = self._merge_ob_side(list(pb), raw_b, bids_side=True, depth=50)
+            merged_a = self._merge_ob_side(list(pa), raw_a, bids_side=False, depth=50)
+        else:
+            merged_b = self._sort_ob_side(raw_b, bids_side=True, depth=50)
+            merged_a = self._sort_ob_side(raw_a, bids_side=False, depth=50)
+
+        if not merged_b or not merged_a:
+            return
+        self.orderbook_levels_50[symbol] = (merged_b, merged_a)
+        bids, asks = merged_b[:10], merged_a[:10]
         bid_vol = sum([p * q for p, q in bids[:10]])
         ask_vol = sum([p * q for p, q in asks[:10]])
         obi = (bid_vol - ask_vol) / (bid_vol + ask_vol) if (bid_vol + ask_vol) > 0 else 0
@@ -197,7 +244,11 @@ class OrderFlowMetrics:
         snapshot = DOMSnapshot(symbol=symbol, bids=bids[:10], asks=asks[:10], timestamp=ob_data['timestamp'], obi=obi, best_bid=bids[0][0], best_ask=asks[0][0], bid_walls=bid_walls, ask_walls=ask_walls)
         self.orderbook_snapshots[symbol] = snapshot
         if bid_walls or ask_walls: self._log_dom_walls_to_bq(symbol, snapshot)
-        self._refresh_context_cache(symbol)
+        now = time.time()
+        last_r = self._orderbook_ctx_refresh_at.get(symbol, 0.0)
+        if now - last_r >= self.ORDERBOOK_CONTEXT_REFRESH_SEC:
+            self._orderbook_ctx_refresh_at[symbol] = now
+            self._refresh_context_cache(symbol)
 
     def _refresh_context_cache(self, symbol: str):
         """WARSTWA INGERENCJI: Aktualizuje globalny cache w integration.py"""
@@ -206,12 +257,28 @@ class OrderFlowMetrics:
             ticker = self.tickers.get(sym, {})
             engine = self.engines[sym]
             dom = self.orderbook_snapshots.get(sym)
+            if dom:
+                dom_payload = {
+                    "obi": dom.obi,
+                    "bids": [[p, q] for p, q in dom.bids],
+                    "asks": [[p, q] for p, q in dom.asks],
+                    "bid_walls": len(dom.bid_walls),
+                    "ask_walls": len(dom.ask_walls),
+                }
+            else:
+                dom_payload = {
+                    "obi": 0.0,
+                    "bids": [],
+                    "asks": [],
+                    "bid_walls": 0,
+                    "ask_walls": 0,
+                }
             ctx = {
                 "symbol": sym,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "price": ticker.get('price'),
                 "funding_rate": ticker.get('funding_rate', 0.0),
-                "dom": {"obi": dom.obi if dom else 0.0, "bid_walls": len(dom.bid_walls) if dom else 0, "ask_walls": len(dom.ask_walls) if dom else 0},
+                "dom": dom_payload,
                 "liquidations": self.get_recent_liquidations(sym),
                 "structure": {"last_swing_high": engine.last_swing_high, "last_swing_low": engine.last_swing_low},
                 "delta_points": self.get_recent_deltas(sym, limit=5)

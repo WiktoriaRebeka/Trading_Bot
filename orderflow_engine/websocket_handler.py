@@ -212,21 +212,51 @@ class MultiConnectionWSManager:
                 })
                 await self._trigger_evaluation(liq_symbol)
 
-        # 3. ORDERBOOK
+        # 3. ORDERBOOK (V5: snapshot + delta; każdą wiadomość mergujemy — throttle tylko na ewaluację sygnału)
         elif topic.startswith("orderbook."):
-            if self.ob_throttler.should_process(symbol):
+            try:
+                bids_parsed = [(float(p), float(q)) for p, q in payload.get("b", [])]
+                asks_parsed = [(float(p), float(q)) for p, q in payload.get("a", [])]
+            except (TypeError, ValueError) as e:
+                logger.warning(
+                    f"[Conn-{connection_id}] Orderbook parse skip {symbol}: {e} topic={topic!r}"
+                )
+            else:
+                ob_type = str(data.get("type") or "snapshot").lower()
+                ts_raw = data.get("ts") or payload.get("ts") or payload.get("u")
+                try:
+                    ts_ob = int(float(ts_raw)) if ts_raw not in (None, "") else int(time.time() * 1000)
+                except (TypeError, ValueError):
+                    ts_ob = int(time.time() * 1000)
                 self.processor.process_orderbook({
-                    'symbol': symbol, 
-                    'bids': [(float(p), float(q)) for p, q in payload.get('b', [])],
-                    'asks': [(float(p), float(q)) for p, q in payload.get('a', [])],
-                    'timestamp': int(payload.get('u', time.time() * 1000))
+                    "symbol": symbol,
+                    "bids": bids_parsed,
+                    "asks": asks_parsed,
+                    "timestamp": ts_ob,
+                    "msg_type": ob_type,
                 })
-                await self._trigger_evaluation(symbol)
+                if self.ob_throttler.should_process(symbol):
+                    await self._trigger_evaluation(symbol)
 
         # 4. TICKERS (V5: snapshot + delta — brak pola = bez zmiany; Bybit: lastPrice, markPrice, …)
         elif topic.startswith("tickers."):
+            pl = payload
+            if isinstance(pl, list):
+                if len(pl) == 1 and isinstance(pl[0], dict):
+                    pl = pl[0]
+                else:
+                    logger.warning(
+                        f"[Conn-{connection_id}] tickers.{symbol}: nieobsługiwany kształt data=list len={len(pl)}"
+                    )
+                    return
+            if not isinstance(pl, dict):
+                logger.warning(
+                    f"[Conn-{connection_id}] tickers.{symbol}: data nie jest dict, type={type(pl).__name__}"
+                )
+                return
+
             def _f(key: str) -> float | None:
-                v = payload.get(key)
+                v = pl.get(key)
                 if v is None or v == "":
                     return None
                 try:
@@ -247,9 +277,9 @@ class MultiConnectionWSManager:
             prev = self.processor.tickers.get(sym_u, {})
 
             def _merge_float(key: str, prev_key: str) -> float:
-                if key not in payload:
+                if key not in pl:
                     return float(prev.get(prev_key, 0.0) or 0.0)
-                v = payload.get(key)
+                v = pl.get(key)
                 if v is None or v == "":
                     return float(prev.get(prev_key, 0.0) or 0.0)
                 try:
