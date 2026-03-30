@@ -104,7 +104,12 @@ class OrderFlowMetrics:
 
     def process_trade(self, timestamp: int, symbol: str, side: str, qty: float, price: float):
         sym = str(symbol).upper()
-        self.trades[sym].append({'timestamp': timestamp, 'side': side, 'qty': qty, 'price': price})
+        s = str(side).strip()
+        if s.lower() == "buy":
+            s = "Buy"
+        elif s.lower() == "sell":
+            s = "Sell"
+        self.trades[sym].append({'timestamp': timestamp, 'side': s, 'qty': qty, 'price': price})
         builder = self.builders[sym]
         if not builder.symbol: builder.symbol = sym
         new_candle = builder.process_tick(price, qty, timestamp)
@@ -283,8 +288,8 @@ class OrderFlowMetrics:
         sym = str(symbol).upper()
         cutoff = int(time.time() * 1000) - (seconds * 1000)
         recent = [t for t in self.trades[sym] if t['timestamp'] > cutoff]
-        buy_v = sum([t['qty'] * t['price'] for t in recent if t['side'] == 'Buy'])
-        sell_v = sum([t['qty'] * t['price'] for t in recent if t['side'] == 'Sell'])
+        buy_v = sum(t['qty'] * t['price'] for t in recent if str(t['side']).lower() == 'buy')
+        sell_v = sum(t['qty'] * t['price'] for t in recent if str(t['side']).lower() == 'sell')
         return buy_v - sell_v
 
     def _detect_walls(self, levels, side):

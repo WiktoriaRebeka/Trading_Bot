@@ -173,9 +173,14 @@ class MultiConnectionWSManager:
         if topic.startswith("publicTrade."):
             for t in payload:
                 try:
+                    raw_t = t.get("T", 0)
+                    ts = int(float(raw_t)) if raw_t not in (None, "") else int(time.time() * 1000)
                     self.processor.process_trade(
-                        timestamp=int(t["T"]), symbol=t["s"], side=t["S"],
-                        qty=float(t["v"]), price=float(t["p"])
+                        timestamp=ts,
+                        symbol=t.get("s") or t.get("symbol", ""),
+                        side=t.get("S") or t.get("side", ""),
+                        qty=float(t.get("v", 0) or 0),
+                        price=float(t.get("p", 0) or 0),
                     )
                 except Exception as e:
                     logger.warning(f"[Conn-{connection_id}] Błąd przetwarzania ticku: {e} | dane: {t}")
