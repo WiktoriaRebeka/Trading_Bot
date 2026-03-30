@@ -40,45 +40,47 @@ class SignalContextBuilder:
 
     def build_context(self, symbol: str) -> Dict[str, Any]:
         """Zwraca kontekst mikrostruktury dla bot_service. Najpierw z cache."""
-        cached = get_global_context(symbol)
+        sym = str(symbol).upper()
+        cached = get_global_context(sym)
         if cached: return cached
         
         # Fallback: Budowanie kontekstu od zera
         now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        ticker = self.metrics.tickers.get(symbol, {})
-        dom = self.metrics.get_dom_snapshot(symbol)
-        full_ctx = self.metrics.get_full_context(symbol)
+        ticker = self.metrics.tickers.get(sym, {})
+        dom = self.metrics.get_dom_snapshot(sym)
+        full_ctx = self.metrics.get_full_context(sym)
         return {
-            "symbol": symbol, "timestamp": now, "price": ticker.get('price'),
+            "symbol": sym, "timestamp": now, "price": ticker.get('price'),
             "funding_rate": ticker.get('funding_rate', 0.0),
             "structure": full_ctx.get("structure", {}),
             "dom": {"obi": dom.get("obi", 0.0), "bids": dom.get("bids", []), "asks": dom.get("asks", [])},
-            "liquidations": self.metrics.get_recent_liquidations(symbol),
-            "delta_points": self.metrics.get_recent_deltas(symbol)
+            "liquidations": self.metrics.get_recent_liquidations(sym),
+            "delta_points": self.metrics.get_recent_deltas(sym)
         }
 
     def build_signal_context(self, symbol: str, direction: str) -> SignalContext:
         """Buduje SignalContext dla wewnętrznej logiki signal_detector."""
-        engine = self.metrics.engines[symbol]
-        current_price = self.metrics.get_last_price(symbol)
+        sym = str(symbol).upper()
+        engine = self.metrics.engines[sym]
+        current_price = self.metrics.get_last_price(sym)
         raw_swing = engine.last_swing_low if direction == "LONG" else engine.last_swing_high
         if raw_swing is None:
-            logger.debug(f"[{symbol}] {direction}: brak swing point — pomijam ewaluację")
+            logger.debug(f"[{sym}] {direction}: brak swing point — pomijam ewaluację")
             return None
         swing_price = raw_swing
         
-        liqs_raw = self.metrics.get_recent_liquidations(symbol)
-        deltas_raw = self.metrics.get_recent_deltas(symbol, limit=30)
-        dom_raw = self.metrics.get_dom_snapshot(symbol)
+        liqs_raw = self.metrics.get_recent_liquidations(sym)
+        deltas_raw = self.metrics.get_recent_deltas(sym, limit=30)
+        dom_raw = self.metrics.get_dom_snapshot(sym)
         
         return SignalContext(
-            symbol=symbol,
+            symbol=sym,
             direction=direction, current_price=current_price,
             swing_point=SwingPoint(price=swing_price, timestamp=datetime.now(timezone.utc)),
             liquidations=list(liqs_raw),
             recent_deltas=[DeltaPoint(price=d['price'], delta=d['delta'], timestamp=d['timestamp']) for d in deltas_raw],
             dom_snapshot=DomSnapshot(bids=dom_raw.get('bids', []), asks=dom_raw.get('asks', []), obi=dom_raw.get('obi', 0.0)),
-            funding_rate=self.metrics.get_last_funding(symbol)
+            funding_rate=self.metrics.get_last_funding(sym)
         )
 
 
@@ -95,49 +97,50 @@ def _get_min_liq_volume(symbol: str) -> float:
 
 
 async def evaluate_and_maybe_alert(symbol: str, processor):
+    sym = str(symbol).upper()
     COOLDOWN_SEC = 300
-    if time.time() - processor.last_signal_time.get(symbol, 0) < COOLDOWN_SEC:
-        logger.debug(f"[evaluate] {symbol}: cooldown aktywny, pomijam")
+    if time.time() - processor.last_signal_time.get(sym, 0) < COOLDOWN_SEC:
+        logger.debug(f"[evaluate] {sym}: cooldown aktywny, pomijam")
         return
     builder = SignalContextBuilder(processor)
     for direction in ["LONG", "SHORT"]:
         try:
-            ctx = builder.build_signal_context(symbol, direction)
+            ctx = builder.build_signal_context(sym, direction)
             if ctx is None:
                 continue
             
             if not detect_liquidity_sweep(ctx):
-                logger.info(f"[FILTER] {symbol} {direction}: ❌ liquidity_sweep FAILED")
+                logger.info(f"[FILTER] {sym} {direction}: ❌ liquidity_sweep FAILED")
                 continue
-            logger.info(f"[FILTER] {symbol} {direction}: ✅ liquidity_sweep OK")
+            logger.info(f"[FILTER] {sym} {direction}: ✅ liquidity_sweep OK")
             
-            liq_threshold = _get_min_liq_volume(symbol)
+            liq_threshold = _get_min_liq_volume(sym)
             if not check_liquidations(ctx, min_volume_usd=liq_threshold):
                 liq_vol = sum(float(l.get('volume_usd', 0)) for l in ctx.liquidations)
-                logger.info(f"[FILTER] {symbol} {direction}: ❌ liquidations FAILED vol={liq_vol:.0f} threshold={liq_threshold:.0f}")
+                logger.info(f"[FILTER] {sym} {direction}: ❌ liquidations FAILED vol={liq_vol:.0f} threshold={liq_threshold:.0f}")
                 continue
-            logger.info(f"[FILTER] {symbol} {direction}: ✅ liquidations OK")
+            logger.info(f"[FILTER] {sym} {direction}: ✅ liquidations OK")
             
             if not check_delta_divergence(ctx):
-                logger.info(f"[FILTER] {symbol} {direction}: ❌ delta_divergence FAILED")
+                logger.info(f"[FILTER] {sym} {direction}: ❌ delta_divergence FAILED")
                 continue
-            logger.info(f"[FILTER] {symbol} {direction}: ✅ delta_divergence OK")
+            logger.info(f"[FILTER] {sym} {direction}: ✅ delta_divergence OK")
             
             if not check_dom_wall(ctx):
-                logger.info(f"[FILTER] {symbol} {direction}: ❌ dom_wall FAILED")
+                logger.info(f"[FILTER] {sym} {direction}: ❌ dom_wall FAILED")
                 continue
-            logger.info(f"[FILTER] {symbol} {direction}: ✅ dom_wall OK")
+            logger.info(f"[FILTER] {sym} {direction}: ✅ dom_wall OK")
             
             score = compute_confidence_score(ctx, liq_ok=True, delta_ok=True, dom_ok=True)
             if score < 70:
-                logger.info(f"[FILTER] {symbol} {direction}: ❌ score FAILED score={score:.1f} < 70")
+                logger.info(f"[FILTER] {sym} {direction}: ❌ score FAILED score={score:.1f} < 70")
                 continue
-            logger.info(f"[FILTER] {symbol} {direction}: ✅ score OK score={score:.1f}")
+            logger.info(f"[FILTER] {sym} {direction}: ✅ score OK score={score:.1f}")
 
             entry = ctx.current_price
             alert = {
-                "event_id": f"{symbol}-{int(time.time())}", "signal_id": f"AUTO-{symbol}-{entry}",
-                "symbol": symbol, "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "event_id": f"{sym}-{int(time.time())}", "signal_id": f"AUTO-{sym}-{entry}",
+                "symbol": sym, "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                 "direction": direction, "entry": entry,
                 "sl": entry * 0.994 if direction == "LONG" else entry * 1.006,
                 "tp": entry * 1.018 if direction == "LONG" else entry * 0.982,
@@ -145,7 +148,7 @@ async def evaluate_and_maybe_alert(symbol: str, processor):
                 "raw_context": {"confidence_score": score, "obi": ctx.dom_snapshot.obi, "liq_vol": sum(float(l.get("volume_usd", 0)) for l in ctx.liquidations)}
             }
             await send_alert_to_bot(alert)
-            processor.last_signal_time[symbol] = time.time()
+            processor.last_signal_time[sym] = time.time()
             break 
         except Exception as e:
-            logger.error(f"Error evaluating {symbol}: {e}")
+            logger.error(f"Error evaluating {sym}: {e}")

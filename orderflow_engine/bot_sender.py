@@ -45,9 +45,10 @@ async def send_alert_to_bot(alert_payload: Dict[str, Any]) -> bool:
             ) as resp:
                 
                 if resp.status == 200:
+                    score = alert_payload.get("raw_context", {}).get("confidence_score", 0)
                     logger.info(
-                        f"🚀 ALERT SENT SUCCESSFULLY: {symbol} {alert_payload['direction']} "
-                        f"| Event: {event_id} | Score: {alert_payload.get('raw_context', {}).get('confidence_score', 0):.1f}"
+                        f"🚀 SYGNAŁ_OK | ALERT SENT SUCCESSFULLY [integration] {symbol} {alert_payload['direction']} "
+                        f"| event_id={event_id} | score={score:.1f}"
                     )
                     return True
                 else:

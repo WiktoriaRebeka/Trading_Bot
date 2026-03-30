@@ -79,6 +79,10 @@ class OrderFlowMetrics:
         self.SIGNAL_COOLDOWN_SEC = 300
         self.MIN_CONFIDENCE_SCORE = 75 
         self.last_signal_time = defaultdict(float)
+        self._liq_ingest_log_ts = defaultdict(float)
+        self.LIQ_INGEST_LOG_INTERVAL_SEC = float(
+            os.environ.get("LIQ_INGEST_LOG_INTERVAL_SEC", "60")
+        )
 
         self.bot_url = os.environ.get(
             "BOT_SERVICE_URL",
@@ -89,6 +93,7 @@ class OrderFlowMetrics:
         logger.info("✅ OrderFlow V7.1: Institutional Engine Active.")
 
     def pre_load_history(self, symbol, history_m1, history_d1):
+        symbol = str(symbol).upper()
         engine = self.engines[symbol]
         if history_d1:
             engine.major_high = max([k['high'] for k in history_d1])
@@ -97,23 +102,25 @@ class OrderFlowMetrics:
             engine.update_candles(c['open'], c['high'], c['low'], c['close'], c['ts'])
 
     def process_trade(self, timestamp: int, symbol: str, side: str, qty: float, price: float):
-        self.trades[symbol].append({'timestamp': timestamp, 'side': side, 'qty': qty, 'price': price})
-        builder = self.builders[symbol]
-        if not builder.symbol: builder.symbol = symbol
+        sym = str(symbol).upper()
+        self.trades[sym].append({'timestamp': timestamp, 'side': side, 'qty': qty, 'price': price})
+        builder = self.builders[sym]
+        if not builder.symbol: builder.symbol = sym
         new_candle = builder.process_tick(price, qty, timestamp)
         if new_candle:
-            self.engines[symbol].update_candles(new_candle['open'], new_candle['high'], new_candle['low'], new_candle['close'], new_candle['ts'])
-        delta = self._calculate_delta_window(symbol, 60)
-        self.delta_history[symbol].append({'price': price, 'delta': delta, 'timestamp': timestamp})
+            self.engines[sym].update_candles(new_candle['open'], new_candle['high'], new_candle['low'], new_candle['close'], new_candle['ts'])
+        delta = self._calculate_delta_window(sym, 60)
+        self.delta_history[sym].append({'price': price, 'delta': delta, 'timestamp': timestamp})
 
     def process_ticker(self, symbol, price, funding_rate, open_interest, volume_24h):
-        self.tickers[symbol] = {
+        sym = str(symbol).upper()
+        self.tickers[sym] = {
             'price': price, 'funding_rate': funding_rate, 
             'open_interest': open_interest, 'volume_24h': volume_24h
         }
         # To wywołanie gwarantuje, że bot_service widzi aktualną cenę
-        self._refresh_context_cache(symbol) 
-        self._autonomous_scanner(symbol)
+        self._refresh_context_cache(sym) 
+        self._autonomous_scanner(sym)
 
     def process_liquidation(self, liq):
         sym = str(liq["symbol"]).upper()
@@ -126,9 +133,18 @@ class OrderFlowMetrics:
         self.liquidations[event.symbol] = [e for e in self.liquidations[event.symbol] if e.time > cutoff]
         self._check_liquidation_cascade(event.symbol)
         self._refresh_context_cache(event.symbol)
+        now_m = time.time()
+        if now_m - self._liq_ingest_log_ts[sym] >= self.LIQ_INGEST_LOG_INTERVAL_SEC:
+            self._liq_ingest_log_ts[sym] = now_m
+            buf = self.liquidations[sym]
+            total_usd = sum(e.value_usd for e in buf)
+            logger.info(
+                "[LiqIngest] symbol=%s buffer_events=%d buffer_total_usd=%.2f last_event_usd=%.2f side=%s",
+                sym, len(buf), total_usd, event.value_usd, event.side,
+            )
 
     def process_orderbook(self, ob_data: dict):
-        symbol = ob_data['symbol']
+        symbol = str(ob_data["symbol"]).upper()
         bids, asks = ob_data['bids'], ob_data['asks']
         if not bids or not asks: return
         bid_vol = sum([p * q for p, q in bids[:10]])
@@ -146,48 +162,51 @@ class OrderFlowMetrics:
 
     def _refresh_context_cache(self, symbol: str):
         """WARSTWA INGERENCJI: Aktualizuje globalny cache w integration.py"""
+        sym = str(symbol).upper()
         try:
-            ticker = self.tickers.get(symbol, {})
-            engine = self.engines[symbol]
-            dom = self.orderbook_snapshots.get(symbol)
+            ticker = self.tickers.get(sym, {})
+            engine = self.engines[sym]
+            dom = self.orderbook_snapshots.get(sym)
             ctx = {
-                "symbol": symbol,
+                "symbol": sym,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "price": ticker.get('price'),
                 "funding_rate": ticker.get('funding_rate', 0.0),
                 "dom": {"obi": dom.obi if dom else 0.0, "bid_walls": len(dom.bid_walls) if dom else 0, "ask_walls": len(dom.ask_walls) if dom else 0},
-                "liquidations": self.get_recent_liquidations(symbol),
+                "liquidations": self.get_recent_liquidations(sym),
                 "structure": {"last_swing_high": engine.last_swing_high, "last_swing_low": engine.last_swing_low},
-                "delta_points": self.get_recent_deltas(symbol, limit=5)
+                "delta_points": self.get_recent_deltas(sym, limit=5)
             }
-            update_symbol_context(symbol, ctx)
+            update_symbol_context(sym, ctx)
         except Exception as e:
-            logger.error(f"❌ Context Cache Error {symbol}: {e}")
+            logger.error(f"❌ Context Cache Error {sym}: {e}")
 
     def _autonomous_scanner(self, symbol):
-        data = self.tickers.get(symbol)
-        if not data or time.time() - self.last_signal_time[symbol] < self.SIGNAL_COOLDOWN_SEC: return
+        sym = str(symbol).upper()
+        data = self.tickers.get(sym)
+        if not data or time.time() - self.last_signal_time[sym] < self.SIGNAL_COOLDOWN_SEC: return
         price = data['price']
-        engine = self.engines[symbol]
+        engine = self.engines[sym]
         if engine.is_sweep_happening(price):
             direction = "LONG" if price < (engine.last_swing_low or 0) else "SHORT"
-            self._validate_setup_layers(symbol, direction, price)
+            self._validate_setup_layers(sym, direction, price)
 
     def _validate_setup_layers(self, symbol, direction, price):
-        recent_liqs = self.liquidations.get(symbol, [])
+        sym = str(symbol).upper()
+        recent_liqs = self.liquidations.get(sym, [])
         liq_vol = sum([l.value_usd for l in recent_liqs])
-        div = self._detect_delta_divergence(symbol)
-        dom = self.orderbook_snapshots.get(symbol)
+        div = self._detect_delta_divergence(sym)
+        dom = self.orderbook_snapshots.get(sym)
         confidence = self.scorer.calculate({
             'liquidation_volume_usd': liq_vol, 'delta_divergence': div['detected'], 'delta_strength': div.get('strength', 0),
             'obi': abs(dom.obi) if dom else 0, 'dom_wall_detected': len(dom.bid_walls if direction == "LONG" else dom.ask_walls) > 0 if dom else False,
-            'structure_strength': self.engines[symbol].get_swing_strength(), 'funding_rate': self.tickers[symbol].get('funding_rate', 0), 'direction': direction
+            'structure_strength': self.engines[sym].get_swing_strength(), 'funding_rate': self.tickers[sym].get('funding_rate', 0), 'direction': direction
         })
         if confidence >= self.MIN_CONFIDENCE_SCORE and liq_vol >= self.LIQUIDATION_CASCADE_THRESHOLD_USD:
-            self.last_signal_time[symbol] = time.time()
+            self.last_signal_time[sym] = time.time()
             entry_price = dom.best_bid if (dom and direction == "LONG") else price
             import asyncio
-            asyncio.create_task(self._execute_signal_async(symbol, direction, entry_price, confidence, liq_vol, div))
+            asyncio.create_task(self._execute_signal_async(sym, direction, entry_price, confidence, liq_vol, div))
 
     async def _execute_signal_async(self, symbol: str, direction: str, level: float, score: float, liq_v: float, div: dict):
         import aiohttp
@@ -205,12 +224,23 @@ class OrderFlowMetrics:
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(BOT_URL, json=payload, timeout=5) as resp:
-                    if resp.status == 200: logger.warning(f"🚀 SYGNAŁ WYSŁANY: {symbol} {direction} | Score: {score:.1f}")
+                    if resp.status == 200:
+                        logger.info(
+                            f"🚀 SYGNAŁ_OK | ALERT SENT SUCCESSFULLY [autonomous] {symbol} {direction} "
+                            f"| event_id={event_id} | score={score:.1f} | liq_usd={liq_v:.2f}"
+                        )
+                    else:
+                        body = await resp.text()
+                        logger.error(
+                            "❌ autonomous alert HTTP %s dla %s: %s",
+                            resp.status, symbol, body[:500],
+                        )
         except Exception as e: logger.error(f"❌ Błąd komunikacji async: {e}")
 
     def _calculate_delta_window(self, symbol, seconds):
+        sym = str(symbol).upper()
         cutoff = int(time.time() * 1000) - (seconds * 1000)
-        recent = [t for t in self.trades[symbol] if t['timestamp'] > cutoff]
+        recent = [t for t in self.trades[sym] if t['timestamp'] > cutoff]
         buy_v = sum([t['qty'] * t['price'] for t in recent if t['side'] == 'Buy'])
         sell_v = sum([t['qty'] * t['price'] for t in recent if t['side'] == 'Sell'])
         return buy_v - sell_v
@@ -224,7 +254,8 @@ class OrderFlowMetrics:
         return walls
 
     def _detect_delta_divergence(self, symbol):
-        hist = list(self.delta_history[symbol])
+        sym = str(symbol).upper()
+        hist = list(self.delta_history[sym])
         if len(hist) < 30: return {'detected': False}
         recent = hist[-30:]; prices = [d['price'] for d in recent]; deltas = [d['delta'] for d in recent]
         if prices[-1] < min(prices[-10:-1]) and deltas[-1] > min(deltas[-10:-1]): return {'detected': True, 'type': 'BULLISH', 'strength': abs(deltas[-1] - min(deltas[-10:-1]))}
@@ -243,13 +274,13 @@ class OrderFlowMetrics:
             if wall.distance_from_mid / wall.price < 0.005: self.bq_logger.log_dom_wall({'symbol': symbol, 'side': wall.side.upper(), 'price': wall.price, 'size': wall.size, 'obi': snapshot.obi})
 
     def get_last_price(self, symbol: str) -> Optional[float]:
-        t = self.tickers.get(symbol); return t['price'] if t else None
+        t = self.tickers.get(str(symbol).upper()); return t['price'] if t else None
 
     def get_last_funding(self, symbol: str) -> float:
-        t = self.tickers.get(symbol); return t.get('funding_rate', 0.0) if t else 0.0
+        t = self.tickers.get(str(symbol).upper()); return t.get('funding_rate', 0.0) if t else 0.0
 
     def get_recent_liquidations(self, symbol: str, window_sec: int = 300):
-        sym = symbol.upper()
+        sym = str(symbol).upper()
         now_ms = int(time.time() * 1000); cutoff = now_ms - (window_sec * 1000); liqs = self.liquidations.get(sym, [])
         return [{
             'side': e.side,
@@ -259,17 +290,20 @@ class OrderFlowMetrics:
             'time': e.time,
         } for e in liqs if e.time >= cutoff]
     def get_recent_deltas(self, symbol: str, limit: int = 10):
-        hist = list(self.delta_history[symbol])[-limit:]
+        sym = str(symbol).upper()
+        hist = list(self.delta_history[sym])[-limit:]
         return [{
             'price': d['price'], 
             'delta': d['delta'], 
             'timestamp': datetime.fromtimestamp(d['timestamp'] / 1000, tz=timezone.utc).isoformat() # FIX: ISO string
         } for d in hist]
     def get_dom_snapshot(self, symbol: str):
-        snap = self.orderbook_snapshots.get(symbol)
+        sym = str(symbol).upper()
+        snap = self.orderbook_snapshots.get(sym)
         if not snap: return {'bids': [], 'asks': [], 'obi': 0.0}
         return {'bids': snap.bids, 'asks': snap.asks, 'obi': snap.obi}
 
     def get_full_context(self, symbol):
-        engine = self.engines[symbol]
-        return {"symbol": symbol, "structure": {"last_swing_high": engine.last_swing_high, "last_swing_low": engine.last_swing_low}, "dom": {"obi": self.orderbook_snapshots[symbol].obi if symbol in self.orderbook_snapshots else 0}, "ticker": self.tickers.get(symbol)}
+        sym = str(symbol).upper()
+        engine = self.engines[sym]
+        return {"symbol": sym, "structure": {"last_swing_high": engine.last_swing_high, "last_swing_low": engine.last_swing_low}, "dom": {"obi": self.orderbook_snapshots[sym].obi if sym in self.orderbook_snapshots else 0}, "ticker": self.tickers.get(sym)}

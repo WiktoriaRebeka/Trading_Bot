@@ -1,4 +1,5 @@
 # orderflow_engine/backfiller.py
+import os
 import aiohttp
 import logging
 from typing import List, NamedTuple, Any, Optional
@@ -19,7 +20,8 @@ class HistoryBackfiller:
         self._session: Optional[aiohttp.ClientSession] = None
 
     async def __aenter__(self):
-        timeout = aiohttp.ClientTimeout(total=15)
+        total = float(os.environ.get("BACKFILL_HTTP_TIMEOUT_SEC", "45"))
+        timeout = aiohttp.ClientTimeout(total=max(15.0, total))
         self._session = aiohttp.ClientSession(timeout=timeout)
         return self
 
