@@ -80,6 +80,7 @@ class OrderFlowMetrics:
         self.MIN_CONFIDENCE_SCORE = 75 
         self.last_signal_time = defaultdict(float)
         self._liq_ingest_log_ts = defaultdict(float)
+        self._liq_first_logged = set()
         self.LIQ_INGEST_LOG_INTERVAL_SEC = float(
             os.environ.get("LIQ_INGEST_LOG_INTERVAL_SEC", "60")
         )
@@ -133,6 +134,12 @@ class OrderFlowMetrics:
         self.liquidations[event.symbol] = [e for e in self.liquidations[event.symbol] if e.time > cutoff]
         self._check_liquidation_cascade(event.symbol)
         self._refresh_context_cache(event.symbol)
+        if sym not in self._liq_first_logged:
+            self._liq_first_logged.add(sym)
+            logger.info(
+                "[LiqIngest] FIRST_EVENT symbol=%s usd=%.2f side=%s — WS→processor OK",
+                sym, event.value_usd, event.side,
+            )
         now_m = time.time()
         if now_m - self._liq_ingest_log_ts[sym] >= self.LIQ_INGEST_LOG_INTERVAL_SEC:
             self._liq_ingest_log_ts[sym] = now_m
