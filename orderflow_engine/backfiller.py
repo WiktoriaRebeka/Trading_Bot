@@ -20,8 +20,9 @@ class HistoryBackfiller:
         self._session: Optional[aiohttp.ClientSession] = None
 
     async def __aenter__(self):
-        total = float(os.environ.get("BACKFILL_HTTP_TIMEOUT_SEC", "45"))
-        timeout = aiohttp.ClientTimeout(total=max(15.0, total))
+        total = float(os.environ.get("BACKFILL_HTTP_TIMEOUT_SEC", "90"))
+        total = max(30.0, total)
+        timeout = aiohttp.ClientTimeout(total=total)
         self._session = aiohttp.ClientSession(timeout=timeout)
         return self
 
@@ -67,6 +68,20 @@ class HistoryBackfiller:
                         )
                 else:
                     logger.error(f"❌ Bybit API Error {symbol}: HTTP {response.status}")
+        except TimeoutError:
+            logger.warning(
+                "⚠️ Backfill %s interval=%s: HTTP timeout (limit całkowity aiohttp) — kolejna próba może pomóc",
+                symbol,
+                interval,
+            )
+        except aiohttp.ClientError as e:
+            logger.warning(
+                "⚠️ Backfill %s interval=%s: błąd klienta HTTP %s: %s",
+                symbol,
+                interval,
+                type(e).__name__,
+                e,
+            )
         except Exception as e:
             logger.error(f"❌ Błąd backfillu dla {symbol}: {type(e).__name__}: {e}", exc_info=True)
         return FetchHistoryResult([], False)

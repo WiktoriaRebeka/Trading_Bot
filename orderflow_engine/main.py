@@ -25,7 +25,7 @@ async def fetch_single_backfill(symbol, processor, backfiller, semaphore):
         for attempt in range(3):
             try:
                 r_m1 = await backfiller.fetch_history(symbol, '1', 1000)
-                await asyncio.sleep(0.5)  # Oddech dla API Bybit
+                await asyncio.sleep(0.8)  # Oddech dla Bybit REST (kline) przy równoległym WS
                 r_d1 = await backfiller.fetch_history(symbol, 'D', 365)
 
                 if not r_m1.ok or not r_m1.rows:
