@@ -114,7 +114,8 @@ async def evaluate_and_maybe_alert(symbol: str, processor):
                 continue
             logger.info(f"[FILTER] {sym} {direction}: ✅ liquidity_sweep OK")
             
-            liq_threshold = _get_min_liq_volume(sym)
+            liq_threshold = 1.0  # TEST MODE - tymczasowo obniżony próg
+            logger.info(f"⚠️ TEST MODE: Obniżono próg likwidacji do 1 USD dla {sym}")
             if not check_liquidations(ctx, min_volume_usd=liq_threshold):
                 liq_vol = sum(float(l.get('volume_usd', 0)) for l in ctx.liquidations)
                 logger.info(f"[FILTER] {sym} {direction}: ❌ liquidations FAILED vol={liq_vol:.0f} threshold={liq_threshold:.0f}")
