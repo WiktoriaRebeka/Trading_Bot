@@ -80,10 +80,11 @@ def check_liquidations(ctx: SignalContext,
                        min_volume_usd: float = 50_000.0) -> bool:
     MAX_LIQUIDATION_AGE_SECONDS = float(lookback_s)
 
+    # Bybit: S=Buy → likwidacja longa; S=Sell → likwidacja shorta (docs v5 allLiquidation)
     if ctx.direction == "LONG":
-        target_sides = {"sell", "Sell", "SELL"}
-    else:
         target_sides = {"buy", "Buy", "BUY"}
+    else:
+        target_sides = {"sell", "Sell", "SELL"}
 
     now_utc = datetime.utcnow()
     vol = 0.0

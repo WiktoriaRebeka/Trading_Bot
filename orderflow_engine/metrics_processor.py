@@ -18,6 +18,17 @@ from orderflow_engine.integration import update_symbol_context
 
 logger = logging.getLogger(__name__)
 
+
+def _coerce_liquidation_ts_ms(raw: int) -> int:
+    """Bybit podaje T w ms; jeśli przyjdzie unix w sekundach (< 1e12), skaluj do ms."""
+    if raw <= 0:
+        return int(time.time() * 1000)
+    raw = int(raw)
+    if raw < 10**12:
+        return raw * 1000
+    return raw
+
+
 @dataclass
 class LiquidationEvent:
     symbol: str
@@ -105,7 +116,11 @@ class OrderFlowMetrics:
         self._autonomous_scanner(symbol)
 
     def process_liquidation(self, liq):
-        event = LiquidationEvent(liq['symbol'], liq['side'], liq['price'], liq['qty'], liq['time'], liq['qty'] * liq['price'])
+        sym = str(liq["symbol"]).upper()
+        t_ms = _coerce_liquidation_ts_ms(int(liq.get("time", 0) or 0))
+        px = float(liq["price"])
+        qty = float(liq["qty"])
+        event = LiquidationEvent(sym, liq["side"], px, qty, t_ms, qty * px)
         self.liquidations[event.symbol].append(event)
         cutoff = int(time.time() * 1000) - 300000
         self.liquidations[event.symbol] = [e for e in self.liquidations[event.symbol] if e.time > cutoff]
@@ -234,7 +249,8 @@ class OrderFlowMetrics:
         t = self.tickers.get(symbol); return t.get('funding_rate', 0.0) if t else 0.0
 
     def get_recent_liquidations(self, symbol: str, window_sec: int = 300):
-        now_ms = int(time.time() * 1000); cutoff = now_ms - (window_sec * 1000); liqs = self.liquidations.get(symbol, [])
+        sym = symbol.upper()
+        now_ms = int(time.time() * 1000); cutoff = now_ms - (window_sec * 1000); liqs = self.liquidations.get(sym, [])
         return [{
             'side': e.side,
             'volume_usd': e.value_usd,
