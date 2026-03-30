@@ -124,6 +124,7 @@ class OrderFlowMetrics:
         self._autonomous_scanner(sym)
 
     def process_liquidation(self, liq):
+        logger.info(f"[LIQ_RAW] symbol={liq.get('symbol')} side={liq.get('side')} price={liq.get('price')} qty={liq.get('qty')} time={liq.get('time')}")
         sym = str(liq["symbol"]).upper()
         t_ms = _coerce_liquidation_ts_ms(int(liq.get("time", 0) or 0))
         px = float(liq["price"])
