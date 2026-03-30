@@ -15,7 +15,7 @@ def initialize_firebase() -> bool:
         logger.debug("Klient Firestore jest już zainicjalizowany.")
         return True
     try:
-        project_id = os.getenv("GCP_PROJECT")
+        project_id = os.getenv("GCP_PROJECT") or os.getenv("GOOGLE_CLOUD_PROJECT")
         database_id = "trading-bot-data"
         logger.info(f"Inicjalizacja klienta Firestore dla projektu '{project_id}' i bazy '{database_id}'...")
         db_client = firestore.Client(project=project_id, database=database_id)

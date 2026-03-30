@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import os
 import threading
 import time
 import websockets
@@ -43,6 +44,7 @@ class MultiConnectionWSManager:
         # TELEMETRIA
         self._msg_count = 0
         self._last_telemetry_time = time.time()
+        self._ws_initial_stagger_done: set[int] = set()
 
     async def start_all_connections(self):
         """Uruchamia połączenia WebSocket w paczkach po 2 symbole."""
@@ -70,11 +72,19 @@ class MultiConnectionWSManager:
     async def _websocket_listener_for_batch(self, symbols_batch: List[str], connection_id: int):
         """Obsługa pojedynczego połączenia WebSocket."""
         try:
+            if connection_id not in self._ws_initial_stagger_done:
+                stagger = float(os.environ.get("WS_CONN_STAGGER_SEC", "1.25"))
+                cap = float(os.environ.get("WS_CONN_STAGGER_CAP_SEC", "35"))
+                wait_s = min(connection_id * stagger, cap)
+                if wait_s > 0:
+                    await asyncio.sleep(wait_s)
+                self._ws_initial_stagger_done.add(connection_id)
+            open_timeout = float(os.environ.get("WS_OPEN_TIMEOUT_SEC", "45"))
             async with websockets.connect(
                 BYBIT_WS_URL,
                 ping_interval=20,
                 ping_timeout=10,
-                open_timeout=30,
+                open_timeout=open_timeout,
                 close_timeout=10,
             ) as ws:
                 topics = []
@@ -168,12 +178,23 @@ class MultiConnectionWSManager:
             items = payload if isinstance(payload, list) else [payload]
             for liq in items:
                 liq_symbol = liq.get("s") or liq.get("symbol", "unknown")
+                raw_t = liq.get("T", liq.get("updatedTime", time.time() * 1000))
+                try:
+                    t_ms = int(float(raw_t))
+                except (TypeError, ValueError):
+                    t_ms = int(time.time() * 1000)
+                try:
+                    px = float(liq.get("p", liq.get("price", 0)) or 0)
+                    qty = float(liq.get("v", liq.get("size", 0)) or 0)
+                except (TypeError, ValueError):
+                    logger.warning(f"[Conn-{connection_id}] Liq skip {liq_symbol}: bad p/v in {liq}")
+                    continue
                 self.processor.process_liquidation({
                     'symbol': liq_symbol,
                     'side': liq.get("S") or liq.get("side"),
-                    'price': float(liq.get("p", liq.get("price", 0))),
-                    'qty': float(liq.get("v", liq.get("size", 0))),
-                    'time': int(liq.get("T", liq.get("updatedTime", time.time() * 1000)))
+                    'price': px,
+                    'qty': qty,
+                    'time': t_ms,
                 })
                 await self._trigger_evaluation(liq_symbol)
 

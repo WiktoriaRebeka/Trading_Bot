@@ -124,12 +124,31 @@ class OrderFlowMetrics:
         self._autonomous_scanner(sym)
 
     def process_liquidation(self, liq):
-        logger.info(f"[LIQ_RAW] symbol={liq.get('symbol')} side={liq.get('side')} price={liq.get('price')} qty={liq.get('qty')} time={liq.get('time')}")
-        sym = str(liq["symbol"]).upper()
-        t_ms = _coerce_liquidation_ts_ms(int(liq.get("time", 0) or 0))
-        px = float(liq["price"])
-        qty = float(liq["qty"])
-        event = LiquidationEvent(sym, liq["side"], px, qty, t_ms, qty * px)
+        logger.debug(
+            "[LIQ_RAW] symbol=%s side=%s price=%s qty=%s time=%s",
+            liq.get("symbol"), liq.get("side"), liq.get("price"), liq.get("qty"), liq.get("time"),
+        )
+        sym = str(liq.get("symbol") or "").strip().upper()
+        if not sym:
+            logger.warning("[LiqIngest] Pominięto zdarzenie — brak symbolu: %s", liq)
+            return
+        raw_side = liq.get("side")
+        if raw_side is None or str(raw_side).strip() == "":
+            logger.warning("[LiqIngest] Pominięto %s — brak side (S)", sym)
+            return
+        side = str(raw_side).strip()
+        try:
+            raw_t = int(float(liq.get("time", 0) or 0))
+        except (TypeError, ValueError):
+            raw_t = 0
+        t_ms = _coerce_liquidation_ts_ms(raw_t)
+        try:
+            px = float(liq.get("price", 0) or 0)
+            qty = float(liq.get("qty", 0) or 0)
+        except (TypeError, ValueError):
+            logger.warning("[LiqIngest] Pominięto %s — nieprawidłowy price/qty: %s", sym, liq)
+            return
+        event = LiquidationEvent(sym, side, px, qty, t_ms, qty * px)
         self.liquidations[event.symbol].append(event)
         cutoff = int(time.time() * 1000) - 300000
         self.liquidations[event.symbol] = [e for e in self.liquidations[event.symbol] if e.time > cutoff]
@@ -199,10 +218,18 @@ class OrderFlowMetrics:
             direction = "LONG" if price < (engine.last_swing_low or 0) else "SHORT"
             self._validate_setup_layers(sym, direction, price)
 
+    def _matched_liquidation_buffer_usd(self, sym: str, direction: str) -> float:
+        """Zgodnie z signal_detector: LONG → Buy (likwidacja longów), SHORT → Sell."""
+        recent = self.liquidations.get(str(sym).upper(), [])
+        if direction == "LONG":
+            sides = {"buy", "Buy", "BUY"}
+        else:
+            sides = {"sell", "Sell", "SELL"}
+        return sum(e.value_usd for e in recent if str(e.side) in sides)
+
     def _validate_setup_layers(self, symbol, direction, price):
         sym = str(symbol).upper()
-        recent_liqs = self.liquidations.get(sym, [])
-        liq_vol = sum([l.value_usd for l in recent_liqs])
+        liq_vol = self._matched_liquidation_buffer_usd(sym, direction)
         div = self._detect_delta_divergence(sym)
         dom = self.orderbook_snapshots.get(sym)
         confidence = self.scorer.calculate({

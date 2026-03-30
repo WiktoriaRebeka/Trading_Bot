@@ -75,12 +75,22 @@ def detect_liquidity_sweep(ctx: SignalContext) -> bool:
 # === 2. LIQUIDATIONS
 # ============================================================
 
-def check_liquidations(ctx: SignalContext,
-                       lookback_s: int = 300,
-                       min_volume_usd: float = 50_000.0) -> bool:
-    MAX_LIQUIDATION_AGE_SECONDS = float(lookback_s)
+def _liq_event_ts_ms(liquidation_data: Dict[str, Any]) -> int:
+    raw = liquidation_data.get("T")
+    if raw in (None, "", 0, "0"):
+        raw = liquidation_data.get("time") or 0
+    try:
+        return int(float(raw))
+    except (TypeError, ValueError):
+        return 0
 
-    # Bybit: S=Buy → likwidacja longa; S=Sell → likwidacja shorta (docs v5 allLiquidation)
+
+def matched_liquidation_volume_usd(ctx: SignalContext, lookback_s: int = 300) -> float:
+    """
+    Suma volume_usd likwidacji pasujących do kierunku (Buy dla LONG, Sell dla SHORT)
+    w oknie lookback_s — ta sama logika co check_liquidations.
+    """
+    MAX_LIQUIDATION_AGE_SECONDS = float(lookback_s)
     if ctx.direction == "LONG":
         target_sides = {"buy", "Buy", "BUY"}
     else:
@@ -91,7 +101,7 @@ def check_liquidations(ctx: SignalContext,
     symbol = ctx.symbol
 
     for liquidation_data in ctx.liquidations:
-        liq_time_ms = int(liquidation_data.get("T") or liquidation_data.get("time") or 0)
+        liq_time_ms = _liq_event_ts_ms(liquidation_data)
         event_id = f"liq_{symbol}_{liq_time_ms}"
 
         raw_side = str(liquidation_data.get("side") or "")
@@ -101,11 +111,15 @@ def check_liquidations(ctx: SignalContext,
             )
             continue
 
+        if liq_time_ms <= 0:
+            logger.debug(f"[{event_id}] check_liquidations: skip — invalid timestamp")
+            continue
+
         liq_time = datetime.utcfromtimestamp(liq_time_ms / 1000.0)
         age_seconds = (now_utc - liq_time).total_seconds()
 
         if age_seconds > MAX_LIQUIDATION_AGE_SECONDS:
-            logger.info(
+            logger.debug(
                 f"[{event_id}] check_liquidations: excluded — age_seconds={age_seconds:.3f} "
                 f"> MAX_LIQUIDATION_AGE_SECONDS={MAX_LIQUIDATION_AGE_SECONDS}"
             )
@@ -113,14 +127,22 @@ def check_liquidations(ctx: SignalContext,
 
         vol += float(liquidation_data.get("volume_usd", 0.0))
 
+    return vol
+
+
+def check_liquidations(ctx: SignalContext,
+                       lookback_s: int = 300,
+                       min_volume_usd: float = 50_000.0) -> bool:
+    vol = matched_liquidation_volume_usd(ctx, lookback_s)
     ok = vol >= min_volume_usd
-    summary_eid = f"liq_{symbol}_check_{int(now_utc.timestamp() * 1000)}"
+    now_utc = datetime.utcnow()
+    summary_eid = f"liq_{ctx.symbol}_check_{int(now_utc.timestamp() * 1000)}"
     if not ok:
-        logger.info(
+        logger.debug(
             f"[{summary_eid}] check_liquidations: volume_usd={vol:.2f} < min_volume_usd={min_volume_usd}"
         )
     else:
-        logger.info(
+        logger.debug(
             f"[{summary_eid}] check_liquidations: pass — volume_usd={vol:.2f} >= min_volume_usd={min_volume_usd}"
         )
     return ok

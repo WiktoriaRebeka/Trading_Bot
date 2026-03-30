@@ -9,9 +9,9 @@ from typing import Dict, Any, Optional
 
 # Importy z signal_detector (muszą być tutaj)
 from orderflow_engine.signal_detector import (
-    detect_liquidity_sweep, check_liquidations, check_delta_divergence,
-    check_dom_wall, compute_confidence_score, SignalContext, SwingPoint,
-    DeltaPoint, DomSnapshot
+    detect_liquidity_sweep, matched_liquidation_volume_usd,
+    check_delta_divergence, check_dom_wall, compute_confidence_score, SignalContext,
+    SwingPoint, DeltaPoint, DomSnapshot,
 )
 from orderflow_engine.bot_sender import send_alert_to_bot
 
@@ -84,18 +84,6 @@ class SignalContextBuilder:
         )
 
 
-def _get_min_liq_volume(symbol: str) -> float:
-    """Próg likwidacji dostosowany do klasy aktywu."""
-    BTC_ETH = {"BTCUSDT", "ETHUSDT", "BTCPERP", "ETHPERP"}
-    MID_CAPS = {"SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT"}
-    if symbol.upper() in BTC_ETH:
-        return 75_000.0
-    elif symbol.upper() in MID_CAPS:
-        return 25_000.0
-    else:
-        return 10_000.0
-
-
 async def evaluate_and_maybe_alert(symbol: str, processor):
     sym = str(symbol).upper()
     COOLDOWN_SEC = 300
@@ -113,9 +101,20 @@ async def evaluate_and_maybe_alert(symbol: str, processor):
                 logger.info(f"[FILTER] {sym} {direction}: ❌ liquidity_sweep FAILED")
                 continue
             logger.info(f"[FILTER] {sym} {direction}: ✅ liquidity_sweep OK")
-            
-            logger.info(f"⚠️ TEST MODE: Filtr liquidacji POMINIĘTY dla {sym}")
-            
+
+            liq_threshold = float(processor.LIQUIDATION_CASCADE_THRESHOLD_USD)
+            matched = matched_liquidation_volume_usd(ctx)
+            if matched < liq_threshold:
+                buffer_total = sum(float(l.get("volume_usd", 0)) for l in ctx.liquidations)
+                logger.info(
+                    f"[FILTER] {sym} {direction}: ❌ liquidations FAILED "
+                    f"matched_vol={matched:.0f} buffer_total_usd={buffer_total:.0f} threshold={liq_threshold:.0f}"
+                )
+                continue
+            logger.info(
+                f"[FILTER] {sym} {direction}: ✅ liquidations OK matched_vol={matched:.0f} threshold={liq_threshold:.0f}"
+            )
+
             if not check_delta_divergence(ctx):
                 logger.info(f"[FILTER] {sym} {direction}: ❌ delta_divergence FAILED")
                 continue
