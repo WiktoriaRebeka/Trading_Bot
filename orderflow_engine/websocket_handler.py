@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import threading
 import time
 import websockets
@@ -44,7 +45,8 @@ class MultiConnectionWSManager:
         # TELEMETRIA
         self._msg_count = 0
         self._last_telemetry_time = time.time()
-        self._ws_initial_stagger_done: set[int] = set()
+        # Po pierwszym udanym handshake — kolejne próby tylko z krótkim jitterem (unik sync. reconnectów).
+        self._ws_handshake_ok: set[int] = set()
 
     async def start_all_connections(self):
         """Uruchamia połączenia WebSocket w paczkach po 2 symbole."""
@@ -72,14 +74,18 @@ class MultiConnectionWSManager:
     async def _websocket_listener_for_batch(self, symbols_batch: List[str], connection_id: int):
         """Obsługa pojedynczego połączenia WebSocket."""
         try:
-            if connection_id not in self._ws_initial_stagger_done:
-                stagger = float(os.environ.get("WS_CONN_STAGGER_SEC", "1.25"))
-                cap = float(os.environ.get("WS_CONN_STAGGER_CAP_SEC", "35"))
-                wait_s = min(connection_id * stagger, cap)
-                if wait_s > 0:
-                    await asyncio.sleep(wait_s)
-                self._ws_initial_stagger_done.add(connection_id)
-            open_timeout = float(os.environ.get("WS_OPEN_TIMEOUT_SEC", "45"))
+            if connection_id not in self._ws_handshake_ok:
+                stagger = float(os.environ.get("WS_CONN_STAGGER_SEC", "2.0"))
+                cap = float(os.environ.get("WS_CONN_STAGGER_CAP_SEC", "50"))
+                jitter = float(os.environ.get("WS_CONN_STAGGER_JITTER_SEC", "2.5"))
+                wait_s = min(connection_id * stagger, cap) + random.uniform(0, max(0.0, jitter))
+            else:
+                base = float(os.environ.get("WS_RECONNECT_JITTER_BASE_SEC", "2.0"))
+                wait_s = random.uniform(0.5, base) + min(connection_id * 0.2, 6.0)
+            if wait_s > 0:
+                await asyncio.sleep(wait_s)
+
+            open_timeout = float(os.environ.get("WS_OPEN_TIMEOUT_SEC", "75"))
             async with websockets.connect(
                 BYBIT_WS_URL,
                 ping_interval=20,
@@ -87,6 +93,7 @@ class MultiConnectionWSManager:
                 open_timeout=open_timeout,
                 close_timeout=10,
             ) as ws:
+                self._ws_handshake_ok.add(connection_id)
                 topics = []
                 for s in symbols_batch:
                     topics.extend([
@@ -210,14 +217,50 @@ class MultiConnectionWSManager:
                 })
                 await self._trigger_evaluation(symbol)
 
-        # 4. TICKERS
+        # 4. TICKERS (V5: snapshot + delta — brak pola = bez zmiany; Bybit: lastPrice, markPrice, …)
         elif topic.startswith("tickers."):
+            def _f(key: str) -> float | None:
+                v = payload.get(key)
+                if v is None or v == "":
+                    return None
+                try:
+                    x = float(v)
+                    return x if x > 0 else None
+                except (TypeError, ValueError):
+                    return None
+
+            price = _f("lastPrice") or _f("markPrice")
+            if price is None:
+                bp, ap = _f("bid1Price"), _f("ask1Price")
+                if bp is not None and ap is not None:
+                    price = (bp + ap) / 2.0
+            if price is None:
+                price = 0.0
+
+            sym_u = str(symbol).upper()
+            prev = self.processor.tickers.get(sym_u, {})
+
+            def _merge_float(key: str, prev_key: str) -> float:
+                if key not in payload:
+                    return float(prev.get(prev_key, 0.0) or 0.0)
+                v = payload.get(key)
+                if v is None or v == "":
+                    return float(prev.get(prev_key, 0.0) or 0.0)
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    return float(prev.get(prev_key, 0.0) or 0.0)
+
+            funding_rate = _merge_float("fundingRate", "funding_rate")
+            open_interest = _merge_float("openInterest", "open_interest")
+            volume_24h = _merge_float("volume24h", "volume_24h")
+
             self.processor.process_ticker(
                 symbol=symbol,
-                price=float(payload.get('markPrice', 0)),
-                funding_rate=float(payload.get('fundingRate', 0)),
-                open_interest=float(payload.get('openInterest', 0)),
-                volume_24h=float(payload.get('volume24h', 0))
+                price=price,
+                funding_rate=funding_rate,
+                open_interest=open_interest,
+                volume_24h=volume_24h,
             )
             await self._trigger_evaluation(symbol)
 

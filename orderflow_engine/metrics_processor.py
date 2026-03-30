@@ -115,8 +115,15 @@ class OrderFlowMetrics:
 
     def process_ticker(self, symbol, price, funding_rate, open_interest, volume_24h):
         sym = str(symbol).upper()
+        prev = self.tickers.get(sym, {})
+        try:
+            p = float(price) if price is not None else 0.0
+        except (TypeError, ValueError):
+            p = 0.0
+        if p <= 0 and prev.get("price"):
+            p = float(prev["price"])
         self.tickers[sym] = {
-            'price': price, 'funding_rate': funding_rate, 
+            'price': p, 'funding_rate': funding_rate,
             'open_interest': open_interest, 'volume_24h': volume_24h
         }
         # To wywołanie gwarantuje, że bot_service widzi aktualną cenę

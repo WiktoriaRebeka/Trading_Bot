@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 
 from orderflow_engine.websocket_handler import MultiConnectionWSManager
 from orderflow_engine.metrics_processor import OrderFlowMetrics
-from orderflow_engine.config_symbols import SYMBOLS_TO_WATCH_CLEAN
+from orderflow_engine.config_symbols import ALL_SYMBOLS_FOR_WS
 from orderflow_engine.backfiller import HistoryBackfiller
 from orderflow_engine.integration import SignalContextBuilder, get_global_context
 from shared_lib.firebase_client import initialize_firebase, get_db
@@ -64,7 +64,7 @@ def _backfill_gather_timeout_sec(num_symbols: int) -> int:
 
 async def run_backfill_in_background(processor: OrderFlowMetrics):
     semaphore = asyncio.Semaphore(2)  # Bezpieczne tempo dla Bybit
-    symbols = SYMBOLS_TO_WATCH_CLEAN
+    symbols = ALL_SYMBOLS_FOR_WS
     gather_timeout = _backfill_gather_timeout_sec(len(symbols))
     logger.info(f"📥 Start Backfill dla {len(symbols)} symboli (timeout gather={gather_timeout}s)...")
 
@@ -119,7 +119,7 @@ async def lifespan(app: FastAPI):
         initialize_firebase()
         METRICS_PROCESSOR = OrderFlowMetrics(firestore_client=get_db())
         CONTEXT_BUILDER = SignalContextBuilder(METRICS_PROCESSOR)
-        ws_manager = MultiConnectionWSManager(symbols=SYMBOLS_TO_WATCH_CLEAN, metrics_processor=METRICS_PROCESSOR)
+        ws_manager = MultiConnectionWSManager(symbols=ALL_SYMBOLS_FOR_WS, metrics_processor=METRICS_PROCESSOR)
         asyncio.create_task(ws_manager.start_all_connections())
         asyncio.create_task(run_backfill_in_background(METRICS_PROCESSOR))
         logger.info("✅ OrderFlow Engine startup complete")
