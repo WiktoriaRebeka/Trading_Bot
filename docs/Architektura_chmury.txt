@@ -1,0 +1,54 @@
+# Project Independence — Kompleksowy Blueprint Infrastruktury
+
+## 1. Architektura Mikroserwisów (GCP Cloud Run)
+System działa w regionie `europe-central2` na koncie serwisowym `trading-bot-runner@trading-bot-463318.iam.gserviceaccount.com`.
+
+- **orderflow-engine**: (Serce) Utrzymuje WebSockety z Bybit. Generuje sygnały i wysyła je przez HTTP POST do `bot-service`.
+- **trading-bot-service**: (Egzekutor) Odbiera sygnały, oblicza wielkość pozycji i wysyła zlecenia do Bybit. Obsługuje cykle PnL i aktualizacji zleceń.
+- **data-collector-service**: (Pomocniczy) Pobiera historyczne świece (obecnie wstrzymany w Schedulerze).
+
+## 2. Persystencja Danych (Firestore)
+Baza danych: `trading-bot-data` (Lokalizacja: `nam5`).
+
+### Kolekcje i kluczowe dokumenty:
+- **bot_config/instrument_rules**: Zawiera `tickSize` i `qtyStep` dla symboli. (KRYTYCZNE dla BUG #3).
+- **bot_config/symbols_config**: Lista symboli do obserwacji (`symbols_to_watch`).
+- **latest_klines**: Cache świec OHLC (np. dokument `AAVEUSDT`). Pola: `close`, `high`, `low`, `symbol`, `timestamp`.
+- **processed_alert_ids**: Dokumenty służące do deduplikacji sygnałów (zapobieganie podwójnym trade'om).
+- **processed_pnl_ids**: Dokumenty służące do deduplikacji rekordów zysków/strat.
+- **bot_config/*_last_fetch_state**: Przechowuje `last_processed_timestamp` dla różnych cykli (PnL, Alerty).
+
+## 3. Automatyzacja (Cloud Scheduler)
+- **log-pnl-cycle**: Co 15 minut (`*/15 * * * *`). Woła `bot-service/log-pnl`.
+- **update-orders-cycle**: Co 2 minuty (`*/2 * * * *`). Woła `bot-service/update-orders`.
+- **invoke-data-collector**: Wstrzymany.
+- **run-trading-bot-cycle**: Wstrzymany (sygnały płyną z orderflow-engine).
+
+## 4. Bezpieczeństwo (Secret Manager)
+- `bybit-api-key`: Klucz API Bybit.
+- `bybit-api-secret`: Sekret API Bybit.
+- `trading-bot-secrets`: Dodatkowe parametry konfiguracyjne.
+
+## 5. Zidentyfikowane Krytyczne Błędy (Z Audytu)
+1. **BUG #1 (Egzekucja)**: `bot_logic.py` buduje parametry zlecenia, ale ich nie wysyła (brak `executor.place_order`).
+2. **BUG #2 (Struktura)**: `market_structure.py` był binarny/uszkodzony (wymaga odtworzenia w czystym Pythonie).
+3. **BUG #3 (Ryzyko)**: `NameError` w `risk_manager.py` (`round_quantity_by_step` vs `round_qty_by_step`).
+4. **Silent Killers**: Mismatch typów danych (datetime vs string) w `check_liquidations` oraz zbyt restrykcyjne filtry (50k USD likwidacji).
+
+## 6. Ścieżka Krytyczna Sygnału
+Bybit WS -> orderflow-engine (Analiza) -> HTTP POST -> bot-service (Egzekucja) -> Bybit API.
+
+
+## 7. Analityka (BigQuery)
+Dataset: `trading_analytics` (Projekt: `trading-bot-463318`)
+
+### Tabele i Schematy:
+1. **dom_events**: (Logowanie ścian w arkuszu)
+   - Pola: `symbol` (STR), `side` (STR), `price` (FLOAT), `size` (FLOAT), `obi` (FLOAT), `timestamp` (TIMESTAMP).
+2. **liquidation_events**: (Logowanie kaskad likwidacji)
+   - Pola: `event_id` (STR), `symbol` (STR), `cascade_type` (STR), `total_volume_usd` (FLOAT), `count` (INT), `timestamp` (TIMESTAMP).
+3. **real_trades_history**: (Logowanie rzeczywistych transakcji - KRYTYCZNA)
+   - Pola kluczowe: `alert_id`, `order_id`, `symbol`, `qty` (NUMERIC), `avg_entry_price` (NUMERIC), `net_pnl_usdt` (NUMERIC), `timestamp_entry` (TIMESTAMP), `event_id` (Link do sygnału).
+
+### Uwaga techniczna:
+W `bot_service/bigquery_logger.py` zmienna `ANALYTICAL_TABLE_REF` musi wskazywać na tabelę `real_trades_history` lub `market_structure_signals` (sprawdź spójność nazw w `shared_lib/constants.py`).
