@@ -132,8 +132,23 @@ async def lifespan(app: FastAPI):
         CONTEXT_BUILDER = SignalContextBuilder(METRICS_PROCESSOR)
         ws_manager = MultiConnectionWSManager(symbols=ALL_SYMBOLS_FOR_WS, metrics_processor=METRICS_PROCESSOR)
         asyncio.create_task(ws_manager.start_all_connections())
-        asyncio.create_task(run_backfill_in_background(METRICS_PROCESSOR))
-        logger.info("✅ OrderFlow Engine startup complete")
+
+        async def _backfill_after_ws_subscriptions_ready():
+            """
+            Backfill dopiero po pierwszym sukcesie subscribe na każdym połączeniu (lub timeout),
+            żeby REST Bybit nie konkurował z zestawianiem wszystkich WS przy starcie.
+            """
+            timeout = float(os.environ.get("WS_SUBSCRIBE_WAIT_TIMEOUT_SEC", "120"))
+            ok = await ws_manager.wait_until_subscriptions_confirmed(timeout)
+            if ok:
+                logger.info(
+                    "✅ Potwierdzono subskrypcję na wszystkich %s połączeniach WS — start backfillu w tle",
+                    ws_manager.connection_count(),
+                )
+            await run_backfill_in_background(METRICS_PROCESSOR)
+
+        asyncio.create_task(_backfill_after_ws_subscriptions_ready())
+        logger.info("✅ OrderFlow Engine startup complete (WS startuje; backfill po potwierdzeniu subscribe)")
     except Exception as e:
         logger.critical(f"💀 STARTUP FAILED: {e}", exc_info=True)
     yield

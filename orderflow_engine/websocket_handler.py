@@ -34,6 +34,10 @@ class OrderBookThrottler:
         return False
 
 class MultiConnectionWSManager:
+    """Paczkuje symbole po SYMBOLS_PER_WS_BATCH na jedno połączenie WebSocket."""
+
+    SYMBOLS_PER_WS_BATCH = 2
+
     def __init__(self, symbols: List[str], metrics_processor):
         self.symbols = symbols
         self.processor = metrics_processor
@@ -50,14 +54,45 @@ class MultiConnectionWSManager:
         self._last_telemetry_time = time.time()
         # Po pierwszym udanym handshake — kolejne próby tylko z krótkim jitterem (unik sync. reconnectów).
         self._ws_handshake_ok: set[int] = set()
+        n_conn = (len(self.symbols) + self.SYMBOLS_PER_WS_BATCH - 1) // self.SYMBOLS_PER_WS_BATCH
+        self._subscribe_confirmed: Dict[int, asyncio.Event] = {i: asyncio.Event() for i in range(n_conn)}
+
+    def connection_count(self) -> int:
+        return len(self._subscribe_confirmed)
+
+    async def wait_until_subscriptions_confirmed(self, timeout: float) -> bool:
+        """
+        Czeka aż każde połączenie dostanie pierwsze potwierdzenie op=subscribe success=True.
+        Używane przed startem backfillu (main), żeby REST nie konkurował z zestawianiem WS.
+        """
+        events = list(self._subscribe_confirmed.values())
+        if not events:
+            return True
+        try:
+            await asyncio.wait_for(asyncio.gather(*[e.wait() for e in events]), timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
+            pending = sum(1 for e in events if not e.is_set())
+            logger.warning(
+                "⏱️ wait_until_subscriptions_confirmed: timeout=%ss, brak potwierdzenia dla %s/%s połączeń",
+                timeout,
+                pending,
+                len(events),
+            )
+            return False
+
+    def _mark_subscribe_confirmed(self, connection_id: int) -> None:
+        ev = self._subscribe_confirmed.get(connection_id)
+        if ev is not None and not ev.is_set():
+            ev.set()
 
     async def start_all_connections(self):
-        """Uruchamia połączenia WebSocket w paczkach po 2 symbole."""
-        symbols_per_connection = 2 
+        """Uruchamia połączenia WebSocket w paczkach po SYMBOLS_PER_WS_BATCH symboli."""
+        spc = self.SYMBOLS_PER_WS_BATCH
         connection_tasks = []
-        for i in range(0, len(self.symbols), symbols_per_connection):
-            batch = self.symbols[i:i + symbols_per_connection]
-            task = asyncio.create_task(self._maintain_connection_for_batch(batch, i // symbols_per_connection))
+        for i in range(0, len(self.symbols), spc):
+            batch = self.symbols[i : i + spc]
+            task = asyncio.create_task(self._maintain_connection_for_batch(batch, i // spc))
             connection_tasks.append(task)
         logger.info(f"✅ Uruchomiono {len(connection_tasks)} workerów WebSocket")
         await asyncio.gather(*connection_tasks)
@@ -134,6 +169,7 @@ class MultiConnectionWSManager:
                             op = data.get("op")
                             if op == "subscribe":
                                 if data.get("success") is True:
+                                    self._mark_subscribe_confirmed(connection_id)
                                     logger.info(
                                         f"[Conn-{connection_id}] Subskrypcja POTWIERDZONA dla {symbols_batch}"
                                     )
