@@ -20,6 +20,11 @@ from orderflow_engine.bot_sender import send_alert_to_bot
 
 logger = logging.getLogger(__name__)
 
+
+def _get_min_liq_volume(symbol: str) -> float:
+    return 1.0  # TEST MODE - tymczasowe
+
+
 # ============================================================
 # === INGESTION LAYER STATE (Global Cache for Bot Service) ===
 # ============================================================
