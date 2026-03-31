@@ -135,7 +135,9 @@ class MultiConnectionWSManager:
     async def _websocket_listener_for_batch(self, symbols_batch: List[str], connection_id: int):
         """Obsługa pojedynczego połączenia WebSocket."""
         try:
-            if connection_id not in self._ws_handshake_ok:
+            # Długi stagger tylko dla Conn-0 albo gdy żadne połączenie nie ma jeszcze udanego handshake — reszta od razu krótki jitter (szybszy równoległy start po pierwszym sukcesie).
+            use_long_stagger = (connection_id == 0) or (len(self._ws_handshake_ok) == 0)
+            if use_long_stagger:
                 # Domyślnie umiarkowany stagger (~12 s do ostatniego z 25 połączeń) — duże wartości blokują start i kumulują się z limitami Bybit.
                 stagger = float(os.environ.get("WS_CONN_STAGGER_SEC", "0.45"))
                 cap = float(os.environ.get("WS_CONN_STAGGER_CAP_SEC", "12"))
