@@ -36,10 +36,14 @@ steps:
       - '--service-account'
       - 'trading-bot-runner@$PROJECT_ID.iam.gserviceaccount.com'
       - '--min-instances=1'
-      - '--update-env-vars'
-      - 'GCP_PROJECT=$PROJECT_ID'
       - '--update-secrets'
       - 'BYBIT_API_KEY=bybit-api-key:latest,BYBIT_API_SECRET=bybit-api-secret:latest'
+      - '--vpc-connector'
+      - 'trading-bot-connector'
+      - '--vpc-egress'
+      - 'all-traffic'
+      - '--update-env-vars'
+      - 'LIQ_CASCADE_THRESHOLD_USD=0,GCP_PROJECT=$PROJECT_ID'
 
 images:
   - 'europe-central2-docker.pkg.dev/$PROJECT_ID/trading-bot-image/orderflow-engine:$SHORT_SHA'
