@@ -43,7 +43,7 @@ steps:
       - '--vpc-egress'
       - 'all-traffic'
       - '--update-env-vars'
-      - 'LIQ_CASCADE_THRESHOLD_USD=0,GCP_PROJECT=$PROJECT_ID'
+      - 'LIQ_CASCADE_THRESHOLD_USD=0,GCP_PROJECT=$PROJECT_ID,WS_OPEN_TIMEOUT_SEC=15'
 
 images:
   - 'europe-central2-docker.pkg.dev/$PROJECT_ID/trading-bot-image/orderflow-engine:$SHORT_SHA'
