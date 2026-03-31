@@ -38,7 +38,10 @@ class MultiConnectionWSManager:
         self.symbols = symbols
         self.processor = metrics_processor
         self.is_running = True
-        self.ob_throttler = OrderBookThrottler(throttle_seconds=1.0)
+        # Osobno: delty orderbooka (bardzo gęste) vs ewaluacja sygnału
+        self._ob_delta_min_sec = float(os.environ.get("WS_ORDERBOOK_DELTA_MIN_SEC", "0.35"))
+        self.ob_delta_throttler = OrderBookThrottler(throttle_seconds=self._ob_delta_min_sec)
+        self.ob_eval_throttler = OrderBookThrottler(throttle_seconds=1.0)
         self._last_evaluation_time: Dict[str, float] = {}
         self._eval_throttle_lock = threading.Lock()
         
@@ -213,8 +216,12 @@ class MultiConnectionWSManager:
                 })
                 await self._trigger_evaluation(liq_symbol)
 
-        # 3. ORDERBOOK (V5: snapshot + delta; każdą wiadomość mergujemy — throttle tylko na ewaluację sygnału)
+        # 3. ORDERBOOK — snapshot zawsze (stan początkowy); delty throttlowane (merge jest CPU‑ciężki).
+        # Przetwarzanie KAŻDEJ delty na pętli asyncio zatykało async for ws → telemetria spadała do kilku msg/30s.
         elif topic.startswith("orderbook."):
+            ob_type = str(data.get("type") or "snapshot").lower()
+            if ob_type == "delta" and not self.ob_delta_throttler.should_process(symbol):
+                return
             try:
                 bids_parsed = [(float(p), float(q)) for p, q in payload.get("b", [])]
                 asks_parsed = [(float(p), float(q)) for p, q in payload.get("a", [])]
@@ -223,7 +230,6 @@ class MultiConnectionWSManager:
                     f"[Conn-{connection_id}] Orderbook parse skip {symbol}: {e} topic={topic!r}"
                 )
             else:
-                ob_type = str(data.get("type") or "snapshot").lower()
                 ts_raw = data.get("ts") or payload.get("ts") or payload.get("u")
                 try:
                     ts_ob = int(float(ts_raw)) if ts_raw not in (None, "") else int(time.time() * 1000)
@@ -236,7 +242,7 @@ class MultiConnectionWSManager:
                     "timestamp": ts_ob,
                     "msg_type": ob_type,
                 })
-                if self.ob_throttler.should_process(symbol):
+                if self.ob_eval_throttler.should_process(symbol):
                     await self._trigger_evaluation(symbol)
 
         # 4. TICKERS (V5: snapshot + delta — brak pola = bez zmiany; Bybit: lastPrice, markPrice, …)

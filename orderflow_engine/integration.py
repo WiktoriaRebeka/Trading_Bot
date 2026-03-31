@@ -35,8 +35,9 @@ ORDERFLOW_CONTEXT_FS_COLLECTION = os.environ.get(
 CONTEXT_FIRESTORE_MIN_INTERVAL_SEC = float(
     os.environ.get("CONTEXT_FIRESTORE_MIN_INTERVAL_SEC", "0.25")
 )
+# Domyślnie wyłączone — zapis na każdą aktualizację kontekstu podnosi koszt i ryzyko regresji; włącz jawnie na multi‑replica.
 ORDERFLOW_CONTEXT_USE_FIRESTORE = os.environ.get(
-    "ORDERFLOW_CONTEXT_USE_FIRESTORE", "true"
+    "ORDERFLOW_CONTEXT_USE_FIRESTORE", "false"
 ).strip().lower() in ("1", "true", "yes", "on")
 CONTEXT_FS_QUEUE_MAX = int(os.environ.get("CONTEXT_FS_QUEUE_MAX", "2000"))
 
