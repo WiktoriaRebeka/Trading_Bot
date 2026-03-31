@@ -15,6 +15,29 @@ from orderflow_engine.integration import evaluate_and_maybe_alert
 logger = logging.getLogger(__name__)
 
 BYBIT_WS_URL = "wss://stream.bybit.com/v5/public/linear"
+# Poniżej tej wartości handshake do Bybit przez VPC / TLS często nie zdąży — ciągłe reconnecty i „martwa” telemetria.
+_MIN_WS_OPEN_TIMEOUT_SEC = float(os.environ.get("WS_OPEN_TIMEOUT_FLOOR_SEC", "45"))
+_ws_open_timeout_clamp_logged = False
+
+
+def _ws_open_timeout_seconds() -> float:
+    global _ws_open_timeout_clamp_logged
+    try:
+        t = float(os.environ.get("WS_OPEN_TIMEOUT_SEC", "75"))
+    except (TypeError, ValueError):
+        t = 75.0
+    if t < _MIN_WS_OPEN_TIMEOUT_SEC:
+        if not _ws_open_timeout_clamp_logged:
+            logger.warning(
+                "WS_OPEN_TIMEOUT_SEC=%s jest poniżej minimum %ss — ustawiam %ss (inaczej połączenia z Bybit "
+                "często nie wstają przy egress przez VPC).",
+                t,
+                _MIN_WS_OPEN_TIMEOUT_SEC,
+                _MIN_WS_OPEN_TIMEOUT_SEC,
+            )
+            _ws_open_timeout_clamp_logged = True
+        return _MIN_WS_OPEN_TIMEOUT_SEC
+    return t
 RECONNECT_DELAY_SECONDS = 5
 EVALUATION_THROTTLE_SEC = 1.0 
 
@@ -124,7 +147,7 @@ class MultiConnectionWSManager:
             if wait_s > 0:
                 await asyncio.sleep(wait_s)
 
-            open_timeout = float(os.environ.get("WS_OPEN_TIMEOUT_SEC", "75"))
+            open_timeout = _ws_open_timeout_seconds()
             async with websockets.connect(
                 BYBIT_WS_URL,
                 ping_interval=20,
