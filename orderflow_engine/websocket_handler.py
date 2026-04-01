@@ -65,6 +65,7 @@ class MultiConnectionWSManager:
         self._ws_handshake_ok: set[int] = set()
         n_conn = (len(self.symbols) + self.SYMBOLS_PER_WS_BATCH - 1) // self.SYMBOLS_PER_WS_BATCH
         self._subscribe_confirmed: Dict[int, asyncio.Event] = {i: asyncio.Event() for i in range(n_conn)}
+        self._msg_count_per_conn: Dict[int, int] = {}
 
     def connection_count(self) -> int:
         return len(self._subscribe_confirmed)
@@ -134,6 +135,10 @@ class MultiConnectionWSManager:
                 for i in range(0, len(topics), SUBSCRIBE_CHUNK_SIZE):
                     chunk = topics[i : i + SUBSCRIBE_CHUNK_SIZE]
                     await ws.send(json.dumps({"op": "subscribe", "args": chunk}))
+                    logger.info(
+                        f"[Conn-{connection_id}] Wysłano subscribe chunk "
+                        f"{i // SUBSCRIBE_CHUNK_SIZE + 1}: {len(chunk)} topics"
+                    )
                     await asyncio.sleep(0.1)  # małe opóźnienie między chunkami
                 logger.info(f"[Conn-{connection_id}] WYSYŁAM SUBSKRYPCJĘ ({len(topics)} tematów) dla {symbols_batch}")
 
@@ -147,8 +152,14 @@ class MultiConnectionWSManager:
                 try:
                     async for raw_message in ws:
                         data = json.loads(raw_message)
-                        if "op" in data and data.get("op") == "subscribe" and data.get("success"):
-                            self._mark_subscribe_confirmed(connection_id)
+                        if "op" in data and data.get("op") == "subscribe":
+                            logger.info(
+                                f"[Conn-{connection_id}] Subscribe response: "
+                                f"success={data.get('success')} "
+                                f"ret_msg={data.get('ret_msg', '')!r}"
+                            )
+                            if data.get("success"):
+                                self._mark_subscribe_confirmed(connection_id)
                         elif "topic" in data:
                             await self._process_message(data, connection_id)
                 finally:
@@ -165,9 +176,14 @@ class MultiConnectionWSManager:
             return
 
         self._msg_count += 1
+        self._msg_count_per_conn[connection_id] = self._msg_count_per_conn.get(connection_id, 0) + 1
         now = time.time()
         if now - self._last_telemetry_time > 30:
-            logger.info(f"📊 TELEMETRIA: Przetworzono {self._msg_count} komunikatów w 30s.")
+            logger.info(
+                f"📊 TELEMETRIA: {self._msg_count} msg/30s | "
+                f"per-conn: {dict(self._msg_count_per_conn)}"
+            )
+            self._msg_count_per_conn = {}
             self._msg_count = 0
             self._last_telemetry_time = now
 
