@@ -15,10 +15,8 @@ from orderflow_engine.integration import evaluate_and_maybe_alert
 logger = logging.getLogger(__name__)
 
 BYBIT_WS_URL = "wss://stream.bybit.com/v5/public/linear"
-# Poniżej tej wartości handshake do Bybit przez VPC / TLS często nie zdąży — ciągłe reconnecty i „martwa” telemetria.
 _MIN_WS_OPEN_TIMEOUT_SEC = float(os.environ.get("WS_OPEN_TIMEOUT_FLOOR_SEC", "45"))
 _ws_open_timeout_clamp_logged = False
-
 
 def _ws_open_timeout_seconds() -> float:
     global _ws_open_timeout_clamp_logged
@@ -28,21 +26,15 @@ def _ws_open_timeout_seconds() -> float:
         t = 75.0
     if t < _MIN_WS_OPEN_TIMEOUT_SEC:
         if not _ws_open_timeout_clamp_logged:
-            logger.warning(
-                "WS_OPEN_TIMEOUT_SEC=%s jest poniżej minimum %ss — ustawiam %ss (inaczej połączenia z Bybit "
-                "często nie wstają przy egress przez VPC).",
-                t,
-                _MIN_WS_OPEN_TIMEOUT_SEC,
-                _MIN_WS_OPEN_TIMEOUT_SEC,
-            )
+            logger.warning("WS_OPEN_TIMEOUT_SEC=%s poniżej minimum %ss — ustawiam %ss.", t, _MIN_WS_OPEN_TIMEOUT_SEC, _MIN_WS_OPEN_TIMEOUT_SEC)
             _ws_open_timeout_clamp_logged = True
         return _MIN_WS_OPEN_TIMEOUT_SEC
     return t
+
 RECONNECT_DELAY_SECONDS = 5
 EVALUATION_THROTTLE_SEC = 1.0 
 
 class OrderBookThrottler:
-    """Ogranicza przetwarzanie gęstych danych arkusza zleceń."""
     def __init__(self, throttle_seconds: float = 1.0):
         self.last_processed: Dict[str, float] = {}
         self.throttle_seconds = throttle_seconds
@@ -57,25 +49,19 @@ class OrderBookThrottler:
         return False
 
 class MultiConnectionWSManager:
-    """Paczkuje symbole po SYMBOLS_PER_WS_BATCH na jedno połączenie WebSocket."""
-
-    SYMBOLS_PER_WS_BATCH = 2
+    SYMBOLS_PER_WS_BATCH = 10
 
     def __init__(self, symbols: List[str], metrics_processor):
         self.symbols = symbols
         self.processor = metrics_processor
         self.is_running = True
-        # Osobno: delty orderbooka (bardzo gęste) vs ewaluacja sygnału
         self._ob_delta_min_sec = float(os.environ.get("WS_ORDERBOOK_DELTA_MIN_SEC", "0.35"))
         self.ob_delta_throttler = OrderBookThrottler(throttle_seconds=self._ob_delta_min_sec)
         self.ob_eval_throttler = OrderBookThrottler(throttle_seconds=1.0)
         self._last_evaluation_time: Dict[str, float] = {}
         self._eval_throttle_lock = threading.Lock()
-        
-        # TELEMETRIA
         self._msg_count = 0
         self._last_telemetry_time = time.time()
-        # Po pierwszym udanym handshake — kolejne próby tylko z krótkim jitterem (unik sync. reconnectów).
         self._ws_handshake_ok: set[int] = set()
         n_conn = (len(self.symbols) + self.SYMBOLS_PER_WS_BATCH - 1) // self.SYMBOLS_PER_WS_BATCH
         self._subscribe_confirmed: Dict[int, asyncio.Event] = {i: asyncio.Event() for i in range(n_conn)}
@@ -84,24 +70,12 @@ class MultiConnectionWSManager:
         return len(self._subscribe_confirmed)
 
     async def wait_until_subscriptions_confirmed(self, timeout: float) -> bool:
-        """
-        Czeka aż każde połączenie dostanie pierwsze potwierdzenie op=subscribe success=True.
-        Używane przed startem backfillu (main), żeby REST nie konkurował z zestawianiem WS.
-        """
         events = list(self._subscribe_confirmed.values())
-        if not events:
-            return True
+        if not events: return True
         try:
             await asyncio.wait_for(asyncio.gather(*[e.wait() for e in events]), timeout=timeout)
             return True
         except asyncio.TimeoutError:
-            pending = sum(1 for e in events if not e.is_set())
-            logger.warning(
-                "⏱️ wait_until_subscriptions_confirmed: timeout=%ss, brak potwierdzenia dla %s/%s połączeń",
-                timeout,
-                pending,
-                len(events),
-            )
             return False
 
     def _mark_subscribe_confirmed(self, connection_id: int) -> None:
@@ -110,35 +84,32 @@ class MultiConnectionWSManager:
             ev.set()
 
     async def start_all_connections(self):
-        """Uruchamia połączenia WebSocket w paczkach po SYMBOLS_PER_WS_BATCH symboli."""
         spc = self.SYMBOLS_PER_WS_BATCH
         connection_tasks = []
         for i in range(0, len(self.symbols), spc):
             batch = self.symbols[i : i + spc]
             task = asyncio.create_task(self._maintain_connection_for_batch(batch, i // spc))
             connection_tasks.append(task)
+            await asyncio.sleep(0.5)
+        
         logger.info(f"✅ Uruchomiono {len(connection_tasks)} workerów WebSocket")
         await asyncio.gather(*connection_tasks)
 
     async def _maintain_connection_for_batch(self, symbols_batch: List[str], connection_id: int):
-        """Pętla utrzymująca połączenie (Auto-reconnect)."""
         delay = RECONNECT_DELAY_SECONDS
         while self.is_running:
             try:
                 await self._websocket_listener_for_batch(symbols_batch, connection_id)
-                delay = RECONNECT_DELAY_SECONDS  # reset po udanym połączeniu
+                delay = RECONNECT_DELAY_SECONDS
             except Exception as e:
                 logger.error(f"[Conn-{connection_id}] Błąd pętli: {e}. Reconnect za {delay}s")
                 await asyncio.sleep(delay)
-                delay = min(delay * 2, 60)  # max 60s backoff
+                delay = min(delay * 2, 60)
 
     async def _websocket_listener_for_batch(self, symbols_batch: List[str], connection_id: int):
-        """Obsługa pojedynczego połączenia WebSocket."""
         try:
-            # Długi stagger tylko dla Conn-0 albo gdy żadne połączenie nie ma jeszcze udanego handshake — reszta od razu krótki jitter (szybszy równoległy start po pierwszym sukcesie).
             use_long_stagger = (connection_id == 0) or (len(self._ws_handshake_ok) == 0)
             if use_long_stagger:
-                # Domyślnie umiarkowany stagger (~12 s do ostatniego z 25 połączeń) — duże wartości blokują start i kumulują się z limitami Bybit.
                 stagger = float(os.environ.get("WS_CONN_STAGGER_SEC", "0.45"))
                 cap = float(os.environ.get("WS_CONN_STAGGER_CAP_SEC", "12"))
                 jitter = float(os.environ.get("WS_CONN_STAGGER_JITTER_SEC", "0.9"))
@@ -146,18 +117,11 @@ class MultiConnectionWSManager:
             else:
                 base = float(os.environ.get("WS_RECONNECT_JITTER_BASE_SEC", "2.0"))
                 wait_s = random.uniform(0.5, base) + min(connection_id * 0.2, 6.0)
-            if wait_s > 0:
-                await asyncio.sleep(wait_s)
+            if wait_s > 0: await asyncio.sleep(wait_s)
 
-            open_timeout = _ws_open_timeout_seconds()
-            async with websockets.connect(
-                BYBIT_WS_URL,
-                ping_interval=20,
-                ping_timeout=10,
-                open_timeout=open_timeout,
-                close_timeout=10,
-            ) as ws:
+            async with websockets.connect(BYBIT_WS_URL, open_timeout=_ws_open_timeout_seconds()) as ws:
                 self._ws_handshake_ok.add(connection_id)
+<<<<<<< HEAD
                 topics = []
                 for s in symbols_batch:
                     topics.extend([
@@ -176,52 +140,29 @@ class MultiConnectionWSManager:
 
                 async def _bybit_ping_loop():
                     """Bybit V5 public: JSON {"op":"ping"} — wymagane okresowo; najpierw ping, potem odstęp 20s."""
+=======
+                topics = [f"{t}.{s}" for s in symbols_batch for t in ["publicTrade", "tickers", "orderbook.50", "allLiquidation"]]
+                await ws.send(json.dumps({"op": "subscribe", "args": topics}))
+                
+                async def _ping():
+>>>>>>> 6caaafdf4a493501bf07648bd6fc1cfcdf237e75
                     while self.is_running:
-                        try:
-                            await ws.send(json.dumps({"op": "ping"}))
-                            await asyncio.sleep(20)
-                        except Exception:
-                            break
-
-                ping_task = asyncio.create_task(_bybit_ping_loop())
-
+                        await ws.send(json.dumps({"op": "ping"}))
+                        await asyncio.sleep(20)
+                
+                ping_task = asyncio.create_task(_ping())
                 try:
                     async for raw_message in ws:
-                        if not self.is_running: break
-                        logger.debug(f"[Conn-{connection_id}] MSG type={type(raw_message).__name__} len={len(raw_message)}")
-                        if isinstance(raw_message, bytes):
-                            logger.warning(f"[Conn-{connection_id}] BINARY_MSG len={len(raw_message)}")
-                            continue
                         data = json.loads(raw_message)
-
-                        if "op" in data:
-                            op = data.get("op")
-                            if op == "subscribe":
-                                if data.get("success") is True:
-                                    self._mark_subscribe_confirmed(connection_id)
-                                    logger.info(
-                                        f"[Conn-{connection_id}] Subskrypcja POTWIERDZONA dla {symbols_batch}"
-                                    )
-                                else:
-                                    logger.error(
-                                        f"[Conn-{connection_id}] Subskrypcja ODRZUCONA: {data}"
-                                    )
-                            elif op == "ping":
-                                pass
-                            else:
-                                logger.debug(f"[Conn-{connection_id}] Wiadomość sterująca op={op}: {data}")
-                            continue
-
-                        if "topic" in data:
+                        if "op" in data and data.get("op") == "subscribe" and data.get("success"):
+                            self._mark_subscribe_confirmed(connection_id)
+                        elif "topic" in data:
                             await self._process_message(data, connection_id)
                 finally:
                     ping_task.cancel()
-        except websockets.exceptions.ConnectionClosed as e:
-            logger.warning(f"[Conn-{connection_id}] Połączenie zamknięte przez serwer: {e}")
-            raise
         except Exception as e:
-            logger.error(f"[Conn-{connection_id}] Błąd połączenia: {e}")
-            raise  # propaguj do _maintain_connection_for_batch
+            logger.error(f"[Conn-{connection_id}] Błąd: {e}")
+            raise
 
     async def _process_message(self, data: dict, connection_id: int):
         """Główny punkt wejścia dla danych z giełdy."""
