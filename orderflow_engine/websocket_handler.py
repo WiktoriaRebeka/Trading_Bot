@@ -49,7 +49,7 @@ class OrderBookThrottler:
         return False
 
 class MultiConnectionWSManager:
-    SYMBOLS_PER_WS_BATCH = 2
+    SYMBOLS_PER_WS_BATCH = 10
 
     def __init__(self, symbols: List[str], metrics_processor):
         self.symbols = symbols
