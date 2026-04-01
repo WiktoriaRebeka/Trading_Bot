@@ -121,7 +121,6 @@ class MultiConnectionWSManager:
 
             async with websockets.connect(BYBIT_WS_URL, open_timeout=_ws_open_timeout_seconds()) as ws:
                 self._ws_handshake_ok.add(connection_id)
-<<<<<<< HEAD
                 topics = []
                 for s in symbols_batch:
                     topics.extend([
@@ -140,17 +139,11 @@ class MultiConnectionWSManager:
 
                 async def _bybit_ping_loop():
                     """Bybit V5 public: JSON {"op":"ping"} — wymagane okresowo; najpierw ping, potem odstęp 20s."""
-=======
-                topics = [f"{t}.{s}" for s in symbols_batch for t in ["publicTrade", "tickers", "orderbook.50", "allLiquidation"]]
-                await ws.send(json.dumps({"op": "subscribe", "args": topics}))
-                
-                async def _ping():
->>>>>>> 6caaafdf4a493501bf07648bd6fc1cfcdf237e75
                     while self.is_running:
                         await ws.send(json.dumps({"op": "ping"}))
                         await asyncio.sleep(20)
-                
-                ping_task = asyncio.create_task(_ping())
+
+                ping_task = asyncio.create_task(_bybit_ping_loop())
                 try:
                     async for raw_message in ws:
                         data = json.loads(raw_message)
