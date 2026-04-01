@@ -167,7 +167,11 @@ class MultiConnectionWSManager:
                         f"allLiquidation.{s}",
                     ])
 
-                await ws.send(json.dumps({"op": "subscribe", "args": topics}))
+                SUBSCRIBE_CHUNK_SIZE = 10
+                for i in range(0, len(topics), SUBSCRIBE_CHUNK_SIZE):
+                    chunk = topics[i : i + SUBSCRIBE_CHUNK_SIZE]
+                    await ws.send(json.dumps({"op": "subscribe", "args": chunk}))
+                    await asyncio.sleep(0.1)  # małe opóźnienie między chunkami
                 logger.info(f"[Conn-{connection_id}] WYSYŁAM SUBSKRYPCJĘ ({len(topics)} tematów) dla {symbols_batch}")
 
                 async def _bybit_ping_loop():
