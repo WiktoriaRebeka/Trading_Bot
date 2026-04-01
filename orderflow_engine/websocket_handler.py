@@ -120,7 +120,12 @@ class MultiConnectionWSManager:
                 wait_s = random.uniform(0.5, base) + min(connection_id * 0.2, 6.0)
             if wait_s > 0: await asyncio.sleep(wait_s)
 
-            async with websockets.connect(BYBIT_WS_URL, open_timeout=_ws_open_timeout_seconds()) as ws:
+            async with websockets.connect(
+                BYBIT_WS_URL,
+                open_timeout=_ws_open_timeout_seconds(),
+                ping_interval=None,
+                ping_timeout=None,
+            ) as ws:
                 self._ws_handshake_ok.add(connection_id)
                 topics = []
                 for s in symbols_batch:
