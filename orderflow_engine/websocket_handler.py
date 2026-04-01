@@ -109,15 +109,18 @@ class MultiConnectionWSManager:
         if ev is not None and not ev.is_set():
             ev.set()
 
+
     async def start_all_connections(self):
-        """Uruchamia połączenia WebSocket w paczkach po SYMBOLS_PER_WS_BATCH symboli."""
-        spc = self.SYMBOLS_PER_WS_BATCH
-        connection_tasks = []
-        for i in range(0, len(self.symbols), spc):
-            batch = self.symbols[i : i + spc]
-            task = asyncio.create_task(self._maintain_connection_for_batch(batch, i // spc))
-            connection_tasks.append(task)
-        logger.info(f"✅ Uruchomiono {len(connection_tasks)} workerów WebSocket")
+            """Uruchamia połączenia WebSocket w paczkach po SYMBOLS_PER_WS_BATCH symboli."""
+            spc = self.SYMBOLS_PER_WS_BATCH
+            connection_tasks = []
+            for i in range(0, len(self.symbols), spc):
+                batch = self.symbols[i : i + spc]
+                # Uruchamiamy workerów z 0.5s odstępem, aby nie uderzać w API Bybit jednocześnie
+                task = asyncio.create_task(self._maintain_connection_for_batch(batch, i // spc))
+                connection_tasks.append(task)
+                await asyncio.sleep(0.5) 
+            logger.info(f"✅ Uruchomiono {len(connection_tasks)} workerów WebSocket")
         await asyncio.gather(*connection_tasks)
 
     async def _maintain_connection_for_batch(self, symbols_batch: List[str], connection_id: int):
