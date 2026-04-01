@@ -161,6 +161,11 @@ def check_delta_divergence(ctx: SignalContext) -> bool:
       - cena robi HH względem max z ostatnich 9 świec
       - delta spada względem max delty (bearish divergence)
     """
+    logger.info(
+        f"[{ctx.symbol}] delta_divergence INPUT: "
+        f"samples={len(ctx.recent_deltas)} "
+        f"direction={ctx.direction}"
+    )
     if len(ctx.recent_deltas) < 10:
         return False
 
@@ -180,7 +185,7 @@ def check_delta_divergence(ctx: SignalContext) -> bool:
         result = price_new_high and delta_falling
 
     if not result:
-        logger.debug(
+        logger.info(
             f"[{ctx.symbol}] check_delta_divergence: False — "
             f"direction={ctx.direction}, samples={len(recent)}, "
             f"last_price={prices[-1]:.4f}, last_delta={deltas[-1]:.2f}"
