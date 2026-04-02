@@ -41,7 +41,7 @@ steps:
       - '--vpc-connector'
       - 'trading-bot-connector'
       - '--vpc-egress'
-      - 'all-traffic'
+      - 'private-ranges-only'
       - '--update-env-vars'
       # WS_OPEN_TIMEOUT_SEC: floor 45s w kodzie; 90s przy VPC egress; 15s powodowalo stale reconnecty.
       - 'LIQ_CASCADE_THRESHOLD_USD=0,GCP_PROJECT=$PROJECT_ID,WS_OPEN_TIMEOUT_SEC=90'
