@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 from orderflow_engine.websocket_handler import MultiConnectionWSManager
 from orderflow_engine.metrics_processor import OrderFlowMetrics
 from orderflow_engine.config_symbols import ALL_SYMBOLS_FOR_WS
-from orderflow_engine.backfiller import HistoryBackfiller
+from orderflow_engine.backfiller import HistoryBackfiller, FetchHistoryResult
 from orderflow_engine.integration import (
     SignalContextBuilder,
     get_global_context,
@@ -28,6 +28,40 @@ CONTEXT_BUILDER: SignalContextBuilder | None = None
 
 async def fetch_single_backfill(symbol, processor, backfiller, semaphore):
     async with semaphore:
+        try:
+            fs_m1 = await asyncio.to_thread(backfiller.fetch_from_firestore, symbol)
+        except Exception as e:
+            logger.warning(
+                f"⚠️ Backfill {symbol} Firestore M1: {type(e).__name__}: {e}",
+                exc_info=True,
+            )
+            fs_m1 = FetchHistoryResult([], False)
+
+        if fs_m1.rows and len(fs_m1.rows) >= 100:
+            for attempt in range(3):
+                try:
+                    await asyncio.sleep(0.8)
+                    r_d1 = await backfiller.fetch_history(symbol, 'D', 365)
+                    if not r_d1.ok or not r_d1.rows:
+                        logger.warning(
+                            f"⚠️ Backfill {symbol}: D1 nieudany lub pusty po Firestore M1 "
+                            f"(ok={r_d1.ok}, n={len(r_d1.rows)}), próba {attempt + 1}/3"
+                        )
+                        await asyncio.sleep(2 * (attempt + 1))
+                        continue
+                    processor.pre_load_history(symbol, fs_m1.rows, r_d1.rows)
+                    logger.info(
+                        f"✅ {symbol} Backfill OK (M1=Firestore n={len(fs_m1.rows)} D1={len(r_d1.rows)})."
+                    )
+                    return
+                except Exception as e:
+                    logger.warning(
+                        f"⚠️ Backfill {symbol} (Firestore M1) próba {attempt + 1}/3: "
+                        f"{type(e).__name__}: {e}",
+                        exc_info=True,
+                    )
+                    await asyncio.sleep(2 * (attempt + 1))
+
         for attempt in range(3):
             try:
                 r_m1 = await backfiller.fetch_history(symbol, '1', 1000)
