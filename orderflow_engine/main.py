@@ -28,26 +28,37 @@ CONTEXT_BUILDER: SignalContextBuilder | None = None
 
 async def fetch_single_backfill(symbol, processor, backfiller, semaphore):
     async with semaphore:
-        try:
-            fs_m1 = await asyncio.to_thread(backfiller.fetch_from_firestore, symbol)
-        except Exception as e:
-            logger.warning(
-                f"⚠️ Backfill {symbol}: Firestore M1 niedostępny lub błąd — pomijam (Bybit REST wyłączony): "
-                f"{type(e).__name__}: {e}",
-                exc_info=True,
-            )
-            return
+        for attempt in range(3):
+            try:
+                r_m1 = await backfiller.fetch_history(symbol, '1', 1000)
+                await asyncio.sleep(0.8)  # Oddech dla Bybit REST (kline) przy równoległym WS
+                r_d1 = await backfiller.fetch_history(symbol, 'D', 365)
 
-        n = len(fs_m1.rows) if fs_m1.rows else 0
-        if fs_m1.rows and n >= 100:
-            processor.pre_load_history(symbol, fs_m1.rows, [])
-            logger.info(f"✅ {symbol} Backfill OK (M1=Firestore n={n} D1=skipped)")
-            return
+                if not r_m1.ok or not r_m1.rows:
+                    logger.warning(
+                        f"⚠️ Backfill {symbol}: M1 nieudany lub pusty (ok={r_m1.ok}, n={len(r_m1.rows)}), "
+                        f"próba {attempt + 1}/3"
+                    )
+                    await asyncio.sleep(2 * (attempt + 1))
+                    continue
+                if not r_d1.ok or not r_d1.rows:
+                    logger.warning(
+                        f"⚠️ Backfill {symbol}: D1 nieudany lub pusty (ok={r_d1.ok}, n={len(r_d1.rows)}), "
+                        f"próba {attempt + 1}/3"
+                    )
+                    await asyncio.sleep(2 * (attempt + 1))
+                    continue
 
-        logger.warning(
-            f"⚠️ Backfill {symbol}: Firestore M1 niewystarczający (n={n}, wymagane >=100) — pomijam, Bybit REST wyłączony"
-        )
-        return
+                processor.pre_load_history(symbol, r_m1.rows, r_d1.rows)
+                logger.info(f"✅ {symbol} Backfill OK (M1={len(r_m1.rows)} D1={len(r_d1.rows)}).")
+                return
+            except Exception as e:
+                logger.warning(
+                    f"⚠️ Backfill {symbol} próba {attempt + 1}/3: {type(e).__name__}: {e}",
+                    exc_info=True,
+                )
+                await asyncio.sleep(2 * (attempt + 1))
+        logger.error(f"❌ Błąd backfillu {symbol} po 3 próbach (brak poprawnych danych M1/D1).")
 
 
 def _backfill_gather_timeout_sec(num_symbols: int) -> int:
