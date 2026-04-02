@@ -259,6 +259,32 @@ async def evaluate_and_maybe_alert(symbol: str, processor):
                 f"[FILTER] {sym} {direction}: ✅ liquidations OK matched_vol={matched:.0f} threshold={liq_threshold:.0f}"
             )
 
+            deltas = ctx.recent_deltas
+            n = len(deltas)
+            if n >= 10:
+                prices = [d.price for d in deltas]
+                dvals = [d.delta for d in deltas]
+                last_p = prices[-1]
+                last_d = dvals[-1]
+                if ctx.direction == "LONG":
+                    ref_p = min(prices[-10:-1])
+                    ref_d = min(dvals[-10:-1])
+                    cond_p = last_p < ref_p
+                    cond_d = last_d > ref_d
+                else:
+                    ref_p = max(prices[-10:-1])
+                    ref_d = max(dvals[-10:-1])
+                    cond_p = last_p > ref_p
+                    cond_d = last_d < ref_d
+                logger.info(
+                    f"[DELTA_DIAG] {sym} {direction}: samples={n} "
+                    f"last_price={last_p:.6f} ref_price={ref_p:.6f} cond_price={cond_p} "
+                    f"last_delta={last_d:.4f} ref_delta={ref_d:.4f} cond_delta={cond_d}"
+                )
+            else:
+                logger.info(
+                    f"[DELTA_DIAG] {sym} {direction}: samples={n} — za mało punktów (min 10)"
+                )
             if not check_delta_divergence(ctx):
                 logger.info(f"[FILTER] {sym} {direction}: ❌ delta_divergence FAILED")
                 continue
