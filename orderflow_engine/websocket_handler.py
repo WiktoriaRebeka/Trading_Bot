@@ -66,6 +66,8 @@ class MultiConnectionWSManager:
         n_conn = (len(self.symbols) + self.SYMBOLS_PER_WS_BATCH - 1) // self.SYMBOLS_PER_WS_BATCH
         self._subscribe_confirmed: Dict[int, asyncio.Event] = {i: asyncio.Event() for i in range(n_conn)}
         self._msg_count_per_conn: Dict[int, int] = {}
+        self._raw_msg_count: int = 0
+        self._raw_msg_count_per_conn: Dict[int, int] = {}
 
     def connection_count(self) -> int:
         return len(self._subscribe_confirmed)
@@ -156,6 +158,10 @@ class MultiConnectionWSManager:
                 ping_task = asyncio.create_task(_bybit_ping_loop())
                 try:
                     async for raw_message in ws:
+                        self._raw_msg_count += 1
+                        self._raw_msg_count_per_conn[connection_id] = (
+                            self._raw_msg_count_per_conn.get(connection_id, 0) + 1
+                        )
                         data = json.loads(raw_message)
                         if "op" in data and data.get("op") == "subscribe":
                             logger.info(
@@ -188,8 +194,14 @@ class MultiConnectionWSManager:
                 f"📊 TELEMETRIA: {self._msg_count} msg/30s | "
                 f"per-conn: {dict(self._msg_count_per_conn)}"
             )
+            logger.info(
+                f"📡 RAW_RECV: {self._raw_msg_count} raw/30s | "
+                f"per-conn: {dict(self._raw_msg_count_per_conn)}"
+            )
             self._msg_count_per_conn = {}
             self._msg_count = 0
+            self._raw_msg_count = 0
+            self._raw_msg_count_per_conn = {}
             self._last_telemetry_time = now
 
         symbol = topic.split('.')[-1] if '.' in topic else "unknown"
