@@ -161,6 +161,14 @@ app = FastAPI(title="OrderFlow Engine V7.5", lifespan=lifespan)
 @app.get("/health")
 async def health(): return {"status": "healthy"}
 
+@app.get("/debug-ip")
+async def debug_ip():
+    import aiohttp
+    async with aiohttp.ClientSession() as session:
+        async with session.get("https://api.ipify.org?format=json") as resp:
+            data = await resp.json()
+    return {"egress_ip": data.get("ip"), "expected": "34.158.226.157"}
+
 @app.get("/context/{symbol}")
 async def get_signal_context(symbol: str):
     symbol_clean = symbol.upper().replace(".P", "")
