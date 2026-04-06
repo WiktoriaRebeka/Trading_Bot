@@ -38,8 +38,8 @@ steps:
       - '--min-instances=1'
       - '--update-secrets'
       - 'BYBIT_API_KEY=bybit-api-key:latest,BYBIT_API_SECRET=bybit-api-secret:latest'
-      - '--network=trading-bot-network'
-      - '--subnet=trading-bot-subnet'
+      - '--network=trading-bot-vpc'
+      - '--subnet=trading-bot-cloudrun-subnet'
       - '--vpc-egress=all-traffic'
       - '--update-env-vars'
       # WS_OPEN_TIMEOUT_SEC: floor 45s w kodzie; 90s przy VPC egress; 15s powodowalo stale reconnecty.
