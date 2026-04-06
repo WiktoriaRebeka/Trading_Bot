@@ -38,10 +38,9 @@ steps:
       - '--min-instances=1'
       - '--update-secrets'
       - 'BYBIT_API_KEY=bybit-api-key:latest,BYBIT_API_SECRET=bybit-api-secret:latest'
-      - '--vpc-connector'
-      - 'trading-bot-connector'
-      - '--vpc-egress'
-      - 'private-ranges-only'
+      - '--network=trading-bot-network'
+      - '--subnet=trading-bot-subnet'
+      - '--vpc-egress=all-traffic'
       - '--update-env-vars'
       # WS_OPEN_TIMEOUT_SEC: floor 45s w kodzie; 90s przy VPC egress; 15s powodowalo stale reconnecty.
       - 'LIQ_CASCADE_THRESHOLD_USD=0,GCP_PROJECT=$PROJECT_ID,WS_OPEN_TIMEOUT_SEC=90'
