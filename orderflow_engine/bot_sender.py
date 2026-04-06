@@ -37,11 +37,12 @@ async def send_alert_to_bot(alert_payload: Dict[str, Any]) -> bool:
     event_id = alert_payload.get('event_id', 'UNKNOWN')
     
     try:
+        _timeout_sec = float(os.environ.get("BOT_SERVICE_TIMEOUT_SEC", "30"))
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 BOT_SERVICE_URL, 
                 json=alert_payload, 
-                timeout=aiohttp.ClientTimeout(total=5)
+                timeout=aiohttp.ClientTimeout(total=_timeout_sec)
             ) as resp:
                 
                 if resp.status == 200:
