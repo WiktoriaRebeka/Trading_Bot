@@ -38,7 +38,6 @@ steps:
       - '--min-instances=1'
       - '--update-secrets'
       - 'BYBIT_API_KEY=bybit-api-key:latest,BYBIT_API_SECRET=bybit-api-secret:latest'
-      - '--clear-vpc-connector'
       - '--network=trading-bot-vpc'
       - '--subnet=trading-bot-cloudrun-subnet'
       - '--vpc-egress=all-traffic'
