@@ -105,7 +105,7 @@ class MultiConnectionWSManager:
             except Exception as e:
                 logger.error(f"[Conn-{connection_id}] Błąd pętli: {e}. Reconnect za {delay}s")
                 await asyncio.sleep(delay)
-                delay = min(delay * 2, 60)
+                delay = min(delay * 2, 15)
 
     async def _websocket_listener_for_batch(self, symbols_batch: List[str], connection_id: int):
         try:
