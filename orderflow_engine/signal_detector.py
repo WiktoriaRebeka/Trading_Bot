@@ -316,7 +316,7 @@ def build_alert_payload(symbol: str,
         "entry": entry,
         "sl": sl,
         "tp": tp,
-        "risk_usdt": 10,
+        "risk_usdt": 2.5,
         "rr": 3.0,
         "structure_state": "SWEEP",
         "raw_context": {
