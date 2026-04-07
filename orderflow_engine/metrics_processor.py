@@ -120,7 +120,7 @@ class OrderFlowMetrics:
         new_candle = builder.process_tick(price, qty, timestamp)
         if new_candle:
             self.engines[sym].update_candles(new_candle['open'], new_candle['high'], new_candle['low'], new_candle['close'], new_candle['ts'])
-        delta = self._calculate_delta_window(sym, 60)
+        delta = self._calculate_delta_window(sym, 300)
         self.delta_history[sym].append({'price': price, 'delta': delta, 'timestamp': timestamp})
 
     def process_ticker(self, symbol, price, funding_rate, open_interest, volume_24h):
