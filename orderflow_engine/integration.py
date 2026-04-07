@@ -308,7 +308,7 @@ async def evaluate_and_maybe_alert(symbol: str, processor):
                 "direction": direction, "entry": entry,
                 "sl": entry * 0.994 if direction == "LONG" else entry * 1.006,
                 "tp": entry * 1.018 if direction == "LONG" else entry * 0.982,
-                "risk_pct": 0.6, "rr": 3.0, "risk_usdt": 10.0, "structure_state": 1 if direction == "LONG" else -1,
+                "risk_pct": 0.6, "rr": 3.0, "risk_usdt": 2.5, "structure_state": 1 if direction == "LONG" else -1,
                 "raw_context": {"confidence_score": score, "obi": ctx.dom_snapshot.obi, "liq_vol": sum(float(l.get("volume_usd", 0)) for l in ctx.liquidations)}
             }
             await send_alert_to_bot(alert)
