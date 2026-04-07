@@ -175,13 +175,15 @@ def check_delta_divergence(ctx: SignalContext) -> bool:
 
     if ctx.direction == "LONG":
         # Cena robi nowe minimum, delta rośnie (bullish divergence)
+        ref_delta_long = min(deltas[-10:-1])
         price_new_low = prices[-1] < min(prices[-10:-1])
-        delta_rising = deltas[-1] > min(deltas[-10:-1])
+        delta_rising = ref_delta_long != 0.0 and deltas[-1] > ref_delta_long
         result = price_new_low and delta_rising
     else:  # SHORT
         # Cena robi nowe maksimum, delta spada (bearish divergence)
+        ref_delta_short = max(deltas[-10:-1])
         price_new_high = prices[-1] > max(prices[-10:-1])
-        delta_falling = deltas[-1] < max(deltas[-10:-1])
+        delta_falling = ref_delta_short != 0.0 and deltas[-1] < ref_delta_short
         result = price_new_high and delta_falling
 
     if not result:
