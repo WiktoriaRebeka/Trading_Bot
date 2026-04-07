@@ -301,6 +301,10 @@ async def evaluate_and_maybe_alert(symbol: str, processor):
                 continue
             logger.info(f"[FILTER] {sym} {direction}: ✅ score OK score={score:.1f}")
 
+            deltas = [d.delta for d in ctx.recent_deltas[-30:]] if len(ctx.recent_deltas) >= 30 else [d.delta for d in ctx.recent_deltas]
+            _now = datetime.now(timezone.utc)
+            _hour = _now.hour
+            _session = "ASIA" if 0 <= _hour < 7 else "LONDON" if _hour < 15 else "NY" if _hour < 21 else "AFTERHOURS"
             entry = ctx.current_price
             alert = {
                 "event_id": f"{sym}-{int(time.time())}", "signal_id": f"AUTO-{sym}-{entry}",
@@ -309,7 +313,19 @@ async def evaluate_and_maybe_alert(symbol: str, processor):
                 "sl": entry * 0.994 if direction == "LONG" else entry * 1.006,
                 "tp": entry * 1.018 if direction == "LONG" else entry * 0.982,
                 "risk_pct": 0.6, "rr": 3.0, "risk_usdt": 2.5, "structure_state": 1 if direction == "LONG" else -1,
-                "raw_context": {"confidence_score": score, "obi": ctx.dom_snapshot.obi, "liq_vol": sum(float(l.get("volume_usd", 0)) for l in ctx.liquidations)}
+                "session": _session,
+                "minute_of_day": _now.hour * 60 + _now.minute,
+                "day_of_week": _now.weekday(),
+                "raw_context": {
+                    "confidence_score": score,
+                    "obi": ctx.dom_snapshot.obi,
+                    "liq_vol": sum(float(l.get("volume_usd", 0)) for l in ctx.liquidations),
+                    "delta_div_detected": check_delta_divergence(ctx),
+                    "delta_strength": deltas[-1] if ctx.recent_deltas else 0.0,
+                    "wall_detected": check_dom_wall(ctx),
+                    "wall_price": ctx.dom_snapshot.bids[0][0] if ctx.dom_snapshot.bids else None,
+                    "wall_size": ctx.dom_snapshot.bids[0][1] if ctx.dom_snapshot.bids else None,
+                },
             }
             await send_alert_to_bot(alert)
             processor.last_signal_time[sym] = time.time()
