@@ -331,7 +331,7 @@ class OrderFlowMetrics:
             "direction": direction, "entry": level,
             "sl": level * 0.994 if direction == "LONG" else level * 1.006,
             "tp": level * 1.018 if direction == "LONG" else level * 0.982,
-            "risk_pct": 0.6, "rr": 3.0, "structure_state": 1 if direction == "LONG" else -1, "risk_usdt": 10.0,
+            "risk_pct": 0.6, "rr": 3.0, "structure_state": 1 if direction == "LONG" else -1, "risk_usdt": 2.5,
             "raw_context": {"confidence_score": score, "liq_volume_usd": liq_v, "delta_div_detected": div['detected'], "delta_strength": div.get('strength', 0)}
         }
         BOT_URL = self.bot_url
