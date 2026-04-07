@@ -49,11 +49,9 @@ def get_bigquery_client() -> bigquery.Client:
         raise RuntimeError("Klient BigQuery nie został pomyślnie zainicjalizowany.")
     return bigquery_client
 
+
 def log_analysis_result(result_data: Dict[str, Any]):
-    """
-    Loguje dane analityczne sygnału do Cloud Logging.
-    BigQuery insert wyłączony do czasu utworzenia tabeli market_structure_signals.
-    """
+    import json as _json
     event_id = result_data.get('event_id', 'unknown')
     logger.info(
         f"[SIGNAL_ANALYTICS][{event_id}] "
@@ -64,3 +62,39 @@ def log_analysis_result(result_data: Dict[str, Any]):
         f"tp={result_data.get('tp')} "
         f"score={(result_data.get('raw_context') or {}).get('confidence_score', 0):.1f}"
     )
+    try:
+        client = get_bigquery_client()
+        table_ref = client.dataset("trading_analytics").table("market_structure_signals")
+        raw_ctx = result_data.get("raw_context") or {}
+        micro = result_data.get("microstructure") or {}
+        row = {
+            "event_id": event_id,
+            "signal_id": result_data.get("signal_id"),
+            "symbol": result_data.get("symbol"),
+            "timestamp": result_data.get("timestamp"),
+            "direction": result_data.get("direction"),
+            "entry": result_data.get("entry"),
+            "sl": result_data.get("sl"),
+            "tp": result_data.get("tp"),
+            "risk_pct": result_data.get("risk_pct"),
+            "rr": result_data.get("rr"),
+            "risk_usdt": result_data.get("risk_usdt"),
+            "structure_state": result_data.get("structure_state"),
+            "confidence_score": raw_ctx.get("confidence_score"),
+            "obi_value": micro.get("obi") or raw_ctx.get("obi"),
+            "liquidation_volume_usd": raw_ctx.get("liq_vol"),
+            "liquidation_detected": bool(raw_ctx.get("liq_vol", 0)),
+            "delta_divergence": raw_ctx.get("delta_div_detected", False),
+            "delta_strength": raw_ctx.get("delta_strength", 0.0),
+            "dom_wall_detected": raw_ctx.get("wall_detected", False),
+            "wall_price": raw_ctx.get("wall_price"),
+            "wall_size": raw_ctx.get("wall_size"),
+            "raw_context": _json.dumps(raw_ctx),
+        }
+        errors = client.insert_rows_json(table_ref, [row])
+        if errors:
+            logger.error(f"[BQ] market_structure_signals insert errors: {errors}")
+        else:
+            logger.info(f"[BQ] market_structure_signals OK event_id={event_id}")
+    except Exception as e:
+        logger.error(f"[BQ] market_structure_signals insert failed: {e}")
