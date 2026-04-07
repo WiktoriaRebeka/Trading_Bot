@@ -288,6 +288,7 @@ class OrderFlowMetrics:
             logger.error(f"❌ Context Cache Error {sym}: {e}")
 
     def _autonomous_scanner(self, symbol):
+        return  # DISABLED: sygnały tylko przez evaluate_and_maybe_alert
         sym = str(symbol).upper()
         data = self.tickers.get(sym)
         if not data or time.time() - self.last_signal_time[sym] < self.SIGNAL_COOLDOWN_SEC: return
