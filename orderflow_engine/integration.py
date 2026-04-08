@@ -1,6 +1,7 @@
 # orderflow_engine/integration.py
 # WERSJA 7.2 - Ingestion Layer State Management
 
+import asyncio
 import logging
 import math
 import os
@@ -29,6 +30,8 @@ def _get_min_liq_volume(symbol: str) -> float:
 # === INGESTION LAYER STATE (Global Cache for Bot Service) ===
 # ============================================================
 _context_lock = threading.Lock()
+_eval_locks: Dict[str, asyncio.Lock] = {}
+_eval_locks_mutex = threading.Lock()
 _symbol_context_cache: Dict[str, Dict[str, Any]] = {}
 _fs_persist_lock = threading.Lock()
 _last_firestore_persist_ts: Dict[str, float] = {}
@@ -230,77 +233,67 @@ class SignalContextBuilder:
 
 async def evaluate_and_maybe_alert(symbol: str, processor):
     sym = str(symbol).upper()
-    COOLDOWN_SEC = 300
-    if time.time() - processor.last_signal_time.get(sym, 0) < COOLDOWN_SEC:
-        logger.debug(f"[evaluate] {sym}: cooldown aktywny, pomijam")
-        return
-    builder = SignalContextBuilder(processor)
-    for direction in ["LONG", "SHORT"]:
-        try:
-            ctx = builder.build_signal_context(sym, direction)
-            if ctx is None:
-                continue
-            
-            if not detect_liquidity_sweep(ctx):
-                logger.info(f"[FILTER] {sym} {direction}: ❌ liquidity_sweep FAILED")
-                continue
-            logger.info(f"[FILTER] {sym} {direction}: ✅ liquidity_sweep OK")
+    with _eval_locks_mutex:
+        if sym not in _eval_locks:
+            _eval_locks[sym] = asyncio.Lock()
+    async with _eval_locks[sym]:
+        COOLDOWN_SEC = 300
+        if time.time() - processor.last_signal_time.get(sym, 0) < COOLDOWN_SEC:
+            logger.debug(f"[evaluate] {sym}: cooldown aktywny, pomijam")
+            return
+        builder = SignalContextBuilder(processor)
+        for direction in ["LONG", "SHORT"]:
+            try:
+                ctx = builder.build_signal_context(sym, direction)
+                if ctx is None:
+                    continue
 
-            liq_threshold = float(processor.LIQUIDATION_CASCADE_THRESHOLD_USD)
-            matched = matched_liquidation_volume_usd(ctx)
-            if matched < liq_threshold:
-                buffer_total = sum(float(l.get("volume_usd", 0)) for l in ctx.liquidations)
+                if not detect_liquidity_sweep(ctx):
+                    logger.info(f"[FILTER] {sym} {direction}: ❌ liquidity_sweep FAILED")
+                    continue
+                logger.info(f"[FILTER] {sym} {direction}: ✅ liquidity_sweep OK")
+
+                liq_threshold = float(processor.LIQUIDATION_CASCADE_THRESHOLD_USD)
+                matched = matched_liquidation_volume_usd(ctx)
+                if matched < liq_threshold:
+                    buffer_total = sum(float(l.get("volume_usd", 0)) for l in ctx.liquidations)
+                    logger.info(
+                        f"[FILTER] {sym} {direction}: ❌ liquidations FAILED "
+                        f"matched_vol={matched:.0f} buffer_total_usd={buffer_total:.0f} threshold={liq_threshold:.0f}"
+                    )
+                    continue
                 logger.info(
-                    f"[FILTER] {sym} {direction}: ❌ liquidations FAILED "
-                    f"matched_vol={matched:.0f} buffer_total_usd={buffer_total:.0f} threshold={liq_threshold:.0f}"
+                    f"[FILTER] {sym} {direction}: ✅ liquidations OK matched_vol={matched:.0f} threshold={liq_threshold:.0f}"
                 )
-                continue
-            logger.info(
-                f"[FILTER] {sym} {direction}: ✅ liquidations OK matched_vol={matched:.0f} threshold={liq_threshold:.0f}"
-            )
 
-            deltas = ctx.recent_deltas
-            n = len(deltas)
-            if n >= 10:
-                prices = [d.price for d in deltas]
-                dvals = [d.delta for d in deltas]
-                last_p = prices[-1]
-                last_d = dvals[-1]
-                if ctx.direction == "LONG":
-                    ref_p = min(prices[-10:-1])
-                    ref_d = min(dvals[-10:-1])
-                    cond_p = last_p < ref_p
-                    cond_d = last_d > ref_d
+                deltas = ctx.recent_deltas
+                n = len(deltas)
+                if n >= 10:
+                    prices = [d.price for d in deltas]
+                    dvals = [d.delta for d in deltas]
+                    last_p = prices[-1]
+                    last_d = dvals[-1]
+                    if ctx.direction == "LONG":
+                        ref_p = min(prices[-10:-1])
+                        ref_d = min(dvals[-10:-1])
+                        cond_p = last_p < ref_p
+                        cond_d = last_d > ref_d
+                    else:
+                        ref_p = max(prices[-10:-1])
+                        ref_d = max(dvals[-10:-1])
+                        cond_p = last_p > ref_p
+                        cond_d = last_d < ref_d
+                    logger.info(
+                        f"[DELTA_DIAG] {sym} {direction}: samples={n} "
+                        f"last_price={last_p:.6f} ref_price={ref_p:.6f} cond_price={cond_p} "
+                        f"last_delta={last_d:.4f} ref_delta={ref_d:.4f} cond_delta={cond_d}"
+                    )
                 else:
-                    ref_p = max(prices[-10:-1])
-                    ref_d = max(dvals[-10:-1])
-                    cond_p = last_p > ref_p
-                    cond_d = last_d < ref_d
-                logger.info(
-                    f"[DELTA_DIAG] {sym} {direction}: samples={n} "
-                    f"last_price={last_p:.6f} ref_price={ref_p:.6f} cond_price={cond_p} "
-                    f"last_delta={last_d:.4f} ref_delta={ref_d:.4f} cond_delta={cond_d}"
-                )
-            else:
-                logger.info(
-                    f"[DELTA_DIAG] {sym} {direction}: samples={n} — za mało punktów (min 10)"
-                )
-            if not check_delta_divergence(ctx):
-                logger.info(f"[FILTER] {sym} {direction}: ❌ delta_divergence FAILED")
-                continue
-            logger.info(f"[FILTER] {sym} {direction}: ✅ delta_divergence OK")
-            
-            if not check_dom_wall(ctx):
-                logger.info(f"[FILTER] {sym} {direction}: ❌ dom_wall FAILED")
-                continue
-            logger.info(f"[FILTER] {sym} {direction}: ✅ dom_wall OK")
-            
-            score = compute_confidence_score(ctx, liq_ok=True, delta_ok=True, dom_ok=True)
-            if score < 70:
-                logger.info(f"[FILTER] {sym} {direction}: ❌ score FAILED score={score:.1f} < 70")
-                continue
-            logger.info(f"[FILTER] {sym} {direction}: ✅ score OK score={score:.1f}")
+                    logger.info(
+                        f"[DELTA_DIAG] {sym} {direction}: samples={n} — za mało punktów (min 10)"
+                    )
 
+<<<<<<< HEAD
             deltas = [d.delta for d in ctx.recent_deltas[-30:]] if len(ctx.recent_deltas) >= 30 else [d.delta for d in ctx.recent_deltas]
             _now = datetime.now(timezone.utc)
             _hour = _now.hour
@@ -333,3 +326,59 @@ async def evaluate_and_maybe_alert(symbol: str, processor):
             break 
         except Exception as e:
             logger.error(f"Error evaluating {sym}: {e}")
+=======
+                logger.info(f"[{sym}] delta_divergence INPUT: samples={n} direction={direction}")
+                if not check_delta_divergence(ctx):
+                    logger.info(f"[FILTER] {sym} {direction}: ❌ delta_divergence FAILED")
+                    continue
+                logger.info(f"[FILTER] {sym} {direction}: ✅ delta_divergence OK")
+
+                if not check_dom_wall(ctx):
+                    logger.info(f"[FILTER] {sym} {direction}: ❌ dom_wall FAILED")
+                    continue
+                logger.info(f"[FILTER] {sym} {direction}: ✅ dom_wall OK")
+
+                score = compute_confidence_score(ctx, liq_ok=True, delta_ok=True, dom_ok=True)
+                if score < 70:
+                    logger.info(f"[FILTER] {sym} {direction}: ❌ score FAILED score={score:.1f} < 70")
+                    continue
+                logger.info(f"[FILTER] {sym} {direction}: ✅ score OK score={score:.1f}")
+
+                deltas_list = [d.delta for d in ctx.recent_deltas[-30:]] if len(ctx.recent_deltas) >= 30 else [d.delta for d in ctx.recent_deltas]
+                _now = datetime.now(timezone.utc)
+                _hour = _now.hour
+                _session = "ASIA" if 0 <= _hour < 7 else "LONDON" if _hour < 15 else "NY" if _hour < 21 else "AFTERHOURS"
+                entry = ctx.current_price
+                alert = {
+                    "event_id": f"{sym}-{int(time.time())}",
+                    "signal_id": f"AUTO-{sym}-{entry}",
+                    "symbol": sym,
+                    "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    "direction": direction,
+                    "entry": entry,
+                    "sl": entry * 0.994 if direction == "LONG" else entry * 1.006,
+                    "tp": entry * 1.018 if direction == "LONG" else entry * 0.982,
+                    "risk_pct": 0.6,
+                    "rr": 3.0,
+                    "risk_usdt": 2.5,
+                    "structure_state": 1 if direction == "LONG" else -1,
+                    "session": _session,
+                    "minute_of_day": _now.hour * 60 + _now.minute,
+                    "day_of_week": _now.weekday(),
+                    "raw_context": {
+                        "confidence_score": score,
+                        "obi": ctx.dom_snapshot.obi,
+                        "liq_vol": sum(float(l.get("volume_usd", 0)) for l in ctx.liquidations),
+                        "delta_div_detected": check_delta_divergence(ctx),
+                        "delta_strength": deltas_list[-1] if deltas_list else 0.0,
+                        "wall_detected": check_dom_wall(ctx),
+                        "wall_price": ctx.dom_snapshot.asks[0][0] if direction == "SHORT" and ctx.dom_snapshot.asks else ctx.dom_snapshot.bids[0][0] if ctx.dom_snapshot.bids else None,
+                        "wall_size": ctx.dom_snapshot.asks[0][1] if direction == "SHORT" and ctx.dom_snapshot.asks else ctx.dom_snapshot.bids[0][1] if ctx.dom_snapshot.bids else None,
+                    },
+                }
+                processor.last_signal_time[sym] = time.time()
+                await send_alert_to_bot(alert)
+                break
+            except Exception as e:
+                logger.error(f"Error evaluating {sym}: {e}")
+>>>>>>> e19a9daf36e64135cef5abf6533ee721337ae3e0
