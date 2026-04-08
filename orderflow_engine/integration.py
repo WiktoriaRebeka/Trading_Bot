@@ -320,6 +320,7 @@ async def evaluate_and_maybe_alert(symbol: str, processor):
                     "confidence_score": score,
                     "obi": ctx.dom_snapshot.obi,
                     "liq_vol": sum(float(l.get("volume_usd", 0)) for l in ctx.liquidations),
+                    "liq_threshold_usd": float(processor.LIQUIDATION_CASCADE_THRESHOLD_USD),
                     "delta_div_detected": check_delta_divergence(ctx),
                     "delta_strength": deltas[-1] if ctx.recent_deltas else 0.0,
                     "wall_detected": check_dom_wall(ctx),
