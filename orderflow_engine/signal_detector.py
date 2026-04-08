@@ -200,10 +200,10 @@ def check_delta_divergence(ctx: SignalContext) -> bool:
 # ============================================================
 
 def check_dom_wall(ctx: SignalContext,
-                   min_obi_long: float = 0.4,
-                   max_obi_short: float = -0.4,
+                   min_obi_long: float = 0.1,  # STRESS-TEST
+                   max_obi_short: float = -0.1,  # STRESS-TEST
                    depth_levels: int = 10,
-                   min_wall_multiplier: float = 2.0) -> bool:
+                   min_wall_multiplier: float = 1.1) -> bool:  # STRESS-TEST
 
     bids = ctx.dom_snapshot.bids[:depth_levels]
     asks = ctx.dom_snapshot.asks[:depth_levels]
