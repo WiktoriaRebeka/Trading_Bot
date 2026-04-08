@@ -60,7 +60,9 @@ def log_analysis_result(result_data: Dict[str, Any]):
         f"entry={result_data.get('entry')} "
         f"sl={result_data.get('sl')} "
         f"tp={result_data.get('tp')} "
-        f"score={(result_data.get('raw_context') or {}).get('confidence_score', 0):.1f}"
+        f"score={(result_data.get('raw_context') or {}).get('confidence_score', 0):.1f} "
+        f"session={result_data.get('session')} "
+        f"minute_of_day={result_data.get('minute_of_day')}"
     )
     try:
         client = get_bigquery_client()
