@@ -285,7 +285,10 @@ async def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecut
         "structure_state": signal.structure_state,
         "risk_usdt": signal.risk_usdt,
         "raw_context": signal.raw_context if isinstance(signal.raw_context, dict) else {},
-        "microstructure": micro_ctx if micro_ctx else {}
+        "microstructure": micro_ctx if micro_ctx else {},
+        "session": getattr(signal, "session", None),
+        "minute_of_day": getattr(signal, "minute_of_day", None),
+        "day_of_week": getattr(signal, "day_of_week", None),
     }
     _bq_executor.submit(_log_analysis_result_bg, analysis_data)
     elapsed_ms = (perf_counter() - start_total) * 1000.0
