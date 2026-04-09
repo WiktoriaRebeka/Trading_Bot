@@ -76,6 +76,8 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
             except (ValueError, TypeError):
                 return None
 
+        ao = active_order_data or {}
+
         # Używamy Decimal do precyzyjnych obliczeń wewnętrznych
         qty = Decimal(pnl_data.get("qty", "0.0"))
         avg_entry_price = Decimal(pnl_data.get("avgEntryPrice", "0.0"))
@@ -137,42 +139,42 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
             "realized_rrr": safe_round(realized_rrr, 4), # RRR z mniejszą precyzją
             
             # --- MAPOWANIE DANYCH Z SIERRY (z active_order_data) ---
-            "alert_entry_price": safe_round(active_order_data.get("planned_entry_price")) if active_order_data else None,
-            "alert_sl_price": safe_round(active_order_data.get("planned_sl_price")) if active_order_data else None,
-            "alert_tp_price": safe_round(active_order_data.get("planned_tp_price")) if active_order_data else None,
-            "timestamp_signal": active_order_data.get("timestamp") if active_order_data else None, # NOWE POLE
+            "alert_entry_price": safe_round(ao.get("planned_entry_price")) if active_order_data else None,
+            "alert_sl_price": safe_round(ao.get("planned_sl_price")) if active_order_data else None,
+            "alert_tp_price": safe_round(ao.get("planned_tp_price")) if active_order_data else None,
+            "timestamp_signal": ao.get("timestamp") if active_order_data else None, # NOWE POLE
             
             # Planned (ceny po zaokrągleniu)
-            "planned_entry_price": safe_round(active_order_data.get("planned_entry_price")) if active_order_data else None,
-            "planned_sl_price": safe_round(active_order_data.get("planned_sl_price")) if active_order_data else None,
-            "planned_tp_price": safe_round(active_order_data.get("planned_tp_price")) if active_order_data else None,
+            "planned_entry_price": safe_round(ao.get("planned_entry_price")) if active_order_data else None,
+            "planned_sl_price": safe_round(ao.get("planned_sl_price")) if active_order_data else None,
+            "planned_tp_price": safe_round(ao.get("planned_tp_price")) if active_order_data else None,
             "exit_price_result": safe_round(exit_price_result),
-            "tp_price_chart": safe_round(active_order_data.get("alert_tp_price")) if active_order_data else None,
+            "tp_price_chart": safe_round(ao.get("alert_tp_price")) if active_order_data else None,
             
             # Pola analityczne (pobierane z active_order_data, jeśli zostały tam zapisane w Kroku 4)
-            "m2_delta": safe_round(active_order_data.get("m2_delta", 0.0)),
-            "m5_rs_ratio": safe_round(active_order_data.get("m5_rs_ratio", 0.0), 4),
-            "structure_state": active_order_data.get("structure_state"),
-            "bos_high": active_order_data.get("bos_high"),
-            "bos_low": active_order_data.get("bos_low"),
-            "choch_up": active_order_data.get("choch_up"),
-            "choch_down": active_order_data.get("choch_down"),
-            "liquidity_grab_above": active_order_data.get("liquidity_grab_above"),
-            "liquidity_grab_below": active_order_data.get("liquidity_grab_below"),
-            "liquidity_price": active_order_data.get("liquidity_price"),
-            "eqh_detected": active_order_data.get("eqh_detected"),
-            "eql_detected": active_order_data.get("eql_detected"),
-            "risk_usdt": active_order_data.get("risk_usdt"),
-            "session": active_order_data.get("session"),
-            "minute_of_day": active_order_data.get("minute_of_day"),
-            "day_of_week": active_order_data.get("day_of_week"),
-            "second": active_order_data.get("second"),
-            "bar_range": active_order_data.get("bar_range"),
-            "ob_range": active_order_data.get("ob_range"),
-            "swing_range": active_order_data.get("swing_range"),
-            "distance_to_liquidity": active_order_data.get("distance_to_liquidity"),
-            "volatility_regime": active_order_data.get("volatility_regime"),
-            "raw_context": active_order_data.get("raw_context"),
+            "m2_delta": safe_round(ao.get("m2_delta", 0.0)),
+            "m5_rs_ratio": safe_round(ao.get("m5_rs_ratio", 0.0), 4),
+            "structure_state": ao.get("structure_state"),
+            "bos_high": ao.get("bos_high"),
+            "bos_low": ao.get("bos_low"),
+            "choch_up": ao.get("choch_up"),
+            "choch_down": ao.get("choch_down"),
+            "liquidity_grab_above": ao.get("liquidity_grab_above"),
+            "liquidity_grab_below": ao.get("liquidity_grab_below"),
+            "liquidity_price": ao.get("liquidity_price"),
+            "eqh_detected": ao.get("eqh_detected"),
+            "eql_detected": ao.get("eql_detected"),
+            "risk_usdt": ao.get("risk_usdt"),
+            "session": ao.get("session"),
+            "minute_of_day": ao.get("minute_of_day"),
+            "day_of_week": ao.get("day_of_week"),
+            "second": ao.get("second"),
+            "bar_range": ao.get("bar_range"),
+            "ob_range": ao.get("ob_range"),
+            "swing_range": ao.get("swing_range"),
+            "distance_to_liquidity": ao.get("distance_to_liquidity"),
+            "volatility_regime": ao.get("volatility_regime"),
+            "raw_context": ao.get("raw_context"),
         }
 
     except Exception as e:

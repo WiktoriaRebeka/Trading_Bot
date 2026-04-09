@@ -44,7 +44,7 @@ steps:
       - '--vpc-egress=all-traffic'
       - '--update-env-vars'
       # WS_OPEN_TIMEOUT_SEC: floor 45s w kodzie; 90s przy VPC egress; 15s powodowalo stale reconnecty.
-      - 'LIQ_CASCADE_THRESHOLD_USD=0,GCP_PROJECT=$PROJECT_ID,WS_OPEN_TIMEOUT_SEC=90'
+      - 'LIQ_CASCADE_THRESHOLD_USD=0,GCP_PROJECT=$PROJECT_ID,WS_OPEN_TIMEOUT_SEC=90,BOT_SERVICE_URL=https://trading-bot-service-c7rpmymugq-lm.a.run.app/process-alerts'
 
 images:
   - 'europe-central2-docker.pkg.dev/$PROJECT_ID/trading-bot-image/orderflow-engine:$SHORT_SHA'
