@@ -1,7 +1,7 @@
 # Lokalizacja: bot_service/pnl_logger_real.py
 
 import logging
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
 from datetime import datetime, timezone
 from google.cloud import firestore
 from decimal import Decimal, getcontext
@@ -41,6 +41,40 @@ def acquire_lock_for_order(order_id: str) -> bool:
         logger.error(f"[PNL_LOCK] Błąd podczas próby założenia blokady dla order_id {order_id}: {e}", exc_info=True)
         return False
 
+
+def release_lock_for_order(order_id: str) -> None:
+    """Usuwa blokadę w processed_pnl_ids — wywołaj po nieudanym zapisie do BigQuery, żeby kolejny /log-pnl mógł ponowić próbę."""
+    try:
+        db = get_db()
+        doc_ref = db.collection(constants.PROCESSED_ORDER_IDS_COLLECTION).document(order_id)
+        doc_ref.delete()
+        logger.info(f"[PNL_LOCK] Zwolniono blokadę dla order_id={order_id} (możliwa ponowna próba zapisu).")
+    except Exception as e:
+        logger.error(f"[PNL_LOCK] Nie udało się zwolnić blokady dla order_id={order_id}: {e}", exc_info=True)
+
+
+def _ms_timestamp_to_iso(ts_raw: Any) -> str:
+    """Bybit zwraca createdTime/updatedTime w ms (string lub int)."""
+    if ts_raw is None:
+        return datetime.now(timezone.utc).isoformat()
+    try:
+        ms = float(ts_raw)
+        return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc).isoformat()
+    except (TypeError, ValueError, OSError):
+        return datetime.now(timezone.utc).isoformat()
+
+
+def _signal_ts_for_bq(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        try:
+            return value.isoformat()
+        except Exception:
+            return str(value)
+    return str(value)
+
+
 def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[Dict[str, Any]]) -> bool:
     """
     Zapisuje wynik rzeczywistej transakcji do BigQuery, dopasowując ją do aktywnego zlecenia.
@@ -54,13 +88,10 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
         logger.error(f"{log_prefix} BigQuery nie zostało zainicjalizowane – pomijam zapis.")
         return False
 
-    if not acquire_lock_for_order(order_id):
-        return False
-
     # Używamy 'event_id' jako klucza dopasowania (zapis w active_orders z handle_immediate_signal)
     is_matched = bool(active_order_data and 'event_id' in active_order_data)
     alert_id = active_order_data.get('event_id', 'UNMATCHED_OR_MANUAL') if active_order_data else 'UNMATCHED_OR_MANUAL'
-    
+
     if not is_matched:
         logger.warning(f"{log_prefix} ⚠️ Transakcja UNMATCHED – zapisuję z oznaczeniem.")
     else:
@@ -133,8 +164,8 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
             "commission_usdt": safe_round(float(commission)),
             "net_pnl_usdt": safe_round(float(net_pnl)),
             "exit_type": pnl_data.get("exitType"),
-            "timestamp_entry": datetime.fromtimestamp(int(pnl_data.get("createdTime")) / 1000, tz=timezone.utc).isoformat(),
-            "timestamp_close": datetime.fromtimestamp(int(pnl_data.get("updatedTime")) / 1000, tz=timezone.utc).isoformat(),
+            "timestamp_entry": _ms_timestamp_to_iso(pnl_data.get("createdTime")),
+            "timestamp_close": _ms_timestamp_to_iso(pnl_data.get("updatedTime")),
             "planned_risk_usdt": safe_round(planned_risk_usdt),
             "realized_rrr": safe_round(realized_rrr, 4), # RRR z mniejszą precyzją
             
@@ -142,7 +173,7 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
             "alert_entry_price": safe_round(ao.get("planned_entry_price")) if active_order_data else None,
             "alert_sl_price": safe_round(ao.get("planned_sl_price")) if active_order_data else None,
             "alert_tp_price": safe_round(ao.get("planned_tp_price")) if active_order_data else None,
-            "timestamp_signal": ao.get("timestamp") if active_order_data else None, # NOWE POLE
+            "timestamp_signal": _signal_ts_for_bq(ao.get("timestamp")) if active_order_data else None,
             
             # Planned (ceny po zaokrągleniu)
             "planned_entry_price": safe_round(ao.get("planned_entry_price")) if active_order_data else None,
@@ -181,6 +212,9 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
         logger.error(f"{log_prefix} Błąd podczas transformacji danych PnL: {e}", exc_info=True)
         return False
 
+    if not acquire_lock_for_order(order_id):
+        return False
+
     try:
         client = bigquery_logger.get_bigquery_client()
         errors = client.insert_rows_json(bigquery_logger.REAL_TRADES_TABLE_REF, [transformed_data])
@@ -197,8 +231,10 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
             return True
         else:
             logger.error(f"{log_prefix} Błąd podczas wstawiania do BigQuery: {errors}. Dokument w active_orders NIE został usunięty.")
+            release_lock_for_order(order_id)
             return False
 
     except Exception as e:
         logger.critical(f"{log_prefix} Krytyczny błąd podczas zapisu do BigQuery: {e}", exc_info=True)
+        release_lock_for_order(order_id)
         return False
