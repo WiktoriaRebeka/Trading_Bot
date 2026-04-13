@@ -147,11 +147,10 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
             "alert_id": alert_id,
             "order_id": order_id,
             "symbol": symbol,
-            
             "direction": (
-                active_order_data.get("direction") if is_matched 
-                else ("SHORT" if float(pnl_data.get("avgEntryPrice", 0)) > float(pnl_data.get("avgExitPrice", 0)) else "LONG") 
-                if float(pnl_data.get("closedPnl", 0)) > 0 
+                active_order_data.get("direction") if is_matched
+                else ("SHORT" if float(pnl_data.get("avgEntryPrice", 0)) > float(pnl_data.get("avgExitPrice", 0)) else "LONG")
+                if float(pnl_data.get("closedPnl", 0)) > 0
                 else ("LONG" if float(pnl_data.get("avgEntryPrice", 0)) > float(pnl_data.get("avgExitPrice", 0)) else "SHORT")
             ),
             "qty": float(qty),
@@ -167,45 +166,18 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
             "timestamp_entry": _ms_timestamp_to_iso(pnl_data.get("createdTime")),
             "timestamp_close": _ms_timestamp_to_iso(pnl_data.get("updatedTime")),
             "planned_risk_usdt": safe_round(planned_risk_usdt),
-            "realized_rrr": safe_round(realized_rrr, 4), # RRR z mniejszą precyzją
-            
-            # --- MAPOWANIE DANYCH Z SIERRY (z active_order_data) ---
+            "realized_rrr": safe_round(realized_rrr, 4),  # RRR z mniejszą precyzją
             "alert_entry_price": safe_round(ao.get("planned_entry_price")) if active_order_data else None,
             "alert_sl_price": safe_round(ao.get("planned_sl_price")) if active_order_data else None,
             "alert_tp_price": safe_round(ao.get("planned_tp_price")) if active_order_data else None,
-            "timestamp_signal": _signal_ts_for_bq(ao.get("timestamp")) if active_order_data else None,
-            
-            # Planned (ceny po zaokrągleniu)
             "planned_entry_price": safe_round(ao.get("planned_entry_price")) if active_order_data else None,
             "planned_sl_price": safe_round(ao.get("planned_sl_price")) if active_order_data else None,
             "planned_tp_price": safe_round(ao.get("planned_tp_price")) if active_order_data else None,
             "exit_price_result": safe_round(exit_price_result),
             "tp_price_chart": safe_round(ao.get("alert_tp_price")) if active_order_data else None,
-            
-            # Pola analityczne (pobierane z active_order_data, jeśli zostały tam zapisane w Kroku 4)
-            "m2_delta": safe_round(ao.get("m2_delta", 0.0)),
-            "m5_rs_ratio": safe_round(ao.get("m5_rs_ratio", 0.0), 4),
-            "structure_state": ao.get("structure_state"),
-            "bos_high": ao.get("bos_high"),
-            "bos_low": ao.get("bos_low"),
-            "choch_up": ao.get("choch_up"),
-            "choch_down": ao.get("choch_down"),
-            "liquidity_grab_above": ao.get("liquidity_grab_above"),
-            "liquidity_grab_below": ao.get("liquidity_grab_below"),
-            "liquidity_price": ao.get("liquidity_price"),
-            "eqh_detected": ao.get("eqh_detected"),
-            "eql_detected": ao.get("eql_detected"),
-            "risk_usdt": ao.get("risk_usdt"),
-            "session": ao.get("session"),
-            "minute_of_day": ao.get("minute_of_day"),
-            "day_of_week": ao.get("day_of_week"),
-            "second": ao.get("second"),
-            "bar_range": ao.get("bar_range"),
-            "ob_range": ao.get("ob_range"),
-            "swing_range": ao.get("swing_range"),
-            "distance_to_liquidity": ao.get("distance_to_liquidity"),
-            "volatility_regime": ao.get("volatility_regime"),
-            "raw_context": ao.get("raw_context"),
+            "event_id": ao.get("event_id") if active_order_data else None,
+            "signal_id": ao.get("signal_id") if active_order_data else None,
+            "timestamp_signal": _signal_ts_for_bq(ao.get("timestamp")) if active_order_data else None,
         }
 
     except Exception as e:
