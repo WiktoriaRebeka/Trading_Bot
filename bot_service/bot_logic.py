@@ -220,6 +220,7 @@ async def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecut
         "planned_qty": calculated_qty,
         "params": order_params,
         "event_id": event_id,
+        "signal_id": signal.signal_id,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "planned_entry_price": f_entry,
         "planned_sl_price": f_sl,
