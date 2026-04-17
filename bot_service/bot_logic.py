@@ -445,5 +445,5 @@ def _find_matching_order(pnl_record: Dict[str, Any]) -> Optional[Dict[str, Any]]
 
     # 3. Fallback: latest active order for symbol & side
     symbol = pnl_record.get("symbol")
-    side = "LONG" if pnl_record.get("side") == "Buy" else "SHORT"
+    side = "LONG" if pnl_record.get("side") == "Sell" else "SHORT"
     return state_manager.get_latest_active_order_for_symbol(symbol, side)
