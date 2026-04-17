@@ -175,9 +175,9 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
             "planned_tp_price": safe_round(ao.get("planned_tp_price")) if active_order_data else None,
             "exit_price_result": safe_round(exit_price_result),
             "tp_price_chart": safe_round(ao.get("alert_tp_price")) if active_order_data else None,
-            "event_id": ao.get("event_id") if active_order_data else None,
+            "event_id": (active_order_data.get('event_id') if is_matched else None) or f"UNMATCHED-{order_id}",
             "signal_id": ao.get("signal_id") if active_order_data else None,
-            "timestamp_signal": _signal_ts_for_bq(ao.get("timestamp")) if active_order_data else None,
+            "timestamp_signal": active_order_data.get("timestamp") or datetime.utcnow().isoformat() + "Z" if active_order_data else datetime.utcnow().isoformat() + "Z",
         }
 
     except Exception as e:
