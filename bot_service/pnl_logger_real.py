@@ -114,7 +114,7 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
         avg_entry_price = Decimal(pnl_data.get("avgEntryPrice", "0.0"))
         avg_exit_price = Decimal(pnl_data.get("avgExitPrice", "0.0"))
         net_pnl = Decimal(pnl_data.get("closedPnl") or "0.0")
-        commission = Decimal(pnl_data.get("cumCommission") or "0.0")
+        commission = Decimal(pnl_data.get("cumExecFee") or pnl_data.get("cumCommission") or "0.0")
 
         entry_value_usdt = qty * avg_entry_price
         exit_value_usdt = qty * avg_exit_price
@@ -174,7 +174,7 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
             "planned_sl_price": safe_round(ao.get("planned_sl_price")) if active_order_data else None,
             "planned_tp_price": safe_round(ao.get("planned_tp_price")) if active_order_data else None,
             "exit_price_result": safe_round(exit_price_result),
-            "tp_price_chart": safe_round(ao.get("alert_tp_price")) if active_order_data else None,
+            "tp_price_chart": safe_round(active_order_data.get("planned_tp_price")) if active_order_data else None,
             "event_id": (active_order_data.get('event_id') if is_matched else None) or f"UNMATCHED-{order_id}",
             "signal_id": ao.get("signal_id") if active_order_data else None,
             "timestamp_signal": active_order_data.get("timestamp") or datetime.utcnow().isoformat() + "Z" if active_order_data else datetime.utcnow().isoformat() + "Z",
