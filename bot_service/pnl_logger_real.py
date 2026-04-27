@@ -107,6 +107,18 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
             except (ValueError, TypeError):
                 return None
 
+        def _normalize_exit_type(raw_value: Any) -> Optional[str]:
+            if raw_value is None:
+                return None
+            text = str(raw_value).strip().lower()
+            if not text:
+                return None
+            if "takeprofit" in text or text == "tp":
+                return "TakeProfit"
+            if "stoploss" in text or text == "sl":
+                return "StopLoss"
+            return None
+
         ao = active_order_data or {}
 
         # Używamy Decimal do precyzyjnych obliczeń wewnętrznych
@@ -123,9 +135,27 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
         planned_risk_usdt = None
         realized_rrr = None
         exit_price_result = None
+        exit_type = (
+            _normalize_exit_type(pnl_data.get("exitType"))
+            or _normalize_exit_type(pnl_data.get("stopOrderType"))
+            or _normalize_exit_type(pnl_data.get("orderType"))
+        )
+        planned_tp_price_dec = None
+        planned_sl_price_dec = None
 
         if is_matched:
             planned_sl_price = active_order_data.get("planned_sl_price")
+            planned_tp_price = active_order_data.get("planned_tp_price")
+            if planned_tp_price is not None:
+                try:
+                    planned_tp_price_dec = Decimal(str(planned_tp_price))
+                except Exception:
+                    planned_tp_price_dec = None
+            if planned_sl_price is not None:
+                try:
+                    planned_sl_price_dec = Decimal(str(planned_sl_price))
+                except Exception:
+                    planned_sl_price_dec = None
             if planned_sl_price:
                 planned_sl_price_dec = Decimal(str(planned_sl_price))
                 if planned_sl_price_dec > 0 and avg_entry_price > 0:
@@ -136,13 +166,25 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
                         planned_risk_usdt = float(planned_risk_usdt_dec)
                         realized_rrr = float(realized_rrr_dec)
 
-            exit_type = pnl_data.get("exitType")
+            if exit_type is None and planned_tp_price_dec is not None and planned_sl_price_dec is not None:
+                dist_to_tp = abs(avg_exit_price - planned_tp_price_dec)
+                dist_to_sl = abs(avg_exit_price - planned_sl_price_dec)
+                exit_type = "TakeProfit" if dist_to_tp <= dist_to_sl else "StopLoss"
             if exit_type == "TakeProfit":
                 exit_price_result = active_order_data.get("planned_tp_price")
             elif exit_type == "StopLoss":
                 exit_price_result = active_order_data.get("planned_sl_price")
 
         # Przygotowanie finalnego obiektu z zaokrąglaniem wszystkich pól NUMERIC
+        commission_usdt = safe_round(float(commission))
+        if commission_usdt is None:
+            commission_usdt = 0.0
+        net_pnl_usdt = safe_round(float(net_pnl))
+        if net_pnl_usdt is None:
+            net_pnl_usdt = 0.0
+        event_id = (active_order_data.get('event_id') if is_matched else None) or f"UNMATCHED-{order_id}"
+        timestamp_signal = _signal_ts_for_bq(ao.get("timestamp")) or datetime.utcnow().isoformat() + "Z"
+
         transformed_data = {
             "alert_id": alert_id,
             "order_id": order_id,
@@ -160,9 +202,9 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
             "entry_value_usdt": safe_round(float(entry_value_usdt)) if entry_value_usdt > 0 else None,
             "exit_value_usdt": safe_round(float(exit_value_usdt)) if exit_value_usdt > 0 else None,
             "gross_pnl_usdt": safe_round(float(gross_pnl_usdt)),
-            "commission_usdt": safe_round(float(commission)),
-            "net_pnl_usdt": safe_round(float(net_pnl)),
-            "exit_type": pnl_data.get("exitType"),
+            "commission_usdt": commission_usdt,
+            "net_pnl_usdt": net_pnl_usdt,
+            "exit_type": exit_type,
             "timestamp_entry": _ms_timestamp_to_iso(pnl_data.get("createdTime")),
             "timestamp_close": _ms_timestamp_to_iso(pnl_data.get("updatedTime")),
             "planned_risk_usdt": safe_round(planned_risk_usdt),
@@ -175,9 +217,9 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
             "planned_tp_price": safe_round(ao.get("planned_tp_price")) if active_order_data else None,
             "exit_price_result": safe_round(exit_price_result),
             "tp_price_chart": safe_round(active_order_data.get("planned_tp_price")) if active_order_data else None,
-            "event_id": (active_order_data.get('event_id') if is_matched else None) or f"UNMATCHED-{order_id}",
+            "event_id": event_id,
             "signal_id": ao.get("signal_id") if active_order_data else None,
-            "timestamp_signal": active_order_data.get("timestamp") or datetime.utcnow().isoformat() + "Z" if active_order_data else datetime.utcnow().isoformat() + "Z",
+            "timestamp_signal": timestamp_signal,
         }
 
     except Exception as e:
