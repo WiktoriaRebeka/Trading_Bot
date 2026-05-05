@@ -310,6 +310,10 @@ def build_alert_payload(symbol: str,
                         sl: float,
                         tp: float,
                         ctx: SignalContext) -> dict:
+    risk_distance = abs(entry - sl)
+    reward_distance = abs(tp - entry)
+    actual_rr = reward_distance / risk_distance if risk_distance > 0 else 0.0
+    risk_pct = (risk_distance / entry) * 100 if entry > 0 else 0.0
 
     return {
         "event_id": f"{symbol}-{uuid.uuid4().hex[:12]}",
@@ -319,7 +323,8 @@ def build_alert_payload(symbol: str,
         "sl": sl,
         "tp": tp,
         "risk_usdt": 2.5,
-        "rr": 3.0,
+        "risk_pct": risk_pct,
+        "rr": actual_rr,
         "structure_state": "SWEEP",
         "raw_context": {
             "sweep_price": ctx.swing_point.price,
