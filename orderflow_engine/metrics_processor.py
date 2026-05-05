@@ -15,6 +15,7 @@ from orderflow_engine.candle_builder import CandleBuilder
 from orderflow_engine.bigquery_logger import OrderFlowBigQueryLogger
 from orderflow_engine.confidence_scorer import ConfidenceScorer
 from orderflow_engine.integration import update_symbol_context
+from orderflow_engine.risk_levels import calculate_structure_risk_levels
 
 logger = logging.getLogger(__name__)
 
@@ -326,14 +327,33 @@ class OrderFlowMetrics:
     async def _execute_signal_async(self, symbol: str, direction: str, level: float, score: float, liq_v: float, div: dict):
         import aiohttp
         event_id = f"PY-{symbol}-{int(time.time())}"
+        risk_levels = calculate_structure_risk_levels(
+            symbol=symbol,
+            direction=direction,
+            entry_price=level,
+            engine=self.engines[symbol],
+            confidence=score,
+            logger=logger,
+        )
+        if risk_levels is None:
+            logger.warning(f"⚠️ {symbol} {direction} alert skipped: no valid structure-based risk levels")
+            return
         payload = {
             "event_id": event_id, "signal_id": f"AUTO-{event_id}", "symbol": symbol,
             "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "direction": direction, "entry": level,
-            "sl": level * 0.994 if direction == "LONG" else level * 1.006,
-            "tp": level * 1.018 if direction == "LONG" else level * 0.982,
-            "risk_pct": 0.6, "rr": 3.0, "structure_state": 1 if direction == "LONG" else -1, "risk_usdt": 2.5,
-            "raw_context": {"confidence_score": score, "liq_volume_usd": liq_v, "delta_div_detected": div['detected'], "delta_strength": div.get('strength', 0)}
+            "sl": risk_levels.sl,
+            "tp": risk_levels.tp,
+            "risk_pct": risk_levels.risk_pct, "rr": risk_levels.rr, "structure_state": 1 if direction == "LONG" else -1, "risk_usdt": 2.5,
+            "raw_context": {
+                "confidence_score": score,
+                "liq_volume_usd": liq_v,
+                "delta_div_detected": div['detected'],
+                "delta_strength": div.get('strength', 0),
+                "swept_swing_level": risk_levels.swing_level,
+                "structure_sl_fallback_used": risk_levels.fallback_used,
+                "structure_tp_capped": risk_levels.tp_capped,
+            }
         }
         BOT_URL = self.bot_url
         try:

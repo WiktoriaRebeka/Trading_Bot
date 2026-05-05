@@ -18,6 +18,7 @@ from orderflow_engine.signal_detector import (
     SwingPoint, DeltaPoint, DomSnapshot,
 )
 from orderflow_engine.bot_sender import send_alert_to_bot
+from orderflow_engine.risk_levels import calculate_structure_risk_levels
 
 logger = logging.getLogger(__name__)
 
@@ -319,6 +320,18 @@ async def evaluate_and_maybe_alert(symbol: str, processor):
                 _hour = _now.hour
                 _session = "ASIA" if 0 <= _hour < 7 else "LONDON" if _hour < 15 else "NY" if _hour < 21 else "AFTERHOURS"
                 entry = ctx.current_price
+                risk_levels = calculate_structure_risk_levels(
+                    sym,
+                    direction,
+                    entry,
+                    processor.engines[sym],
+                    score,
+                    logger,
+                )
+                if risk_levels is None:
+                    logger.error(f"[FILTER] {sym} {direction}: ❌ structure_risk FAILED")
+                    continue
+
                 alert = {
                     "event_id": f"{sym}-{int(time.time())}",
                     "signal_id": f"AUTO-{sym}-{entry}",
@@ -326,10 +339,10 @@ async def evaluate_and_maybe_alert(symbol: str, processor):
                     "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                     "direction": direction,
                     "entry": entry,
-                    "sl": entry * 0.994 if direction == "LONG" else entry * 1.006,
-                    "tp": entry * 1.018 if direction == "LONG" else entry * 0.982,
-                    "risk_pct": 0.6,
-                    "rr": 3.0,
+                    "sl": risk_levels.sl,
+                    "tp": risk_levels.tp,
+                    "risk_pct": risk_levels.risk_pct,
+                    "rr": risk_levels.rr,
                     "risk_usdt": 2.5,
                     "structure_state": 1 if direction == "LONG" else -1,
                     "session": _session,
@@ -345,6 +358,9 @@ async def evaluate_and_maybe_alert(symbol: str, processor):
                         "wall_detected": check_dom_wall(ctx),
                         "wall_price": ctx.dom_snapshot.asks[0][0] if direction == "SHORT" and ctx.dom_snapshot.asks else ctx.dom_snapshot.bids[0][0] if ctx.dom_snapshot.bids else None,
                         "wall_size": ctx.dom_snapshot.asks[0][1] if direction == "SHORT" and ctx.dom_snapshot.asks else ctx.dom_snapshot.bids[0][1] if ctx.dom_snapshot.bids else None,
+                        "swept_swing_level": risk_levels.swing_level,
+                        "structure_sl_fallback_used": risk_levels.fallback_used,
+                        "structure_tp_capped": risk_levels.tp_capped,
                     },
                 }
                 await send_alert_to_bot(alert)
