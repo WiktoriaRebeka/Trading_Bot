@@ -9,6 +9,7 @@ MIN_SL_DISTANCE_PCT = 0.002  # 0.2% minimum SL distance vs entry
 FALLBACK_SL_PCT = 0.01
 TP_SWING_CAP_BUFFER_PCT = 0.001
 RR_THRESHOLD_RATIO = 0.9  # Allow 10% reduction below target after capping
+MIN_ABSOLUTE_RR = 1.0  # Hard floor - always require net RR >= 1.0
 
 
 def _target_net_rr_for_confidence(confidence: float) -> float:
@@ -171,10 +172,16 @@ def calculate_structure_risk_levels(
     net_profit_final = tp_distance_final - entry_fee - tp_exit_fee
     actual_net_rr = net_profit_final / net_sl_risk
 
-    min_rr_threshold = target_net_rr * RR_THRESHOLD_RATIO
+    dynamic_threshold = target_net_rr * RR_THRESHOLD_RATIO
+    min_rr_threshold = max(dynamic_threshold, MIN_ABSOLUTE_RR)
+    threshold_source = (
+        "hard floor" if min_rr_threshold == MIN_ABSOLUTE_RR and MIN_ABSOLUTE_RR >= dynamic_threshold
+        else "dynamic"
+    )
     if actual_net_rr < min_rr_threshold:
         logger.warning(
             f"❌ {sym} {side} Net RR {actual_net_rr:.2f} < threshold {min_rr_threshold:.2f} "
+            f"[{threshold_source}: dynamic={dynamic_threshold:.2f}, hard_floor={MIN_ABSOLUTE_RR:.2f}] "
             f"(target {target_net_rr:.1f}, conf {confidence:.0f}%). SKIP. "
             f"(entry={entry:.4f}, sl={sl_price:.4f}, tp={tp_price:.4f}, "
             f"net_sl_risk={net_sl_risk:.8f}, tp_capped={tp_capped})"
