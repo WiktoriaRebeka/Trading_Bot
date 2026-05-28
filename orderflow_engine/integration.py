@@ -19,6 +19,7 @@ from orderflow_engine.signal_detector import (
 )
 from orderflow_engine.bot_sender import send_alert_to_bot
 from orderflow_engine.risk_levels import calculate_structure_risk_levels
+from orderflow_engine.settings import get_trading_session, settings
 
 logger = logging.getLogger(__name__)
 
@@ -249,6 +250,22 @@ async def evaluate_and_maybe_alert(symbol: str, processor):
                 if ctx is None:
                     continue
 
+                session = get_trading_session()
+                if session in settings.SKIP_SESSIONS:
+                    logger.info(
+                        f"⏭️ {sym} SKIPPED: session={session} in SKIP_SESSIONS"
+                    )
+                    continue
+
+                div_early = processor._detect_delta_divergence(sym)
+                delta_strength = float(div_early.get("strength", 0) or 0)
+                if settings.REQUIRE_ZERO_DELTA and delta_strength != 0:
+                    logger.info(
+                        f"⏭️ {sym} SKIPPED: delta_strength={delta_strength:.3f} != 0 "
+                        f"(REQUIRE_ZERO_DELTA=True)"
+                    )
+                    continue
+
                 # STRESS-TEST
                 liq_total = sum(float(l.get("volume_usd", 0)) for l in ctx.liquidations)
                 logger.info(f"[STRESS-TEST] [{sym}] {direction}: liq_vol=${liq_total:.0f} obi={ctx.dom_snapshot.obi:.3f}")
@@ -317,8 +334,7 @@ async def evaluate_and_maybe_alert(symbol: str, processor):
 
                 deltas_list = [d.delta for d in ctx.recent_deltas[-30:]] if len(ctx.recent_deltas) >= 30 else [d.delta for d in ctx.recent_deltas]
                 _now = datetime.now(timezone.utc)
-                _hour = _now.hour
-                _session = "ASIA" if 0 <= _hour < 7 else "LONDON" if _hour < 15 else "NY" if _hour < 21 else "AFTERHOURS"
+                _session = get_trading_session(_now)
                 entry = ctx.current_price
                 risk_levels = calculate_structure_risk_levels(
                     sym,

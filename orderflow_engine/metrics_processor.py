@@ -16,6 +16,7 @@ from orderflow_engine.bigquery_logger import OrderFlowBigQueryLogger
 from orderflow_engine.confidence_scorer import ConfidenceScorer
 from orderflow_engine.integration import update_symbol_context
 from orderflow_engine.risk_levels import calculate_structure_risk_levels
+from orderflow_engine.settings import get_trading_session, settings
 
 logger = logging.getLogger(__name__)
 
@@ -310,8 +311,24 @@ class OrderFlowMetrics:
 
     def _validate_setup_layers(self, symbol, direction, price):
         sym = str(symbol).upper()
-        liq_vol = self._matched_liquidation_buffer_usd(sym, direction)
+
+        session = get_trading_session()
+        if session in settings.SKIP_SESSIONS:
+            logger.info(
+                f"⏭️ {sym} SKIPPED: session={session} in SKIP_SESSIONS"
+            )
+            return
+
         div = self._detect_delta_divergence(sym)
+        delta_strength = float(div.get("strength", 0) or 0)
+        if settings.REQUIRE_ZERO_DELTA and delta_strength != 0:
+            logger.info(
+                f"⏭️ {sym} SKIPPED: delta_strength={delta_strength:.3f} != 0 "
+                f"(REQUIRE_ZERO_DELTA=True)"
+            )
+            return
+
+        liq_vol = self._matched_liquidation_buffer_usd(sym, direction)
         dom = self.orderbook_snapshots.get(sym)
         confidence = self.scorer.calculate({
             'liquidation_volume_usd': liq_vol, 'delta_divergence': div['detected'], 'delta_strength': div.get('strength', 0),
