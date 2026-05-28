@@ -9,15 +9,7 @@ MIN_SL_DISTANCE_PCT = 0.002  # 0.2% minimum SL distance vs entry
 FALLBACK_SL_PCT = 0.01
 TP_SWING_CAP_BUFFER_PCT = 0.001
 MIN_NET_RR = 0.9  # minimum acceptable net RR after fees and swing capping
-
-
-def _target_net_rr_for_confidence(confidence: float) -> float:
-    """Pick target net RR (after fees) based on signal confidence score."""
-    if confidence >= 85:
-        return 1.0
-    if confidence >= 75:
-        return 1.5
-    return 2.0
+TARGET_NET_RR = 2.0  # Fixed for all trades regardless of confidence
 
 
 @dataclass(frozen=True)
@@ -54,10 +46,7 @@ def calculate_structure_risk_levels(
         logger.error(f"❌ {sym} {side} invalid entry price for structure-based SL: {entry}")
         return None
 
-    target_net_rr = _target_net_rr_for_confidence(confidence)
-    logger.info(
-        f"📊 {sym} Confidence {confidence:.0f}% → Target net RR {target_net_rr:.1f}"
-    )
+    target_net_rr = TARGET_NET_RR
 
     if side == "LONG":
         swing_level = getattr(engine, "last_swing_low", None)
@@ -197,7 +186,7 @@ def calculate_structure_risk_levels(
     logger.warning(f"   SL: {sl_price:.4f} (net risk {risk_pct:.4f}% incl. fees)")
     logger.warning(f"   TP: {tp_price:.4f} ({tp_distance_pct:.2f}% price move)")
     logger.warning(f"   Net SL risk (price+fees): {net_sl_risk:.8f}")
-    logger.warning(f"   Confidence: {confidence:.1f}/100  Target RR: {target_net_rr:.1f}")
+    logger.warning(f"   Confidence: {confidence:.1f}/100  Target RR: {TARGET_NET_RR:.1f}")
     logger.warning(f"✅ {sym} Net RR after fees: {actual_net_rr:.2f}")
 
     return StructureRiskLevels(
