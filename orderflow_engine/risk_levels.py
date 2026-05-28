@@ -8,8 +8,7 @@ TAKER_FEE = 0.00055  # 0.055%
 MIN_SL_DISTANCE_PCT = 0.002  # 0.2% minimum SL distance vs entry
 FALLBACK_SL_PCT = 0.01
 TP_SWING_CAP_BUFFER_PCT = 0.001
-RR_THRESHOLD_RATIO = 0.9  # Allow 10% reduction below target after capping
-MIN_ABSOLUTE_RR = 1.0  # Hard floor - always require net RR >= 1.0
+MIN_NET_RR = 0.9  # minimum acceptable net RR after fees and swing capping
 
 
 def _target_net_rr_for_confidence(confidence: float) -> float:
@@ -167,24 +166,25 @@ def calculate_structure_risk_levels(
         )
         return None
 
-    entry_fee = entry * MAKER_FEE
-    tp_exit_fee = entry * MAKER_FEE
-    net_profit_final = tp_distance_final - entry_fee - tp_exit_fee
-    actual_net_rr = net_profit_final / net_sl_risk
+    tp_distance = tp_distance_final
 
-    dynamic_threshold = target_net_rr * RR_THRESHOLD_RATIO
-    min_rr_threshold = max(dynamic_threshold, MIN_ABSOLUTE_RR)
-    threshold_source = (
-        "hard floor" if min_rr_threshold == MIN_ABSOLUTE_RR and MIN_ABSOLUTE_RR >= dynamic_threshold
-        else "dynamic"
-    )
-    if actual_net_rr < min_rr_threshold:
+    # Validation 1: TP must be geometrically larger than SL (after swing capping)
+    if tp_distance <= sl_distance:
         logger.warning(
-            f"❌ {sym} {side} Net RR {actual_net_rr:.2f} < threshold {min_rr_threshold:.2f} "
-            f"[{threshold_source}: dynamic={dynamic_threshold:.2f}, hard_floor={MIN_ABSOLUTE_RR:.2f}] "
-            f"(target {target_net_rr:.1f}, conf {confidence:.0f}%). SKIP. "
-            f"(entry={entry:.4f}, sl={sl_price:.4f}, tp={tp_price:.4f}, "
-            f"net_sl_risk={net_sl_risk:.8f}, tp_capped={tp_capped})"
+            f"{sym} SKIPPED: TP distance {tp_distance:.6f} ({tp_distance / entry * 100:.3f}%) "
+            f"<= SL distance {sl_distance:.6f} ({sl_distance / entry * 100:.3f}%) after swing capping"
+        )
+        return None
+
+    # Validation 2: Net RR after fees must be >= MIN_NET_RR
+    net_sl = sl_distance + (entry * MAKER_FEE) + (sl_price * TAKER_FEE)
+    net_tp = tp_distance - (entry * MAKER_FEE) - (entry * MAKER_FEE)
+    actual_net_rr = net_tp / net_sl
+
+    if actual_net_rr < MIN_NET_RR:
+        logger.warning(
+            f"{sym} SKIPPED: Net RR {actual_net_rr:.3f} < {MIN_NET_RR} after fees. "
+            f"TP dist {tp_distance / entry * 100:.3f}%, SL dist {sl_distance / entry * 100:.3f}%"
         )
         return None
 

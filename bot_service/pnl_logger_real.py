@@ -64,6 +64,47 @@ def _ms_timestamp_to_iso(ts_raw: Any) -> str:
         return datetime.now(timezone.utc).isoformat()
 
 
+def determine_exit_type(
+    direction: str,
+    avg_exit_price: float,
+    planned_tp_price: float,
+    planned_sl_price: float,
+    bybit_close_type: Optional[str] = None,
+) -> str:
+    """
+    Determine exit type from actual exit price vs planned levels.
+    Do not blindly trust Bybit's closeType / exitType fields.
+    """
+    tolerance = 0.001  # 0.1% tolerance for slippage
+    side = str(direction).upper()
+
+    if side == "LONG":
+        tp_hit = avg_exit_price >= planned_tp_price * (1 - tolerance)
+        sl_hit = avg_exit_price <= planned_sl_price * (1 + tolerance)
+    elif side == "SHORT":
+        tp_hit = avg_exit_price <= planned_tp_price * (1 + tolerance)
+        sl_hit = avg_exit_price >= planned_sl_price * (1 - tolerance)
+    else:
+        logger.warning(
+            f"EXIT TYPE UNKNOWN: unsupported direction={direction!r}, exit={avg_exit_price}, "
+            f"planned_tp={planned_tp_price}, planned_sl={planned_sl_price}. "
+            f"Bybit closeType={bybit_close_type}"
+        )
+        return bybit_close_type or "Unknown"
+
+    if tp_hit:
+        return "TakeProfit"
+    if sl_hit:
+        return "StopLoss"
+
+    logger.warning(
+        f"EXIT BETWEEN LEVELS: direction={side}, exit={avg_exit_price}, "
+        f"planned_tp={planned_tp_price}, planned_sl={planned_sl_price}. "
+        f"Bybit closeType={bybit_close_type}"
+    )
+    return bybit_close_type or "Unknown"
+
+
 def _signal_ts_for_bq(value: Any) -> Optional[str]:
     if value is None:
         return None
@@ -135,11 +176,12 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
         planned_risk_usdt = None
         realized_rrr = None
         exit_price_result = None
-        exit_type = (
+        bybit_exit_type = (
             _normalize_exit_type(pnl_data.get("exitType"))
             or _normalize_exit_type(pnl_data.get("stopOrderType"))
             or _normalize_exit_type(pnl_data.get("orderType"))
         )
+        exit_type = bybit_exit_type
         planned_tp_price_dec = None
         planned_sl_price_dec = None
 
@@ -166,10 +208,18 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
                         planned_risk_usdt = float(planned_risk_usdt_dec)
                         realized_rrr = float(realized_rrr_dec)
 
-            if exit_type is None and planned_tp_price_dec is not None and planned_sl_price_dec is not None:
-                dist_to_tp = abs(avg_exit_price - planned_tp_price_dec)
-                dist_to_sl = abs(avg_exit_price - planned_sl_price_dec)
-                exit_type = "TakeProfit" if dist_to_tp <= dist_to_sl else "StopLoss"
+            if planned_tp_price_dec is not None and planned_sl_price_dec is not None:
+                trade_direction = active_order_data.get("direction")
+                if trade_direction:
+                    exit_type = determine_exit_type(
+                        direction=trade_direction,
+                        avg_exit_price=float(avg_exit_price),
+                        planned_tp_price=float(planned_tp_price_dec),
+                        planned_sl_price=float(planned_sl_price_dec),
+                        bybit_close_type=bybit_exit_type,
+                    )
+                elif exit_type is None:
+                    exit_type = bybit_exit_type
             if exit_type == "TakeProfit":
                 exit_price_result = active_order_data.get("planned_tp_price")
             elif exit_type == "StopLoss":
