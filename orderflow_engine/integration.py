@@ -316,10 +316,6 @@ async def evaluate_and_maybe_alert(symbol: str, processor):
                     )
 
                 logger.info(f"[{sym}] delta_divergence INPUT: samples={n} direction={direction}")
-                if not check_delta_divergence(ctx):
-                    logger.info(f"[FILTER] {sym} {direction}: ❌ delta_divergence FAILED")
-                    continue
-                logger.info(f"[FILTER] {sym} {direction}: ✅ delta_divergence OK")
 
                 if not check_dom_wall(ctx):
                     logger.info(f"[FILTER] {sym} {direction}: ❌ dom_wall FAILED")
