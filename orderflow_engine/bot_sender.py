@@ -51,6 +51,11 @@ async def _close_session_safely() -> None:
         _session = None
 
 
+async def _reset_session() -> None:
+    """Zamknij i wyczyść współdzieloną sesję — kolejne _get_session() utworzy nową."""
+    await _close_session_safely()
+
+
 async def send_alert_to_bot(alert_payload: Dict[str, Any]) -> bool:
     """
     Asynchronicznie wysyła alert do bot_service.
@@ -76,6 +81,9 @@ async def send_alert_to_bot(alert_payload: Dict[str, Any]) -> bool:
     base_delay = float(os.environ.get("BOT_SERVICE_RETRY_BASE_SEC", "0.75"))
 
     for attempt in range(1, max_retries + 1):
+        s = _session
+        if s is None or s.closed:
+            await _reset_session()
         try:
             session = await _get_session()
             async with session.post(
@@ -101,7 +109,7 @@ async def send_alert_to_bot(alert_payload: Dict[str, Any]) -> bool:
                 f"{timeout.total}s (zwiększ BOT_SERVICE_TIMEOUT_SEC jeśli Bybit/Firestore są wolne)"
             )
             if attempt < max_retries:
-                await _close_session_safely()
+                await _reset_session()
                 await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
                 continue
             logger.error(
@@ -115,7 +123,7 @@ async def send_alert_to_bot(alert_payload: Dict[str, Any]) -> bool:
                 f"attempt {attempt}/{max_retries}: {e}"
             )
             if attempt < max_retries:
-                await _close_session_safely()
+                await _reset_session()
                 await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
                 continue
             logger.error(f"❌ Network error sending alert for {symbol}: {e}")

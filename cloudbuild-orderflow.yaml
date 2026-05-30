@@ -39,9 +39,6 @@ steps:
       - '--max-instances=1'
       - '--update-secrets'
       - 'BYBIT_API_KEY=bybit-api-key:latest,BYBIT_API_SECRET=bybit-api-secret:latest'
-      - '--network=trading-bot-vpc'
-      - '--subnet=trading-bot-cloudrun-subnet'
-      - '--vpc-egress=all-traffic'
       - '--update-env-vars'
       # WS_OPEN_TIMEOUT_SEC: floor 45s w kodzie; 90s przy VPC egress; 15s powodowalo stale reconnecty.
       - 'LIQ_CASCADE_THRESHOLD_USD=0,GCP_PROJECT=$PROJECT_ID,WS_OPEN_TIMEOUT_SEC=90,BOT_SERVICE_URL=https://trading-bot-service-785819958951.europe-central2.run.app/process-alerts,BOT_SERVICE_TIMEOUT_SEC=120,BOT_SERVICE_RETRIES=3,BOT_SERVICE_CONNECT_TIMEOUT_SEC=20'
