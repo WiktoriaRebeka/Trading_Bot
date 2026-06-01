@@ -198,6 +198,28 @@ async def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecut
         if calculated_qty <= 0:
             logger.error(f"[{event_id}] signal_input: REJECT — qty wynosi 0 symbol={symbol}")
             return
+
+        # Walidacja planned_risk
+        sl_distance = abs(f_entry - f_sl)
+        planned_risk_usdt = calculated_qty * sl_distance
+        if planned_risk_usdt > 2.5:
+            logger.warning(
+                f"[{event_id}] signal_input: REJECT — "
+                f"planned_risk {planned_risk_usdt:.3f} USDT > 2.5 USDT limit "
+                f"symbol={symbol} qty={calculated_qty} sl_dist={sl_distance:.6f}"
+            )
+            return
+
+        # Walidacja net_tp
+        tp_distance = abs(f_tp - f_entry)
+        net_tp_usdt = calculated_qty * tp_distance
+        if net_tp_usdt < 5.0:
+            logger.warning(
+                f"[{event_id}] signal_input: REJECT — "
+                f"net_tp {net_tp_usdt:.3f} USDT < 5.0 USDT minimum "
+                f"symbol={symbol} qty={calculated_qty} tp_dist={tp_distance:.6f}"
+            )
+            return
     except Exception as e:
         logger.error(f"[{event_id}] signal_input: Błąd obliczeń rozmiaru symbol={symbol} error={e}")
         return
