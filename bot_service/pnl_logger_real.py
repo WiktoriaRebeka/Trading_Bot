@@ -75,7 +75,7 @@ def determine_exit_type(
     Determine exit type from actual exit price vs planned levels.
     Do not blindly trust Bybit's closeType / exitType fields.
     """
-    tolerance = 0.005  # 0.1% tolerance for slippage
+    tolerance = 0.005  # 0.5% tolerance (covers 0.075% fees + slippage buffer)
     side = str(direction).upper()
 
     if side == "LONG":
