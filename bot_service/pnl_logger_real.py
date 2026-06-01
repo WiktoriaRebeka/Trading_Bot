@@ -75,7 +75,7 @@ def determine_exit_type(
     Determine exit type from actual exit price vs planned levels.
     Do not blindly trust Bybit's closeType / exitType fields.
     """
-    tolerance = 0.001  # 0.1% tolerance for slippage
+    tolerance = 0.005  # 0.1% tolerance for slippage
     side = str(direction).upper()
 
     if side == "LONG":
@@ -97,12 +97,20 @@ def determine_exit_type(
     if sl_hit:
         return "StopLoss"
 
+    if side == "LONG":
+        dist_to_tp = abs(avg_exit_price - planned_tp_price)
+        dist_to_sl = abs(avg_exit_price - planned_sl_price)
+    elif side == "SHORT":
+        dist_to_tp = abs(avg_exit_price - planned_tp_price)
+        dist_to_sl = abs(avg_exit_price - planned_sl_price)
+
+    closer = "TakeProfit" if dist_to_tp < dist_to_sl else "StopLoss"
     logger.warning(
         f"EXIT BETWEEN LEVELS: direction={side}, exit={avg_exit_price}, "
-        f"planned_tp={planned_tp_price}, planned_sl={planned_sl_price}. "
-        f"Bybit closeType={bybit_close_type}"
+        f"tp={planned_tp_price}, sl={planned_sl_price}, "
+        f"classified as {closer} (closer level)"
     )
-    return bybit_close_type or "Unknown"
+    return closer
 
 
 def _signal_ts_for_bq(value: Any) -> Optional[str]:
