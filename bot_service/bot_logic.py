@@ -418,7 +418,7 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
     if last_ts.tzinfo is None:
         last_ts = last_ts.replace(tzinfo=timezone.utc)
 
-    start_ms = int((last_ts - timedelta(hours=24)).timestamp() * 1000)
+    start_ms = int(last_ts.timestamp() * 1000)
     processed = 0
 
     try:
