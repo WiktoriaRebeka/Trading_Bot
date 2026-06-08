@@ -201,6 +201,12 @@ async def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecut
 
         # Walidacja planned_risk
         sl_distance = abs(f_entry - f_sl)
+        if sl_distance == 0:
+            logger.warning(
+                f"[{event_id}] signal_input: REJECT — "
+                f"sl_distance = 0 (SL == entry) symbol={symbol}"
+            )
+            return
         planned_risk_usdt = calculated_qty * sl_distance
         if planned_risk_usdt > 2.5:
             logger.warning(
