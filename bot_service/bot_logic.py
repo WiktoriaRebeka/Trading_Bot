@@ -187,6 +187,14 @@ async def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecut
         f_sl = round_price_by_tick(signal.sl, tick_size, "up" if is_long else "down")
         f_tp = round_price_by_tick(signal.tp, tick_size, "down" if is_long else "up")
 
+        if f_sl == f_entry:
+            logger.warning(
+                f"[{event_id}] signal_input: REJECT — "
+                f"f_sl == f_entry after rounding ({f_sl}) symbol={symbol} "
+                f"tickSize={tick_size}"
+            )
+            return
+
         raw_qty = calculate_position_size(
             risk_per_trade_usdt=signal.risk_usdt,
             entry_price=f_entry,
