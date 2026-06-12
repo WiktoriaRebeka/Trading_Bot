@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import socket
 from typing import Any, Dict
 
 import aiohttp
@@ -38,6 +39,7 @@ async def _get_session() -> aiohttp.ClientSession:
                 limit=32,
                 ttl_dns_cache=300,
                 enable_cleanup_closed=True,
+                family=socket.AF_INET6,
             )
             _session = aiohttp.ClientSession(connector=connector)
         return _session
