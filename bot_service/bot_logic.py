@@ -423,11 +423,33 @@ def update_filled_orders(executor: BybitExecutor):
 # === 5. PNL LOGGER (Reporting) ===
 # =====================================================================
 
+PNL_CURSOR_LOOKBACK = timedelta(minutes=10)
+
+
+def _max_closed_pnl_updated_ms(records: List[Dict[str, Any]]) -> Optional[int]:
+    """Najpóźniejszy znacznik czasu zamknięcia z batcha Bybit (ms epoch), z pól updatedTime / createdTime."""
+    max_ms: Optional[int] = None
+    for rec in records:
+        raw = rec.get("updatedTime") or rec.get("createdTime")
+        if raw is None:
+            continue
+        try:
+            ms = int(float(raw))
+        except (TypeError, ValueError):
+            continue
+        if max_ms is None or ms > max_ms:
+            max_ms = ms
+    return max_ms
+
+
 def log_closed_positions_pnl(executor: BybitExecutor) -> int:
-    """Cykl zamykania pozycji i raportowania do BigQuery."""
+    """Cykl zamykania pozycji i raportowania do BigQuery.
+
+    Kursor czasowy (pnl_logger_last_fetch_state) = max(updatedTime z pobranych rekordów) − overlap,
+    wyłącznie po pełnym pobraniu i niepustej liście — nigdy datetime.now() jako kursor.
+    """
     last_ts = load_last_processed_timestamp("pnl_logger_last_fetch_state")
     if last_ts is None:
-        # default to now - 24h if missing
         last_ts = datetime.now(timezone.utc) - timedelta(hours=24)
     if last_ts.tzinfo is None:
         last_ts = last_ts.replace(tzinfo=timezone.utc)
@@ -436,15 +458,32 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
     processed = 0
 
     try:
-        records = call_with_retry(executor.get_closed_pnl_history, start_time_ms=start_ms)
+        records, fetch_complete = call_with_retry(executor.get_closed_pnl_history, start_time_ms=start_ms)
+        if not fetch_complete:
+            log_struct(
+                "warning",
+                "pnl_logger",
+                "Closed PnL fetch incomplete (pagination/API error) — will still process partial batch; cursor unchanged",
+                start_ms=start_ms,
+                n_partial=len(records),
+            )
+
         if not records:
-            log_struct("info", "pnl_logger", "No closed pnl records found")
-            save_last_processed_timestamp(datetime.now(timezone.utc), "pnl_logger_last_fetch_state")
+            log_struct("info", "pnl_logger", "No closed pnl records found — cursor unchanged")
             return 0
 
         for rec in records:
             order_id = rec.get("orderId")
-            if state_manager.is_pnl_record_processed(order_id):
+            if not order_id:
+                log_struct(
+                    "warning",
+                    "pnl_logger",
+                    "Skipping closed PnL record without orderId",
+                    symbol=rec.get("symbol"),
+                )
+                continue
+            order_id_str = str(order_id)
+            if state_manager.is_closed_pnl_record_logged(order_id_str):
                 continue
 
             matched_order = _find_matching_order(rec)
@@ -452,10 +491,28 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
                 if log_real_trade_result(rec, matched_order):
                     processed += 1
             except Exception as e:
-                log_struct("error", "pnl_logger", "Failed to log real trade result", order_id=order_id, error=str(e))
+                log_struct("error", "pnl_logger", "Failed to log real trade result", order_id=order_id_str, error=str(e))
 
-        save_last_processed_timestamp(datetime.now(timezone.utc), "pnl_logger_last_fetch_state")
-        log_struct("info", "pnl_logger", "Cycle completed", processed=processed)
+        max_ms = _max_closed_pnl_updated_ms(records)
+        if fetch_complete and max_ms is not None:
+            cursor_dt = datetime.fromtimestamp(max_ms / 1000.0, tz=timezone.utc) - PNL_CURSOR_LOOKBACK
+            save_last_processed_timestamp(cursor_dt, "pnl_logger_last_fetch_state")
+            log_struct(
+                "info",
+                "pnl_logger",
+                "Cycle completed",
+                processed=processed,
+                next_cursor_preview=cursor_dt.isoformat(),
+            )
+        else:
+            reason = "fetch incomplete" if not fetch_complete else "no valid timestamps in batch"
+            log_struct(
+                "warning",
+                "pnl_logger",
+                f"Cursor unchanged ({reason})",
+                processed=processed,
+                fetch_complete=fetch_complete,
+            )
         return processed
 
     except Exception as e:

@@ -5,6 +5,8 @@ from google.cloud import firestore
 from google.api_core.exceptions import GoogleAPICallError, Aborted
 from datetime import datetime, timezone
 from shared_lib.firebase_client import get_db
+from shared_lib import constants as app_constants
+
 logger = logging.getLogger(__name__)
 
 
@@ -164,15 +166,27 @@ def get_latest_active_order_for_symbol(symbol: str, side: str) -> Optional[Dict[
 
 
 # -------------------------
-# PnL dedup helpers
+# PnL dedup helpers (processed_pnl_ids — dopiero po sukcesie zapisu do BigQuery)
 # -------------------------
-def is_pnl_record_processed(order_id: str) -> bool:
-    try:
-        q = _get_client().collection("pnl_processed").document(str(order_id)).get()
-        return q.exists
-    except Exception as e:
-        logger.exception(f"[state_manager] Failed to check pnl processed for {order_id}: {e}")
+def _processed_pnl_ids_collection():
+    return _get_client().collection(app_constants.PROCESSED_ORDER_IDS_COLLECTION)
+
+
+def is_closed_pnl_record_logged(order_id: Optional[str]) -> bool:
+    """True, jeśli rekord zamknięcia został już zapisany do BigQuery (marker w Firestore)."""
+    if not order_id:
         return False
+    try:
+        return _processed_pnl_ids_collection().document(str(order_id)).get().exists
+    except Exception as e:
+        logger.exception(f"[state_manager] Failed to check processed_pnl_ids for {order_id}: {e}")
+        return False
+
+
+def mark_closed_pnl_record_logged(order_id: str) -> None:
+    """Wywołuj wyłącznie po udanym insert_rows_json do real_trades_history. Idempotentny set(merge=True)."""
+    doc_ref = _processed_pnl_ids_collection().document(str(order_id))
+    doc_ref.set({"processed_at": datetime.now(timezone.utc)}, merge=True)
 
 
 # -------------------------

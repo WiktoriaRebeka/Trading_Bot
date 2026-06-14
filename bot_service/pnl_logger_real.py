@@ -3,54 +3,12 @@
 import logging
 from typing import Any, Dict, Optional
 from datetime import datetime, timezone
-from google.cloud import firestore
 from decimal import Decimal, getcontext
 
 from bot_service import bigquery_logger, state_manager
-from shared_lib import constants
-from shared_lib.firebase_client import get_db
 
 logger = logging.getLogger(__name__)
 getcontext().prec = 18
-
-def acquire_lock_for_order(order_id: str) -> bool:
-    try:
-        db = get_db()
-        doc_ref = db.collection(constants.PROCESSED_ORDER_IDS_COLLECTION).document(order_id)
-        
-        @firestore.transactional
-        def _create_if_not_exists(transaction, doc_ref):
-            snapshot = doc_ref.get(transaction=transaction)
-            if snapshot.exists:
-                return False
-            else:
-                transaction.set(doc_ref, {"processed_at": datetime.now(timezone.utc)})
-                return True
-
-        transaction = db.transaction()
-        lock_acquired = _create_if_not_exists(transaction, doc_ref)
-
-        if lock_acquired:
-            logger.info(f"[PNL_LOCK] Pomyślnie założono blokadę dla order_id: {order_id}")
-            return True
-        else:
-            logger.warning(f"[PNL_DUPLICATE] Blokada dla order_id: {order_id} już istnieje. Pomijam przetwarzanie.")
-            return False
-            
-    except Exception as e:
-        logger.error(f"[PNL_LOCK] Błąd podczas próby założenia blokady dla order_id {order_id}: {e}", exc_info=True)
-        return False
-
-
-def release_lock_for_order(order_id: str) -> None:
-    """Usuwa blokadę w processed_pnl_ids — wywołaj po nieudanym zapisie do BigQuery, żeby kolejny /log-pnl mógł ponowić próbę."""
-    try:
-        db = get_db()
-        doc_ref = db.collection(constants.PROCESSED_ORDER_IDS_COLLECTION).document(order_id)
-        doc_ref.delete()
-        logger.info(f"[PNL_LOCK] Zwolniono blokadę dla order_id={order_id} (możliwa ponowna próba zapisu).")
-    except Exception as e:
-        logger.error(f"[PNL_LOCK] Nie udało się zwolnić blokady dla order_id={order_id}: {e}", exc_info=True)
 
 
 def _ms_timestamp_to_iso(ts_raw: Any) -> str:
@@ -128,10 +86,20 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
     """
     Zapisuje wynik rzeczywistej transakcji do BigQuery, dopasowując ją do aktywnego zlecenia.
     Wersja z kompleksowym zaokrąglaniem wszystkich wartości NUMERIC.
+    Marker w processed_pnl_ids ustawiany jest dopiero po udanym insert_rows_json.
     """
-    order_id = pnl_data.get("orderId", f"unknown_{int(datetime.now().timestamp())}")
+    raw_oid = pnl_data.get("orderId")
+    if not raw_oid:
+        symbol = pnl_data.get("symbol", "unknown")
+        logger.error(f"[PNL_SAVE][{symbol}|no_orderId] Brak orderId w rekordzie closed-pnl — pomijam zapis.")
+        return False
+    order_id = str(raw_oid)
     symbol = pnl_data.get("symbol", "unknown")
     log_prefix = f"[PNL_SAVE][{symbol}|{order_id}]"
+
+    if state_manager.is_closed_pnl_record_logged(order_id):
+        logger.info(f"{log_prefix} Już zapisane w BigQuery (processed_pnl_ids) — pomijam.")
+        return False
 
     if not bigquery_logger.initialize_bigquery():
         logger.error(f"{log_prefix} BigQuery nie zostało zainicjalizowane – pomijam zapis.")
@@ -284,14 +252,12 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
         logger.error(f"{log_prefix} Błąd podczas transformacji danych PnL: {e}", exc_info=True)
         return False
 
-    if not acquire_lock_for_order(order_id):
-        return False
-
     try:
         client = bigquery_logger.get_bigquery_client()
         errors = client.insert_rows_json(bigquery_logger.REAL_TRADES_TABLE_REF, [transformed_data])
 
         if not errors:
+            state_manager.mark_closed_pnl_record_logged(order_id)
             logger.info(f"{log_prefix} ✅ Zapisano wynik transakcji do BigQuery.")
             if is_matched:
                 order_link_id_to_delete = active_order_data.get('id')
@@ -303,10 +269,8 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
             return True
         else:
             logger.error(f"{log_prefix} Błąd podczas wstawiania do BigQuery: {errors}. Dokument w active_orders NIE został usunięty.")
-            release_lock_for_order(order_id)
             return False
 
     except Exception as e:
         logger.critical(f"{log_prefix} Krytyczny błąd podczas zapisu do BigQuery: {e}", exc_info=True)
-        release_lock_for_order(order_id)
         return False

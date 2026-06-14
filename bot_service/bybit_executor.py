@@ -7,7 +7,7 @@ import hmac
 import hashlib
 import json
 import math
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 from urllib.parse import urlencode
 import requests
 from requests.exceptions import RequestException, JSONDecodeError
@@ -169,10 +169,18 @@ class BybitExecutor:
             logger.warning(f"[{symbol}] Nie udało się pobrać ID zlecenia SL: {e}")
             return None
 
-    def get_closed_pnl_history(self, start_time_ms: int, limit: int = 100) -> List[Dict[str, Any]]:
+    def get_closed_pnl_history(
+        self, start_time_ms: int, limit: int = 100
+    ) -> Tuple[List[Dict[str, Any]], bool]:
+        """
+        Zwraca (lista_rekordów, fetch_complete).
+        fetch_complete=False gdy przerwano paginację przez błąd HTTP/API — caller NIE powinien
+        przesuwać kursora czasowego.
+        """
         endpoint = "/v5/position/closed-pnl"
-        all_pnl_records = []
+        all_pnl_records: List[Dict[str, Any]] = []
         cursor = None
+        fetch_complete = True
         logger.info(f"Pobieranie historii P&L (Trade/SL/TP) od timestampu {start_time_ms}...")
         while True:
             params = {"category": "linear", "startTime": start_time_ms, "limit": limit}
@@ -188,9 +196,10 @@ class BybitExecutor:
                     break
             except (RequestException, BybitAPIError) as e:
                 logger.error(f"Błąd podczas pobierania strony historii P&L: {e}.")
+                fetch_complete = False
                 break
-        logger.info(f"Pobrano {len(all_pnl_records)} rekordów P&L.")
-        return list(reversed(all_pnl_records))
+        logger.info(f"Pobrano {len(all_pnl_records)} rekordów P&L (fetch_complete={fetch_complete}).")
+        return list(reversed(all_pnl_records)), fetch_complete
 
     # <<< POPRAWKA #1 - BARDZIEJ NIEZAWODNA WERSJA >>>
     def get_open_position_side(self, symbol: str) -> Optional[str]:
