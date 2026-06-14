@@ -2,7 +2,6 @@
 import asyncio
 import logging
 import os
-import time
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
@@ -22,16 +21,6 @@ from shared_lib.firebase_client import initialize_firebase, get_db, verify_fires
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-
-
-async def _monitor_loop_lag():
-    while True:
-        start = time.perf_counter()
-        await asyncio.sleep(1)
-        lag = time.perf_counter() - start - 1
-        if lag > 0.25:
-            logger.warning(f"EVENT_LOOP_LAG={lag:.3f}s")
-
 
 METRICS_PROCESSOR: OrderFlowMetrics | None = None
 CONTEXT_BUILDER: SignalContextBuilder | None = None
@@ -162,8 +151,6 @@ async def lifespan(app: FastAPI):
         logger.info("✅ OrderFlow Engine startup complete (WS startuje; backfill po potwierdzeniu subscribe)")
     except Exception as e:
         logger.critical(f"💀 STARTUP FAILED: {e}", exc_info=True)
-    logger.warning("LAG_MONITOR_STARTED")
-    asyncio.create_task(_monitor_loop_lag())
     yield
     logger.info("🛑 OrderFlow Engine shutting down")
     if ws_manager is not None:
