@@ -1,20 +1,25 @@
 # orderflow_engine/bigquery_logger.py
 # WERSJA 2.0 - Używa istniejących tabel
 
-from google.cloud import bigquery
 import json
-from datetime import datetime
 import logging
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+
+from google.cloud import bigquery
 
 from shared_lib import constants
 
 logger = logging.getLogger(__name__)
+
+_bq_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="bq-writer")
 
 
 def _json_default(obj):
     if isinstance(obj, datetime):
         return obj.isoformat()
     raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+
 
 class OrderFlowBigQueryLogger:
     """
@@ -23,8 +28,11 @@ class OrderFlowBigQueryLogger:
     - market_structure_signals (rozszerzona)
     - liquidation_events (nowa)
     - dom_events (nowa)
+
+    Zapisy (insert_rows_json) wykonywane są w ThreadPoolExecutor — gorąca ścieżka
+    tylko submituje zadanie i natychmiast wraca.
     """
-    
+
     def __init__(self, project_id='trading-bot-463318'):
         try:
             self.client = bigquery.Client(project=project_id)
@@ -36,18 +44,29 @@ class OrderFlowBigQueryLogger:
             )
             self.client = None
         self.dataset = constants.BIGQUERY_DATASET_ID
-    
+
+    def _do_insert(self, table_id, row):
+        if self.client is None:
+            return
+        try:
+            row = json.loads(json.dumps(row, default=_json_default))
+            errors = self.client.insert_rows_json(table_id, [row])
+            if errors:
+                logger.error(f"[BQ] insert errors: {errors}")
+        except Exception as e:
+            logger.error(f"[BQ] insert failed: {e}")
+
     def log_setup_signal(self, signal_data):
         """
         Zapisuje setup signal do market_structure_signals.
-        
+
         WAŻNE: Używamy istniejącej tabeli, nie tworzymy nowej!
         """
         if self.client is None:
             logger.warning("[BQ] BigQuery client not available, skipping.")
             return
         table_id = f"{self.dataset}.market_structure_signals"
-        
+
         row = {
             # === PODSTAWOWE POLA (ISTNIEJĄCE) ===
             'signal_id': signal_data.get('setup_id'),
@@ -61,18 +80,18 @@ class OrderFlowBigQueryLogger:
             'risk_pct': abs(signal_data['sl'] - signal_data['entry']) / signal_data['entry'] * 100,
             'rr': 3.0,  # Stałe RR (możesz przekazać dynamicznie)
             'structure_state': 1 if signal_data['direction'] == 'LONG' else -1,
-            
+
             # === TIME FEATURES (ISTNIEJĄCE) ===
             'session': self._get_session(datetime.utcnow()),
             'minute_of_day': datetime.utcnow().hour * 60 + datetime.utcnow().minute,
             'day_of_week': datetime.utcnow().weekday(),
             'second': datetime.utcnow().second,
-            
+
             # === DERIVATIVES DATA (ISTNIEJĄCE) ===
             'funding_rate': signal_data.get('funding_rate', 0),
             'open_interest': signal_data.get('open_interest', 0),
             'risk_usdt': signal_data.get('risk_usdt', 10.0),
-            
+
             # === NOWE POLA (ORDER FLOW) ===
             'liquidation_volume_usd': signal_data.get('liq_volume', 0),
             'liquidation_detected': signal_data.get('liq_volume', 0) > 0,
@@ -83,7 +102,7 @@ class OrderFlowBigQueryLogger:
             'wall_price': signal_data.get('wall_price'),
             'wall_size': signal_data.get('wall_size'),
             'confidence_score': signal_data.get('confidence', 0),
-            
+
             # === PLACEHOLDERS (dla kompatybilności z istniejącą tabelą) ===
             'bos_high': False,
             'bos_low': False,
@@ -103,23 +122,16 @@ class OrderFlowBigQueryLogger:
             'm5_rs_ratio': 0.0,
             'raw_context': {}
         }
-        
-        try:
-            errors = self.client.insert_rows_json(table_id, [row])
-            if not errors:
-                logger.info(f"✅ Setup logged to market_structure_signals: {signal_data['symbol']}")
-            else:
-                logger.error(f"❌ BigQuery insert errors: {errors}")
-        except Exception as e:
-            logger.error(f"❌ BigQuery setup log error: {e}", exc_info=True)
-    
+
+        _bq_executor.submit(self._do_insert, table_id, row)
+
     def log_liquidation_cascade(self, event_data):
         """Zapisuje liquidation cascade event (NOWA TABELA)"""
         if self.client is None:
             logger.warning("[BQ] BigQuery client not available, skipping.")
             return
         table_id = f"{self.dataset}.liquidation_events"
-        
+
         row = {
             'event_id': event_data.get('event_id'),
             'symbol': event_data['symbol'],
@@ -129,21 +141,16 @@ class OrderFlowBigQueryLogger:
             'count': event_data['count'],
             'timestamp': datetime.utcnow()
         }
-        
-        try:
-            errors = self.client.insert_rows_json(table_id, [row])
-            if not errors:
-                logger.info(f"✅ Liquidation event logged: {event_data['symbol']}")
-        except Exception as e:
-            logger.error(f"❌ BigQuery liq log error: {e}")
-    
+
+        _bq_executor.submit(self._do_insert, table_id, row)
+
     def log_dom_wall(self, wall_data):
         """Zapisuje DOM wall event (NOWA TABELA)"""
         if self.client is None:
             logger.warning("[BQ] BigQuery client not available, skipping.")
             return
         table_id = f"{self.dataset}.dom_events"
-        
+
         row = {
             'symbol': wall_data['symbol'],
             'side': wall_data['side'],
@@ -152,17 +159,13 @@ class OrderFlowBigQueryLogger:
             'obi': wall_data['obi'],
             'timestamp': datetime.utcnow()
         }
-        
-        try:
-            row = json.loads(json.dumps(row, default=_json_default))
-            errors = self.client.insert_rows_json(table_id, [row])
-        except Exception as e:
-            logger.error(f"❌ DOM event log error: {e}")
-    
+
+        _bq_executor.submit(self._do_insert, table_id, row)
+
     def _get_session(self, dt):
         """Określa sesję tradingową na podstawie godziny UTC"""
         hour = dt.hour
-        
+
         if 0 <= hour < 7:
             return "ASIA"
         elif 7 <= hour < 15:
