@@ -1,7 +1,7 @@
 # Lokalizacja: bot_service/pnl_logger_real.py
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 from datetime import datetime, timezone
 from decimal import Decimal, getcontext
 
@@ -9,6 +9,87 @@ from bot_service import bigquery_logger, state_manager
 
 logger = logging.getLogger(__name__)
 getcontext().prec = 18
+
+_TICK_TOLERANCE_COUNT = 2
+_instrument_rules_cache: Optional[Dict[str, Any]] = None
+
+
+def _get_instrument_rules_cached() -> Dict[str, Any]:
+    """Firestore instrument_rules — ten sam dokument co przy round_price_by_tick w bot_logic."""
+    global _instrument_rules_cache
+    if _instrument_rules_cache is None:
+        try:
+            from shared_lib.firebase_client import get_instrument_rules
+
+            _instrument_rules_cache = get_instrument_rules() or {}
+        except Exception as exc:
+            logger.warning(f"Nie udało się wczytać instrument_rules z Firestore: {exc}")
+            _instrument_rules_cache = {}
+    return _instrument_rules_cache
+
+
+def _tick_size_for_symbol(symbol: str) -> Optional[float]:
+    rules_map = _get_instrument_rules_cached()
+    symbol_upper = str(symbol).upper()
+    candidates = [symbol_upper, symbol_upper.replace(".P", ""), f"{symbol_upper.replace('.P', '')}.P"]
+    for key in candidates:
+        rules = rules_map.get(key)
+        if not rules:
+            continue
+        raw_tick = rules.get("tickSize")
+        if raw_tick is None:
+            continue
+        try:
+            tick = float(raw_tick)
+            if tick > 0:
+                return tick
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _infer_tick_from_prices(*prices: float) -> float:
+    """Fallback: ~2 ticki z precyzji dziesiętnej cen planowanych."""
+    max_decimals = 0
+    for price in prices:
+        if price is None or price <= 0:
+            continue
+        normalized = Decimal(str(price)).normalize()
+        exponent = normalized.as_tuple().exponent
+        if isinstance(exponent, int) and exponent < 0:
+            max_decimals = max(max_decimals, -exponent)
+    if max_decimals == 0:
+        return 1e-4 * _TICK_TOLERANCE_COUNT
+    return float(10 ** (-max_decimals)) * _TICK_TOLERANCE_COUNT
+
+
+def resolve_exit_tick_tolerance(
+    symbol: str,
+    active_order_data: Optional[Dict[str, Any]],
+    planned_tp_price: float,
+    planned_sl_price: float,
+    avg_exit_price: float,
+) -> float:
+    """
+    Tolerancja = 2 × tickSize.
+    Źródła tick (bez REST Bybit): pole zlecenia → Firestore instrument_rules → precyzja ceny.
+    """
+    ao = active_order_data or {}
+    for key in ("tick_size", "tickSize"):
+        raw = ao.get(key)
+        if raw is not None:
+            try:
+                tick = float(raw)
+                if tick > 0:
+                    return tick * _TICK_TOLERANCE_COUNT
+            except (TypeError, ValueError):
+                pass
+
+    tick = _tick_size_for_symbol(symbol)
+    if tick is not None:
+        return tick * _TICK_TOLERANCE_COUNT
+
+    return _infer_tick_from_prices(planned_tp_price, planned_sl_price, avg_exit_price)
 
 
 def _ms_timestamp_to_iso(ts_raw: Any) -> str:
@@ -27,48 +108,51 @@ def determine_exit_type(
     avg_exit_price: float,
     planned_tp_price: float,
     planned_sl_price: float,
+    tick_tolerance: float,
+    net_pnl: Optional[float] = None,
     bybit_close_type: Optional[str] = None,
-) -> str:
+) -> Tuple[str, bool]:
     """
-    Determine exit type from actual exit price vs planned levels.
-    Do not blindly trust Bybit's closeType / exitType fields.
+    Klasyfikacja wyjścia na podstawie avg_exit_price vs planowane poziomy (tick-size tol).
+    Zwraca (exit_type, at_level) — at_level=True gdy exit w tolerancji TP lub SL.
     """
-    tolerance = 0.005  # 0.5% tolerance (covers 0.075% fees + slippage buffer)
     side = str(direction).upper()
+    tol = tick_tolerance
+    e, tp, sl = avg_exit_price, planned_tp_price, planned_sl_price
 
     if side == "LONG":
-        tp_hit = avg_exit_price >= planned_tp_price * (1 - tolerance)
-        sl_hit = avg_exit_price <= planned_sl_price * (1 + tolerance)
+        tp_hit = e >= tp - tol
+        sl_hit = e <= sl + tol
     elif side == "SHORT":
-        tp_hit = avg_exit_price <= planned_tp_price * (1 + tolerance)
-        sl_hit = avg_exit_price >= planned_sl_price * (1 - tolerance)
+        tp_hit = e <= tp + tol
+        sl_hit = e >= sl - tol
     else:
         logger.warning(
-            f"EXIT TYPE UNKNOWN: unsupported direction={direction!r}, exit={avg_exit_price}, "
-            f"planned_tp={planned_tp_price}, planned_sl={planned_sl_price}. "
-            f"Bybit closeType={bybit_close_type}"
+            f"EXIT TYPE UNKNOWN: unsupported direction={direction!r}, exit={e}, "
+            f"planned_tp={tp}, planned_sl={sl}. Bybit closeType={bybit_close_type}"
         )
-        return bybit_close_type or "Unknown"
+        return bybit_close_type or "Unknown", False
+
+    at_level = tp_hit or sl_hit
+
+    if tp_hit and sl_hit:
+        resolved = "TakeProfit" if (net_pnl is not None and net_pnl >= 0) else "StopLoss"
+        logger.warning(
+            f"EXIT AMBIGUOUS (tp+sl in tolerance): direction={side}, exit={e}, "
+            f"tp={tp}, sl={sl}, tol={tol}, net_pnl={net_pnl} → {resolved}"
+        )
+        return resolved, True
 
     if tp_hit:
-        return "TakeProfit"
+        return "TakeProfit", True
     if sl_hit:
-        return "StopLoss"
+        return "StopLoss", True
 
-    if side == "LONG":
-        dist_to_tp = abs(avg_exit_price - planned_tp_price)
-        dist_to_sl = abs(avg_exit_price - planned_sl_price)
-    elif side == "SHORT":
-        dist_to_tp = abs(avg_exit_price - planned_tp_price)
-        dist_to_sl = abs(avg_exit_price - planned_sl_price)
-
-    closer = "TakeProfit" if dist_to_tp < dist_to_sl else "StopLoss"
-    logger.warning(
-        f"EXIT BETWEEN LEVELS: direction={side}, exit={avg_exit_price}, "
-        f"tp={planned_tp_price}, sl={planned_sl_price}, "
-        f"classified as {closer} (closer level)"
+    logger.info(
+        f"EXIT BETWEEN LEVELS: direction={side}, exit={e}, tp={tp}, sl={sl}, "
+        f"tol={tol} → Manual"
     )
-    return closer
+    return "Manual", False
 
 
 def _signal_ts_for_bq(value: Any) -> Optional[str]:
@@ -151,13 +235,14 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
 
         planned_risk_usdt = None
         realized_rrr = None
-        exit_price_result = None
+        exit_price_result = safe_round(float(avg_exit_price))
         bybit_exit_type = (
             _normalize_exit_type(pnl_data.get("exitType"))
             or _normalize_exit_type(pnl_data.get("stopOrderType"))
             or _normalize_exit_type(pnl_data.get("orderType"))
         )
         exit_type = bybit_exit_type
+        exit_at_level = False
         planned_tp_price_dec = None
         planned_sl_price_dec = None
 
@@ -187,19 +272,32 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
             if planned_tp_price_dec is not None and planned_sl_price_dec is not None:
                 trade_direction = active_order_data.get("direction")
                 if trade_direction:
-                    exit_type = determine_exit_type(
+                    tick_tol = resolve_exit_tick_tolerance(
+                        symbol=symbol,
+                        active_order_data=active_order_data,
+                        planned_tp_price=float(planned_tp_price_dec),
+                        planned_sl_price=float(planned_sl_price_dec),
+                        avg_exit_price=float(avg_exit_price),
+                    )
+                    exit_type, exit_at_level = determine_exit_type(
                         direction=trade_direction,
                         avg_exit_price=float(avg_exit_price),
                         planned_tp_price=float(planned_tp_price_dec),
                         planned_sl_price=float(planned_sl_price_dec),
+                        tick_tolerance=tick_tol,
+                        net_pnl=float(net_pnl),
                         bybit_close_type=bybit_exit_type,
                     )
                 elif exit_type is None:
                     exit_type = bybit_exit_type
-            if exit_type == "TakeProfit":
-                exit_price_result = active_order_data.get("planned_tp_price")
-            elif exit_type == "StopLoss":
-                exit_price_result = active_order_data.get("planned_sl_price")
+
+        if exit_type == "TakeProfit" and float(net_pnl) < 0:
+            corrected = "StopLoss" if exit_at_level else "Manual"
+            logger.warning(
+                f"{log_prefix} SANITY: TakeProfit with negative net_pnl={float(net_pnl):.6f} "
+                f"(exit={float(avg_exit_price)}, at_level={exit_at_level}) — correcting to {corrected}"
+            )
+            exit_type = corrected
 
         # Przygotowanie finalnego obiektu z zaokrąglaniem wszystkich pól NUMERIC
         commission_usdt = safe_round(float(commission))
