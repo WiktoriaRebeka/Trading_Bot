@@ -37,6 +37,7 @@ steps:
       - 'trading-bot-runner@$PROJECT_ID.iam.gserviceaccount.com'
       - '--min-instances=1'
       - '--max-instances=1'
+      - '--no-cpu-throttling'
       - '--update-secrets'
       - 'BYBIT_API_KEY=bybit-api-key:latest,BYBIT_API_SECRET=bybit-api-secret:latest'
       - '--update-env-vars'
