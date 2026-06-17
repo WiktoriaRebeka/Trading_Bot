@@ -131,6 +131,123 @@ def round_price_by_tick(price: float, tick_size: str, direction: str = "none") -
     return float(quantized_price)
 
 
+def _tick_size_for_order_data(data: Dict[str, Any], symbol: str) -> str:
+    """tick_size z active_order lub Firestore instrument_rules."""
+    for key in ("tick_size", "tickSize"):
+        raw = data.get(key)
+        if raw is not None and str(raw).strip():
+            return str(raw)
+    rules_map = get_instrument_rules()
+    symbol_upper = str(symbol).upper()
+    candidates = [symbol_upper, symbol_upper.replace(".P", ""), f"{symbol_upper.replace('.P', '')}.P"]
+    for sym_key in candidates:
+        rules = rules_map.get(sym_key)
+        if rules and rules.get("tickSize"):
+            return str(rules["tickSize"])
+    raise ValueError(f"Brak tick_size dla symbol={symbol}")
+
+
+def _real_entry_from_position(pos: Dict[str, Any]) -> float:
+    """Średnia cena wejścia z Bybit position list (avgPrice)."""
+    real_entry = safe_float(pos.get("avgPrice"))
+    if real_entry <= 0:
+        real_entry = safe_float(pos.get("avgEntryPrice"))
+    return real_entry
+
+
+def _price_api_str(value: float) -> str:
+    text = format(float(value), "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _apply_trailing_stop_for_open_position(
+    executor: BybitExecutor,
+    order_link_id: str,
+    data: Dict[str, Any],
+    symbol: str,
+    pos: Dict[str, Any],
+) -> bool:
+    """
+    Ustawia trailing 1R z aktywacją przy 2R (activePrice od realnego fill).
+    Zapisuje real_entry_price i trailing_active_price w active_orders.
+    """
+    planned_sl = data.get("planned_sl_price")
+    direction = str(data.get("direction", "")).upper()
+    if not planned_sl or direction not in ("LONG", "SHORT"):
+        log_struct(
+            "warning", "trailing_stop",
+            "Brak planned_sl lub direction — pomijam trailing",
+            symbol=symbol, event_id=order_link_id,
+        )
+        return False
+
+    real_entry = _real_entry_from_position(pos)
+    if real_entry <= 0:
+        log_struct(
+            "warning", "trailing_stop",
+            "Brak avgPrice na pozycji — pomijam trailing",
+            symbol=symbol, event_id=order_link_id,
+        )
+        return False
+
+    try:
+        tick_size = _tick_size_for_order_data(data, symbol)
+    except ValueError as e:
+        log_struct("error", "trailing_stop", str(e), symbol=symbol, event_id=order_link_id)
+        return False
+
+    is_long = direction == "LONG"
+    sl_distance = abs(real_entry - float(planned_sl))
+    if sl_distance <= 0:
+        log_struct(
+            "warning", "trailing_stop",
+            "sl_distance=0 — pomijam trailing",
+            symbol=symbol, event_id=order_link_id,
+        )
+        return False
+
+    if is_long:
+        raw_active = real_entry + 2 * sl_distance
+        active_price = round_price_by_tick(raw_active, tick_size, "up")
+    else:
+        raw_active = real_entry - 2 * sl_distance
+        active_price = round_price_by_tick(raw_active, tick_size, "down")
+
+    trailing_distance_val = round_price_by_tick(sl_distance, tick_size, "none")
+    trailing_distance = _price_api_str(trailing_distance_val)
+    active_price_str = _price_api_str(active_price)
+
+    ts_result = call_with_retry(
+        executor.set_trailing_stop_for_position,
+        symbol,
+        trailing_distance,
+        active_price_str,
+    )
+    if ts_result:
+        state_manager.update_active_order(order_link_id, {
+            "trailing_stop_set": True,
+            "trailing_distance": trailing_distance,
+            "trailing_active_price": active_price,
+            "real_entry_price": real_entry,
+            "planned_tp_price": active_price,
+        })
+        log_struct(
+            "info", "trailing_stop", "Trailing Stop ustawiony (2R active, 1R trail)",
+            symbol=symbol, event_id=order_link_id,
+            real_entry=real_entry, active_price=active_price,
+            trailing_distance=trailing_distance, direction=direction,
+        )
+        return True
+
+    log_struct(
+        "warning", "trailing_stop", "Trailing Stop nie ustawiony — retry w kolejnym cyklu",
+        symbol=symbol, event_id=order_link_id,
+    )
+    return False
+
+
 # =====================================================================
 # === 3. MAIN SIGNAL HANDLER (Autonomous) ===
 # =====================================================================
@@ -185,7 +302,6 @@ async def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecut
         is_long = signal.direction.upper() == "LONG"
         f_entry = round_price_by_tick(signal.entry, tick_size, "down" if is_long else "up")
         f_sl = round_price_by_tick(signal.sl, tick_size, "up" if is_long else "down")
-        f_tp = round_price_by_tick(signal.tp, tick_size, "down" if is_long else "up")
 
         if f_sl == f_entry:
             logger.warning(
@@ -224,16 +340,20 @@ async def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecut
             )
             return
 
-        # Walidacja net_tp
-        tp_distance = abs(f_tp - f_entry)
-        net_tp_usdt = calculated_qty * tp_distance
-        if net_tp_usdt < 5.0:
+        # Walidacja potencjału 2R (trailing aktywuje się przy 2R; góra otwarta)
+        potential_2r_usdt = calculated_qty * 2 * sl_distance
+        if potential_2r_usdt < 5.0:
             logger.warning(
                 f"[{event_id}] signal_input: REJECT — "
-                f"net_tp {net_tp_usdt:.3f} USDT < 5.0 USDT minimum "
-                f"symbol={symbol} qty={calculated_qty} tp_dist={tp_distance:.6f}"
+                f"potential_2r {potential_2r_usdt:.3f} USDT < 5.0 USDT minimum "
+                f"symbol={symbol} qty={calculated_qty} sl_dist={sl_distance:.6f}"
             )
             return
+
+        if is_long:
+            planned_2r_price = round_price_by_tick(f_entry + 2 * sl_distance, tick_size, "up")
+        else:
+            planned_2r_price = round_price_by_tick(f_entry - 2 * sl_distance, tick_size, "down")
     except Exception as e:
         logger.error(f"[{event_id}] signal_input: Błąd obliczeń rozmiaru symbol={symbol} error={e}")
         return
@@ -245,7 +365,6 @@ async def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecut
         "orderType": "Market",
         "qty": str(calculated_qty),
         "stopLoss": str(f_sl),
-        "takeProfit": str(f_tp),
         "orderLinkId": event_id
     }
 
@@ -260,7 +379,8 @@ async def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecut
         "created_at": datetime.now(timezone.utc).isoformat(),
         "planned_entry_price": f_entry,
         "planned_sl_price": f_sl,
-        "planned_tp_price": f_tp
+        "planned_tp_price": planned_2r_price,
+        "tick_size": tick_size,
     }
 
     await asyncio.to_thread(state_manager.save_active_order_transactional, event_id, state_payload)
@@ -275,7 +395,6 @@ async def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecut
                 side="Buy" if is_long else "Sell",
                 qty=calculated_qty,
                 order_type="Market",
-                take_profit=f_tp,
                 stop_loss=f_sl,
                 event_id=event_id,
             )
@@ -316,7 +435,7 @@ async def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecut
         "direction": signal.direction.upper(),
         "entry": f_entry,
         "sl": f_sl,
-        "tp": f_tp,
+        "tp": planned_2r_price,
         "risk_pct": signal.risk_pct,
         "rr": signal.rr,
         "structure_state": signal.structure_state,
@@ -375,33 +494,31 @@ def update_filled_orders(executor: BybitExecutor):
             if status == 'Filled':
                 pos = call_with_retry(executor.get_position_info, symbol)
                 if pos and safe_float(pos.get('size')) > 0:
+                    real_entry = _real_entry_from_position(pos)
                     sl_id = executor.find_sl_order_id(symbol, data)
                     state_manager.update_active_order(order_link_id, {
                         'status': 'OPEN',
                         'slOrderId': sl_id,
-                        'position_opened_at': datetime.now(timezone.utc).isoformat()
+                        'position_opened_at': datetime.now(timezone.utc).isoformat(),
+                        'real_entry_price': real_entry if real_entry > 0 else None,
                     })
-                    log_struct("info", "updater", "Order moved to OPEN", symbol=symbol, event_id=order_link_id, slOrderId=sl_id)
+                    log_struct(
+                        "info", "updater", "Order moved to OPEN",
+                        symbol=symbol, event_id=order_link_id, slOrderId=sl_id,
+                        real_entry=real_entry,
+                    )
 
-                    # Aktywacja Trailing Stop po potwierdzeniu wejścia
-                    try:
-                        planned_sl = data.get('planned_sl_price')
-                        planned_entry = data.get('planned_entry_price') or data.get('params', {}).get('price')
-                        if planned_sl and planned_entry:
-                            sl_distance = abs(float(planned_entry) - float(planned_sl))
-                            trailing_distance = str(round(sl_distance, 4))
-                            ts_result = call_with_retry(
-                                executor.set_trailing_stop_for_position,
-                                symbol,
-                                trailing_distance
+                    if not data.get('trailing_stop_set'):
+                        try:
+                            _apply_trailing_stop_for_open_position(
+                                executor, order_link_id, data, symbol, pos,
                             )
-                            if ts_result:
-                                state_manager.update_active_order(order_link_id, {'trailing_stop_set': True, 'trailing_distance': trailing_distance})
-                                log_struct("info", "trailing_stop", "Trailing Stop aktywowany", symbol=symbol, event_id=order_link_id, distance=trailing_distance)
-                            else:
-                                log_struct("warning", "trailing_stop", "Trailing Stop nie ustawiony", symbol=symbol, event_id=order_link_id)
-                    except Exception as e:
-                        log_struct("error", "trailing_stop", "Błąd ustawiania Trailing Stop", symbol=symbol, event_id=order_link_id, error=str(e))
+                        except Exception as e:
+                            log_struct(
+                                "error", "trailing_stop",
+                                "Błąd ustawiania Trailing Stop",
+                                symbol=symbol, event_id=order_link_id, error=str(e),
+                            )
                 else:
                     state_manager.update_active_order(order_link_id, {'status': 'CLOSED_UNVERIFIED'})
                     log_struct("error", "updater", "Filled but no position found", symbol=symbol, event_id=order_link_id)
@@ -417,6 +534,35 @@ def update_filled_orders(executor: BybitExecutor):
 
         except Exception as e:
             log_struct("error", "updater", "Failed to update placed order", event_id=order_link_id, error=str(e))
+
+    # --- CZĘŚĆ 2: Retry trailingu dla OPEN bez trailing_stop_set ---
+    open_docs = list(state_manager.get_orders_by_status('OPEN'))
+    log_struct("info", "updater", "Open orders trailing retry count", count=len(open_docs))
+
+    for doc in open_docs:
+        data = doc.to_dict()
+        order_link_id = doc.id
+        if data.get('trailing_stop_set'):
+            continue
+        symbol = data.get('symbol')
+        if not symbol:
+            continue
+        try:
+            pos = call_with_retry(executor.get_position_info, symbol)
+            if not pos or safe_float(pos.get('size')) <= 0:
+                continue
+            real_entry = _real_entry_from_position(pos)
+            if real_entry > 0 and not data.get('real_entry_price'):
+                state_manager.update_active_order(order_link_id, {'real_entry_price': real_entry})
+            _apply_trailing_stop_for_open_position(
+                executor, order_link_id, data, symbol, pos,
+            )
+        except Exception as e:
+            log_struct(
+                "error", "trailing_stop",
+                "Retry trailing failed",
+                symbol=symbol, event_id=order_link_id, error=str(e),
+            )
 
 
 # =====================================================================

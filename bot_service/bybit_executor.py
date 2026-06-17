@@ -135,14 +135,22 @@ class BybitExecutor:
             params["orderLinkId"] = event_id
         return await asyncio.to_thread(self.place_order_sync, params)
 
-    def set_trailing_stop_for_position(self, symbol: str, trailing_stop: str) -> bool:
+    def set_trailing_stop_for_position(
+        self,
+        symbol: str,
+        trailing_stop: str,
+        active_price: Optional[str] = None,
+    ) -> bool:
         api_symbol = symbol.replace('.P', '')
-        payload = {
+        payload: Dict[str, Any] = {
             "category": "linear",
             "symbol": api_symbol,
+            "tpslMode": "Full",
             "trailingStop": trailing_stop,
-            "positionIdx": 0 
+            "positionIdx": 0,
         }
+        if active_price is not None:
+            payload["activePrice"] = active_price
         logger.info(f"[{symbol}] Wysyłanie finalnego zlecenia ustawiającego Trailing Stop: {payload}")
         try:
             self._send_request("POST", "/v5/position/trading-stop", params=payload)

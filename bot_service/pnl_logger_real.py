@@ -166,6 +166,24 @@ def _signal_ts_for_bq(value: Any) -> Optional[str]:
     return str(value)
 
 
+def _compute_realized_r(
+    direction: str,
+    avg_exit_price: float,
+    avg_entry_price: float,
+    planned_sl_price: float,
+) -> Optional[float]:
+    """R-multiple ceny wyjścia względem avg_entry_price (1R = |entry - planned_sl|)."""
+    sl_distance = abs(avg_entry_price - planned_sl_price)
+    if sl_distance <= 0:
+        return None
+    side = str(direction).upper()
+    if side == "LONG":
+        return (avg_exit_price - avg_entry_price) / sl_distance
+    if side == "SHORT":
+        return (avg_entry_price - avg_exit_price) / sl_distance
+    return None
+
+
 def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[Dict[str, Any]]) -> bool:
     """
     Zapisuje wynik rzeczywistej transakcji do BigQuery, dopasowując ją do aktywnego zlecenia.
@@ -235,6 +253,7 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
 
         planned_risk_usdt = None
         realized_rrr = None
+        realized_r = None
         exit_price_result = safe_round(float(avg_exit_price))
         bybit_exit_type = (
             _normalize_exit_type(pnl_data.get("exitType"))
@@ -269,8 +288,16 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
                         planned_risk_usdt = float(planned_risk_usdt_dec)
                         realized_rrr = float(realized_rrr_dec)
 
+            trade_direction = active_order_data.get("direction") if is_matched else None
+            if is_matched and planned_sl_price_dec is not None and trade_direction:
+                realized_r = _compute_realized_r(
+                    direction=trade_direction,
+                    avg_exit_price=float(avg_exit_price),
+                    avg_entry_price=float(avg_entry_price),
+                    planned_sl_price=float(planned_sl_price_dec),
+                )
+
             if planned_tp_price_dec is not None and planned_sl_price_dec is not None:
-                trade_direction = active_order_data.get("direction")
                 if trade_direction:
                     tick_tol = resolve_exit_tick_tolerance(
                         symbol=symbol,
@@ -333,6 +360,7 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
             "timestamp_close": _ms_timestamp_to_iso(pnl_data.get("updatedTime")),
             "planned_risk_usdt": safe_round(planned_risk_usdt),
             "realized_rrr": safe_round(realized_rrr, 4),  # RRR z mniejszą precyzją
+            "realized_r": safe_round(realized_r, 4),
             "alert_entry_price": safe_round(ao.get("planned_entry_price")) if active_order_data else None,
             "alert_sl_price": safe_round(ao.get("planned_sl_price")) if active_order_data else None,
             "alert_tp_price": safe_round(ao.get("planned_tp_price")) if active_order_data else None,
