@@ -340,16 +340,6 @@ async def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecut
             )
             return
 
-        # Walidacja potencjału 2R (trailing aktywuje się przy 2R; góra otwarta)
-        potential_2r_usdt = calculated_qty * 2 * sl_distance
-        if potential_2r_usdt < 5.0:
-            logger.warning(
-                f"[{event_id}] signal_input: REJECT — "
-                f"potential_2r {potential_2r_usdt:.3f} USDT < 5.0 USDT minimum "
-                f"symbol={symbol} qty={calculated_qty} sl_dist={sl_distance:.6f}"
-            )
-            return
-
         if is_long:
             planned_2r_price = round_price_by_tick(f_entry + 2 * sl_distance, tick_size, "up")
         else:
