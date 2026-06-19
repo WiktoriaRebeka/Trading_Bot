@@ -52,23 +52,28 @@ class MarketStructureEngine:
             
         return False
 
-    def get_swing_strength(self) -> int:
+    def get_swing_strength(self, direction: str = "LONG") -> int:
         """
-        Oblicza siłę struktury przy użyciu numpy.
-        Sprawdza ile razy cena w całym buforze (500 świec) testowała dany poziom.
+        Oblicza siłę struktury przy użyciu numpy (multi-touch count).
+        LONG: dotknięcia last_swing_low; SHORT: dotknięcia last_swing_high.
         """
-        if not self.candles or self.last_swing_low is None:
+        if not self.candles:
             return 1
 
-        # Konwersja cen low do tablicy numpy dla szybkich obliczeń wektorowych
-        lows = np.array([c['low'] for c in self.candles])
-        
-        # Obliczamy różnicę procentową wszystkich dołków od ostatniego swing low
-        diffs = np.abs(lows - self.last_swing_low) / self.last_swing_low
-        
-        # Liczymy "dotknięcia" (poziomy w promieniu 0.15%)
-        touches = np.sum(diffs < 0.0015)
+        side = str(direction).upper()
+        if side == "SHORT":
+            if self.last_swing_high is None:
+                return 1
+            prices = np.array([c['high'] for c in self.candles])
+            ref = self.last_swing_high
+        else:
+            if self.last_swing_low is None:
+                return 1
+            prices = np.array([c['low'] for c in self.candles])
+            ref = self.last_swing_low
 
+        diffs = np.abs(prices - ref) / ref
+        touches = np.sum(diffs < 0.0015)
         return int(min(touches, 5))
 
     def get_latest_swing(self):

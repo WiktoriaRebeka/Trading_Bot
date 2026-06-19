@@ -14,8 +14,8 @@ from typing import Dict, Any, Optional
 # Importy z signal_detector (muszą być tutaj)
 from orderflow_engine.signal_detector import (
     detect_liquidity_sweep, matched_liquidation_volume_usd,
-    check_delta_divergence, check_dom_wall, compute_confidence_score, SignalContext,
-    SwingPoint, DeltaPoint, DomSnapshot,
+    check_dom_wall, compute_confidence_score, SignalContext,
+    SwingPoint, DeltaPoint, DomSnapshot, _liq_event_ts_ms,
 )
 from orderflow_engine.bot_sender import send_alert_to_bot
 from orderflow_engine.risk_levels import calculate_structure_risk_levels
@@ -233,6 +233,119 @@ class SignalContextBuilder:
         )
 
 
+def _pick_real_wall(dom_full: dict, direction: str, mid_price: Optional[float]):
+    walls = dom_full.get("bid_walls", []) if direction == "LONG" else dom_full.get("ask_walls", [])
+    if not walls or not mid_price or mid_price <= 0:
+        return False, None, None, None
+    wall = max(walls, key=lambda w: float(w.get("size", 0) or 0))
+    distance_pct = abs(float(wall.get("distance_from_mid", 0) or 0)) / mid_price * 100.0
+    return True, float(wall["price"]), float(wall["size"]), round(distance_pct, 6)
+
+
+def _compute_delta_velocity(processor, sym: str) -> Optional[float]:
+    hist = list(processor.delta_history.get(str(sym).upper(), []))
+    if len(hist) < 10:
+        return None
+    deltas = [float(d["delta"]) for d in hist]
+    ts = [int(d["timestamp"]) for d in hist]
+    dt_s = (ts[-1] - ts[-10]) / 1000.0
+    if dt_s <= 0:
+        return None
+    return (deltas[-1] - deltas[-10]) / dt_s
+
+
+def _last_liquidation_meta(liquidations: list) -> tuple:
+    if not liquidations:
+        return None, None
+    latest = max(liquidations, key=lambda l: _liq_event_ts_ms(l))
+    ts_ms = _liq_event_ts_ms(latest)
+    if ts_ms <= 0:
+        return str(latest.get("side")), None
+    age_s = max(0.0, time.time() - ts_ms / 1000.0)
+    return str(latest.get("side")), round(age_s, 3)
+
+
+def _build_market_features(ctx: SignalContext, processor, risk_levels, div_result: dict) -> dict:
+    sym = ctx.symbol
+    direction = ctx.direction
+    dom_full = processor.get_dom_snapshot(sym)
+    ticker = processor.tickers.get(sym, {}) or {}
+
+    bids = dom_full.get("bids") or ctx.dom_snapshot.bids
+    asks = dom_full.get("asks") or ctx.dom_snapshot.asks
+    bid_vol = sum(float(p) * float(q) for p, q in bids[:10])
+    ask_vol = sum(float(p) * float(q) for p, q in asks[:10])
+
+    best_bid = dom_full.get("best_bid")
+    best_ask = dom_full.get("best_ask")
+    if best_bid is None and bids:
+        best_bid = float(bids[0][0])
+    if best_ask is None and asks:
+        best_ask = float(asks[0][0])
+    spread = (float(best_ask) - float(best_bid)) if best_bid is not None and best_ask is not None else None
+    mid_price = (float(best_bid) + float(best_ask)) / 2.0 if best_bid is not None and best_ask is not None else None
+
+    wall_detected, wall_price, wall_size, wall_distance_pct = _pick_real_wall(dom_full, direction, mid_price)
+
+    _, buy_v, sell_v = processor._calculate_delta_window_volumes(sym, 300)
+    deltas_list = [d.delta for d in ctx.recent_deltas]
+    delta_last = float(deltas_list[-1]) if deltas_list else None
+
+    swing = float(ctx.swing_point.price)
+    price = float(ctx.current_price)
+    if direction == "LONG":
+        sweep_depth_pct = ((swing - price) / swing * 100.0) if swing > 0 and price < swing else 0.0
+    else:
+        sweep_depth_pct = ((price - swing) / swing * 100.0) if swing > 0 and price > swing else 0.0
+    distance_to_swing_pct = (abs(price - swing) / swing * 100.0) if swing > 0 else None
+
+    last_liq_side, last_liq_age_s = _last_liquidation_meta(ctx.liquidations)
+    oi = ticker.get("open_interest")
+    vol_24h = ticker.get("volume_24h")
+
+    div_strength = div_result.get("strength")
+    if div_strength is not None:
+        div_strength = float(div_strength)
+
+    delta_velocity = _compute_delta_velocity(processor, sym)
+
+    return {
+        "obi_value": float(ctx.dom_snapshot.obi),
+        "bid_volume_top10": round(bid_vol, 6),
+        "ask_volume_top10": round(ask_vol, 6),
+        "spread": round(spread, 8) if spread is not None else None,
+        "best_bid": float(best_bid) if best_bid is not None else None,
+        "best_ask": float(best_ask) if best_ask is not None else None,
+        "real_wall_detected": wall_detected,
+        "real_wall_price": wall_price,
+        "real_wall_size": wall_size,
+        "real_wall_distance_pct": wall_distance_pct if wall_detected else None,
+        "dom_check_passed": check_dom_wall(ctx),
+        "delta_last": delta_last,
+        "buy_volume_300s": round(float(buy_v), 6),
+        "sell_volume_300s": round(float(sell_v), 6),
+        "delta_velocity": round(delta_velocity, 6) if delta_velocity is not None else None,
+        "cvd": None,
+        "trade_count_300s": processor._count_trades_window(sym, 300),
+        "delta_divergence_real": bool(div_result.get("detected", False)),
+        "delta_divergence_strength": div_strength if div_result.get("detected") else None,
+        "liq_volume_total": round(sum(float(l.get("volume_usd", 0)) for l in ctx.liquidations), 6),
+        "matched_liq_volume": round(float(matched_liquidation_volume_usd(ctx)), 6),
+        "liq_event_count": len(ctx.liquidations),
+        "last_liq_side": last_liq_side,
+        "last_liq_age_s": last_liq_age_s,
+        "funding_rate": float(ctx.funding_rate) if ctx.funding_rate is not None else None,
+        "open_interest": float(oi) if oi not in (None, "", 0) else None,
+        "volume_24h": float(vol_24h) if vol_24h not in (None, "", 0) else None,
+        "swing_strength": processor.engines[sym].get_swing_strength(direction),
+        "sweep_depth_pct": round(sweep_depth_pct, 6),
+        "distance_to_swing_pct": round(distance_to_swing_pct, 6) if distance_to_swing_pct is not None else None,
+        "tp_was_capped": bool(risk_levels.tp_capped),
+        "fallback_sl_used": bool(risk_levels.fallback_used),
+        "confidence_score": None,
+    }
+
+
 async def evaluate_and_maybe_alert(symbol: str, processor):
     sym = str(symbol).upper()
     with _eval_locks_mutex:
@@ -328,7 +441,6 @@ async def evaluate_and_maybe_alert(symbol: str, processor):
                     continue
                 logger.info(f"[FILTER] {sym} {direction}: ✅ score OK score={score:.1f}")
 
-                deltas_list = [d.delta for d in ctx.recent_deltas[-30:]] if len(ctx.recent_deltas) >= 30 else [d.delta for d in ctx.recent_deltas]
                 _now = datetime.now(timezone.utc)
                 _session = get_trading_session(_now)
                 entry = ctx.current_price
@@ -343,6 +455,8 @@ async def evaluate_and_maybe_alert(symbol: str, processor):
                 if risk_levels is None:
                     logger.error(f"[FILTER] {sym} {direction}: ❌ structure_risk FAILED")
                     continue
+
+                market_features = _build_market_features(ctx, processor, risk_levels, div_early)
 
                 alert = {
                     "event_id": f"{sym}-{int(time.time())}",
@@ -360,19 +474,12 @@ async def evaluate_and_maybe_alert(symbol: str, processor):
                     "session": _session,
                     "minute_of_day": _now.hour * 60 + _now.minute,
                     "day_of_week": _now.weekday(),
+                    "market_features": market_features,
                     "raw_context": {
-                        "confidence_score": score,
-                        "obi": ctx.dom_snapshot.obi,
-                        "liq_vol": sum(float(l.get("volume_usd", 0)) for l in ctx.liquidations),
-                        "liq_threshold_usd": float(processor.LIQUIDATION_CASCADE_THRESHOLD_USD),
-                        "delta_div_detected": check_delta_divergence(ctx),
-                        "delta_strength": deltas_list[-1] if deltas_list else 0.0,
-                        "wall_detected": check_dom_wall(ctx),
-                        "wall_price": ctx.dom_snapshot.asks[0][0] if direction == "SHORT" and ctx.dom_snapshot.asks else ctx.dom_snapshot.bids[0][0] if ctx.dom_snapshot.bids else None,
-                        "wall_size": ctx.dom_snapshot.asks[0][1] if direction == "SHORT" and ctx.dom_snapshot.asks else ctx.dom_snapshot.bids[0][1] if ctx.dom_snapshot.bids else None,
                         "swept_swing_level": risk_levels.swing_level,
                         "structure_sl_fallback_used": risk_levels.fallback_used,
                         "structure_tp_capped": risk_levels.tp_capped,
+                        "liq_threshold_usd": float(processor.LIQUIDATION_CASCADE_THRESHOLD_USD),
                     },
                 }
                 await send_alert_to_bot(alert)

@@ -184,6 +184,73 @@ def _compute_realized_r(
     return None
 
 
+def _gross_pnl_from_prices(
+    qty: Decimal,
+    avg_entry: Decimal,
+    avg_exit: Decimal,
+    direction: str,
+) -> Decimal:
+    side = str(direction).upper()
+    if side == "SHORT":
+        return qty * (avg_entry - avg_exit)
+    return qty * (avg_exit - avg_entry)
+
+
+def _resolve_pnl_fees(
+    pnl_data: Dict[str, Any],
+    qty: Decimal,
+    avg_entry: Decimal,
+    avg_exit: Decimal,
+    direction: str,
+    log_prefix: str,
+) -> Tuple[Decimal, Decimal, Decimal, str]:
+    """
+    closedPnl z Bybit jest NETTO (po opłatach). Nigdy nie doliczamy szacunku 0.075% na wierzch.
+    Zwraca (gross_pnl, commission, net_pnl, source).
+    """
+    closed_pnl = Decimal(pnl_data.get("closedPnl") or "0.0")
+    reported_fee = Decimal(pnl_data.get("cumExecFee") or pnl_data.get("cumCommission") or "0.0")
+    gross_from_prices = _gross_pnl_from_prices(qty, avg_entry, avg_exit, direction)
+    implied_fee = gross_from_prices - closed_pnl
+
+    notional = abs(qty * avg_entry)
+    fee_tolerance = max(Decimal("0.0001"), notional * Decimal("0.00001")) if notional > 0 else Decimal("0.0001")
+
+    if reported_fee > 0:
+        commission = reported_fee
+        net_pnl = closed_pnl
+        gross_pnl = closed_pnl + commission
+        implied_vs_reported_ok = abs(implied_fee - commission) <= fee_tolerance
+        gross_minus_fee_ok = abs(gross_from_prices - closed_pnl - commission) <= fee_tolerance
+        source = "cumExecFee"
+        logger.info(
+            f"{log_prefix} COMMISSION_VERIFY: closedPnl={float(closed_pnl):.6f} (NET) "
+            f"cumExecFee={float(reported_fee):.6f} gross_price={float(gross_from_prices):.6f} "
+            f"implied_fee={float(implied_fee):.6f} implied_vs_reported_ok={implied_vs_reported_ok} "
+            f"gross_minus_fee_eq_closed_ok={gross_minus_fee_ok}"
+        )
+    elif abs(implied_fee) > fee_tolerance:
+        commission = implied_fee
+        net_pnl = closed_pnl
+        gross_pnl = gross_from_prices
+        source = "implied_gross_minus_closedPnl"
+        logger.info(
+            f"{log_prefix} COMMISSION_VERIFY: closedPnl={float(closed_pnl):.6f} (NET, brak cumExecFee) "
+            f"gross_price={float(gross_from_prices):.6f} commission_implied={float(commission):.6f}"
+        )
+    else:
+        commission = Decimal("0.0")
+        net_pnl = closed_pnl
+        gross_pnl = gross_from_prices
+        source = "zero_fee"
+        logger.info(
+            f"{log_prefix} COMMISSION_VERIFY: closedPnl={float(closed_pnl):.6f} "
+            f"gross_price={float(gross_from_prices):.6f} — brak wykrytej prowizji (bez szacunku 0.075%)"
+        )
+
+    return gross_pnl, commission, net_pnl, source
+
+
 def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[Dict[str, Any]]) -> bool:
     """
     Zapisuje wynik rzeczywistej transakcji do BigQuery, dopasowując ją do aktywnego zlecenia.
@@ -244,12 +311,18 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
         qty = Decimal(pnl_data.get("qty", "0.0"))
         avg_entry_price = Decimal(pnl_data.get("avgEntryPrice", "0.0"))
         avg_exit_price = Decimal(pnl_data.get("avgExitPrice", "0.0"))
-        net_pnl = Decimal(pnl_data.get("closedPnl") or "0.0")
-        commission = Decimal(pnl_data.get("cumExecFee") or pnl_data.get("cumCommission") or "0.0")
+
+        trade_direction = (
+            ao.get("direction") if is_matched
+            else ("SHORT" if avg_entry_price > avg_exit_price else "LONG")
+        )
+
+        gross_pnl_usdt, commission, net_pnl, _fee_source = _resolve_pnl_fees(
+            pnl_data, qty, avg_entry_price, avg_exit_price, trade_direction, log_prefix,
+        )
 
         entry_value_usdt = qty * avg_entry_price
         exit_value_usdt = qty * avg_exit_price
-        gross_pnl_usdt = net_pnl + commission
 
         planned_risk_usdt = None
         realized_rrr = None
@@ -333,6 +406,18 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
         net_pnl_usdt = safe_round(float(net_pnl))
         if net_pnl_usdt is None:
             net_pnl_usdt = 0.0
+
+        planned_entry = ao.get("planned_entry_price") if is_matched else None
+        entry_slippage_pct = None
+        if planned_entry and float(avg_entry_price) > 0:
+            try:
+                entry_slippage_pct = safe_round(
+                    (float(avg_entry_price) - float(planned_entry)) / float(planned_entry) * 100.0,
+                    6,
+                )
+            except (TypeError, ValueError, ZeroDivisionError):
+                entry_slippage_pct = None
+
         event_id = (active_order_data.get('event_id') if is_matched else None) or f"UNMATCHED-{order_id}"
         timestamp_signal = _signal_ts_for_bq(ao.get("timestamp")) or datetime.utcnow().isoformat() + "Z"
 
@@ -372,6 +457,11 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
             "event_id": event_id,
             "signal_id": ao.get("signal_id") if active_order_data else None,
             "timestamp_signal": timestamp_signal,
+            "entry_slippage_pct": entry_slippage_pct,
+            "trailing_activated": bool(ao.get("trailing_stop_set")) if is_matched else False,
+            "trailing_active_price": safe_round(ao.get("trailing_active_price")) if is_matched else None,
+            "planned_2r_price": safe_round(ao.get("planned_2r_price")) if is_matched else None,
+            "session": ao.get("session") if is_matched else None,
         }
 
     except Exception as e:

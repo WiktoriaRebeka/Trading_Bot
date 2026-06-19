@@ -122,7 +122,7 @@ class OrderFlowMetrics:
         new_candle = builder.process_tick(price, qty, timestamp)
         if new_candle:
             self.engines[sym].update_candles(new_candle['open'], new_candle['high'], new_candle['low'], new_candle['close'], new_candle['ts'])
-        delta = self._calculate_delta_window(sym, 300)
+        delta, _, _ = self._calculate_delta_window_volumes(sym, 300)
         self.delta_history[sym].append({'price': price, 'delta': delta, 'timestamp': timestamp})
 
     def process_ticker(self, symbol, price, funding_rate, open_interest, volume_24h):
@@ -333,7 +333,7 @@ class OrderFlowMetrics:
         confidence = self.scorer.calculate({
             'liquidation_volume_usd': liq_vol, 'delta_divergence': div['detected'], 'delta_strength': div.get('strength', 0),
             'obi': abs(dom.obi) if dom else 0, 'dom_wall_detected': len(dom.bid_walls if direction == "LONG" else dom.ask_walls) > 0 if dom else False,
-            'structure_strength': self.engines[sym].get_swing_strength(), 'funding_rate': self.tickers[sym].get('funding_rate', 0), 'direction': direction
+            'structure_strength': self.engines[sym].get_swing_strength(direction), 'funding_rate': self.tickers[sym].get('funding_rate', 0), 'direction': direction
         })
         if confidence >= self.MIN_CONFIDENCE_SCORE and liq_vol >= self.LIQUIDATION_CASCADE_THRESHOLD_USD:
             self.last_signal_time[sym] = time.time()
@@ -389,13 +389,22 @@ class OrderFlowMetrics:
                         )
         except Exception as e: logger.error(f"❌ Błąd komunikacji async: {e}")
 
-    def _calculate_delta_window(self, symbol, seconds):
+    def _calculate_delta_window_volumes(self, symbol, seconds=300):
         sym = str(symbol).upper()
         cutoff = int(time.time() * 1000) - (seconds * 1000)
         recent = [t for t in self.trades[sym] if t['timestamp'] > cutoff]
         buy_v = sum(t['qty'] * t['price'] for t in recent if str(t['side']).lower() == 'buy')
         sell_v = sum(t['qty'] * t['price'] for t in recent if str(t['side']).lower() == 'sell')
-        return buy_v - sell_v
+        return buy_v - sell_v, buy_v, sell_v
+
+    def _calculate_delta_window(self, symbol, seconds):
+        delta, _, _ = self._calculate_delta_window_volumes(symbol, seconds)
+        return delta
+
+    def _count_trades_window(self, symbol, seconds=300) -> int:
+        sym = str(symbol).upper()
+        cutoff = int(time.time() * 1000) - (seconds * 1000)
+        return sum(1 for t in self.trades[sym] if t['timestamp'] > cutoff)
 
     def _detect_walls(self, levels, side):
         if not levels or len(levels) < 10: return []
@@ -452,8 +461,23 @@ class OrderFlowMetrics:
     def get_dom_snapshot(self, symbol: str):
         sym = str(symbol).upper()
         snap = self.orderbook_snapshots.get(sym)
-        if not snap: return {'bids': [], 'asks': [], 'obi': 0.0}
-        return {'bids': snap.bids, 'asks': snap.asks, 'obi': snap.obi}
+        if not snap:
+            return {
+                'bids': [], 'asks': [], 'obi': 0.0,
+                'best_bid': None, 'best_ask': None,
+                'bid_walls': [], 'ask_walls': [],
+            }
+        def _wall_dict(w):
+            return {'price': w.price, 'size': w.size, 'distance_from_mid': w.distance_from_mid}
+        return {
+            'bids': snap.bids,
+            'asks': snap.asks,
+            'obi': snap.obi,
+            'best_bid': snap.best_bid,
+            'best_ask': snap.best_ask,
+            'bid_walls': [_wall_dict(w) for w in snap.bid_walls],
+            'ask_walls': [_wall_dict(w) for w in snap.ask_walls],
+        }
 
     def get_full_context(self, symbol):
         sym = str(symbol).upper()

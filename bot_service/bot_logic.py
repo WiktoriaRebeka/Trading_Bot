@@ -370,6 +370,8 @@ async def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecut
         "planned_entry_price": f_entry,
         "planned_sl_price": f_sl,
         "planned_tp_price": planned_2r_price,
+        "planned_2r_price": planned_2r_price,
+        "session": signal.session,
         "tick_size": tick_size,
     }
 
@@ -417,6 +419,24 @@ async def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecut
         return
 
     # 8. Analytics (BigQuery) — cykl log-pnl pozostaje osobno (/log-pnl)
+    sl_distance = abs(f_entry - f_sl)
+    if is_long:
+        geo_rr = (planned_2r_price - f_entry) / sl_distance if sl_distance > 0 else None
+    else:
+        geo_rr = (f_entry - planned_2r_price) / sl_distance if sl_distance > 0 else None
+    geo_risk_pct = (sl_distance / f_entry * 100.0) if f_entry > 0 else None
+    actual_risk_usdt = calculated_qty * sl_distance
+
+    market_features = signal.market_features if isinstance(signal.market_features, dict) else {}
+    mf_keys = len(market_features)
+    mf_non_null = sum(1 for v in market_features.values() if v is not None)
+    logger.info(
+        f"[{event_id}] market_features pydantic OK: keys={mf_keys} non_null={mf_non_null} "
+        f"matched_liq={market_features.get('matched_liq_volume')} "
+        f"funding_rate={market_features.get('funding_rate')} "
+        f"real_wall_detected={market_features.get('real_wall_detected')}"
+    )
+
     analysis_data = {
         "event_id": event_id,
         "signal_id": signal.signal_id,
@@ -426,15 +446,15 @@ async def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecut
         "entry": f_entry,
         "sl": f_sl,
         "tp": planned_2r_price,
-        "risk_pct": signal.risk_pct,
-        "rr": signal.rr,
+        "risk_pct": geo_risk_pct,
+        "rr": geo_rr,
         "structure_state": signal.structure_state,
-        "risk_usdt": signal.risk_usdt,
+        "risk_usdt": actual_risk_usdt,
+        "market_features": market_features,
         "raw_context": signal.raw_context if isinstance(signal.raw_context, dict) else {},
-        "microstructure": micro_ctx if micro_ctx else {},
-        "session": getattr(signal, "session", None),
-        "minute_of_day": getattr(signal, "minute_of_day", None),
-        "day_of_week": getattr(signal, "day_of_week", None),
+        "session": signal.session,
+        "minute_of_day": signal.minute_of_day,
+        "day_of_week": signal.day_of_week,
     }
     _bq_executor.submit(_log_analysis_result_bg, analysis_data)
     elapsed_ms = (perf_counter() - start_total) * 1000.0

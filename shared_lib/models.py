@@ -67,6 +67,9 @@ class AlertData(BaseModel):
     
     # === RAW CONTEXT (JSON w BigQuery) ===
     raw_context: Optional[Dict[str, Any]] = None  # Dict, NIE string
+
+    # === MARKET FEATURES (flat dict → kolumny market_structure_signals) ===
+    market_features: Optional[Dict[str, Any]] = None
     
     # === WALIDATORY ===
     @field_validator('event_id')
