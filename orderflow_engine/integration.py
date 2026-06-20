@@ -457,6 +457,7 @@ async def evaluate_and_maybe_alert(symbol: str, processor):
                     continue
 
                 market_features = _build_market_features(ctx, processor, risk_levels, div_early)
+                market_features["confidence_score"] = score
 
                 alert = {
                     "event_id": f"{sym}-{int(time.time())}",

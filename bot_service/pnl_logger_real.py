@@ -419,7 +419,11 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
                 entry_slippage_pct = None
 
         event_id = (active_order_data.get('event_id') if is_matched else None) or f"UNMATCHED-{order_id}"
-        timestamp_signal = _signal_ts_for_bq(ao.get("timestamp")) or datetime.utcnow().isoformat() + "Z"
+        timestamp_signal = (
+            _signal_ts_for_bq(ao.get("timestamp_signal"))
+            or _signal_ts_for_bq(ao.get("created_at"))
+            or datetime.now(timezone.utc).isoformat()
+        )
 
         transformed_data = {
             "alert_id": alert_id,
@@ -444,23 +448,21 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
             "timestamp_entry": _ms_timestamp_to_iso(pnl_data.get("createdTime")),
             "timestamp_close": _ms_timestamp_to_iso(pnl_data.get("updatedTime")),
             "planned_risk_usdt": safe_round(planned_risk_usdt),
-            "realized_rrr": safe_round(realized_rrr, 4),  # RRR z mniejszą precyzją
+            "realized_rrr": safe_round(realized_rrr, 4),
             "realized_r": safe_round(realized_r, 4),
             "alert_entry_price": safe_round(ao.get("planned_entry_price")) if active_order_data else None,
             "alert_sl_price": safe_round(ao.get("planned_sl_price")) if active_order_data else None,
-            "alert_tp_price": safe_round(ao.get("planned_tp_price")) if active_order_data else None,
+            "alert_tp_price": safe_round(ao.get("planned_2r_price")) if active_order_data else None,
             "planned_entry_price": safe_round(ao.get("planned_entry_price")) if active_order_data else None,
             "planned_sl_price": safe_round(ao.get("planned_sl_price")) if active_order_data else None,
-            "planned_tp_price": safe_round(ao.get("planned_tp_price")) if active_order_data else None,
+            "planned_2r_price": safe_round(ao.get("planned_2r_price")) if is_matched else None,
             "exit_price_result": safe_round(exit_price_result),
-            "tp_price_chart": safe_round(active_order_data.get("planned_tp_price")) if active_order_data else None,
             "event_id": event_id,
             "signal_id": ao.get("signal_id") if active_order_data else None,
-            "timestamp_signal": timestamp_signal,
+            "timestamp_signal": bigquery_logger._normalize_timestamp(timestamp_signal),
             "entry_slippage_pct": entry_slippage_pct,
             "trailing_activated": bool(ao.get("trailing_stop_set")) if is_matched else False,
             "trailing_active_price": safe_round(ao.get("trailing_active_price")) if is_matched else None,
-            "planned_2r_price": safe_round(ao.get("planned_2r_price")) if is_matched else None,
             "session": ao.get("session") if is_matched else None,
         }
 
@@ -469,8 +471,7 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
         return False
 
     try:
-        client = bigquery_logger.get_bigquery_client()
-        errors = client.insert_rows_json(bigquery_logger.REAL_TRADES_TABLE_REF, [transformed_data])
+        errors = bigquery_logger.insert_real_trade_row(transformed_data)
 
         if not errors:
             state_manager.mark_closed_pnl_record_logged(order_id)

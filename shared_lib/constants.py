@@ -18,6 +18,7 @@ LAST_PROCESSED_TS_FIELD = "last_processed_timestamp"
 BIGQUERY_PROJECT_ID = os.getenv("GCP_PROJECT", "trading-bot-463318")
 BIGQUERY_DATASET_ID = "trading_analytics"
 BIGQUERY_REAL_TRADES_TABLE_ID = "real_trades_history"
+BIGQUERY_SIGNALS_TABLE_ID = "market_structure_signals"
 
 # === Konfiguracja API ===
 BYBIT_API_URL_V5_KLINE = "https://api.bybit.com/v5/market/kline"

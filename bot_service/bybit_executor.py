@@ -91,7 +91,14 @@ class BybitExecutor:
         optional_params = ["price", "stopLoss", "takeProfit", "slTriggerBy", "orderLinkId", "timeInForce"]
         for param in optional_params:
             if param in params:
-                payload[param] = str(params[param])
+                val = params[param]
+                if param in ("stopLoss", "takeProfit", "price") and val is not None:
+                    text = format(float(val), "f")
+                    if "." in text:
+                        text = text.rstrip("0").rstrip(".")
+                    payload[param] = text or "0"
+                else:
+                    payload[param] = str(val)
 
         if params.get("takeProfit") or params.get("stopLoss"):
             payload["tpslMode"] = "Full"
@@ -221,8 +228,12 @@ class BybitExecutor:
                     return "SHORT"
             return None
         except Exception as e:
-            logger.error(f"[{symbol}] Błąd podczas sprawdzania otwartych pozycji: {e}", exc_info=True)
-            return "ERROR"
+            logger.error(
+                f"[{symbol}] Błąd API podczas sprawdzania otwartych pozycji — "
+                f"traktuję jak brak pozycji (nie blokuję alertu): {e}",
+                exc_info=True,
+            )
+            return None
 
     def cancel_all_open_orders_for_symbol(self, symbol: str) -> bool:
         api_symbol = symbol.replace('.P', '')

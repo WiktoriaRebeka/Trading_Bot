@@ -162,6 +162,134 @@ def _price_api_str(value: float) -> str:
     return text or "0"
 
 
+def _mark_price_for_symbol(executor: BybitExecutor, symbol: str) -> Optional[float]:
+    """Aktualna cena rynkowa (mark) — Bybit waliduje SL względem base_price przy Market order."""
+    try:
+        prices = executor.get_latest_prices([symbol])
+        ticker = prices.get(symbol) or prices.get(symbol.replace(".P", ""))
+        if not ticker:
+            return None
+        for key in ("markPrice", "lastPrice", "indexPrice"):
+            raw = ticker.get(key)
+            if raw is not None:
+                val = safe_float(raw, 0.0)
+                if val > 0:
+                    return val
+    except Exception as e:
+        logger.warning(f"[{symbol}] Nie udało się pobrać mark price: {e}")
+    return None
+
+
+def _ensure_sl_valid_for_bybit(
+    f_sl: float,
+    f_entry: float,
+    is_long: bool,
+    tick_size: str,
+    mark_price: Optional[float],
+    event_id: str,
+    symbol: str,
+) -> Optional[float]:
+    """
+    LONG: SL < entry i SL < mark (Bybit: 'StopLoss should be lower than base_price').
+    SHORT: SL > entry i SL > mark.
+    """
+    tick = safe_float(tick_size, 0.0)
+    if tick <= 0:
+        return None
+
+    ref = mark_price if mark_price and mark_price > 0 else f_entry
+
+    if is_long:
+        if f_sl >= f_entry:
+            logger.warning(
+                f"[{event_id}] signal_input: REJECT — LONG SL ({f_sl}) >= entry ({f_entry}) symbol={symbol}"
+            )
+            return None
+        if f_sl >= ref:
+            adjusted = round_price_by_tick(ref - tick, tick_size, "down")
+            if adjusted >= ref or adjusted >= f_entry:
+                logger.warning(
+                    f"[{event_id}] signal_input: REJECT — nie można ustawić LONG SL poniżej mark "
+                    f"({ref}) symbol={symbol}"
+                )
+                return None
+            logger.info(
+                f"[{event_id}] SL adjust LONG: {f_sl} → {adjusted} (mark={ref}) symbol={symbol}"
+            )
+            return adjusted
+        return f_sl
+
+    if f_sl <= f_entry:
+        logger.warning(
+            f"[{event_id}] signal_input: REJECT — SHORT SL ({f_sl}) <= entry ({f_entry}) symbol={symbol}"
+        )
+        return None
+    if f_sl <= ref:
+        adjusted = round_price_by_tick(ref + tick, tick_size, "up")
+        if adjusted <= ref or adjusted <= f_entry:
+            logger.warning(
+                f"[{event_id}] signal_input: REJECT — nie można ustawić SHORT SL powyżej mark "
+                f"({ref}) symbol={symbol}"
+            )
+            return None
+        logger.info(
+            f"[{event_id}] SL adjust SHORT: {f_sl} → {adjusted} (mark={ref}) symbol={symbol}"
+        )
+        return adjusted
+    return f_sl
+
+
+def _build_signal_analysis_data(
+    signal: AlertData,
+    event_id: str,
+    symbol: str,
+    f_entry: float,
+    f_sl: float,
+    planned_2r_price: float,
+    calculated_qty: float,
+    sl_distance: float,
+) -> Dict[str, Any]:
+    is_long = signal.direction.upper() == "LONG"
+    if is_long:
+        geo_rr = (planned_2r_price - f_entry) / sl_distance if sl_distance > 0 else None
+    else:
+        geo_rr = (f_entry - planned_2r_price) / sl_distance if sl_distance > 0 else None
+    geo_risk_pct = (sl_distance / f_entry * 100.0) if f_entry > 0 else None
+    market_features = signal.market_features if isinstance(signal.market_features, dict) else {}
+
+    return {
+        "event_id": event_id,
+        "signal_id": signal.signal_id,
+        "symbol": symbol,
+        "timestamp": signal.timestamp,
+        "direction": signal.direction.upper(),
+        "entry": f_entry,
+        "sl": f_sl,
+        "tp": planned_2r_price,
+        "risk_pct": geo_risk_pct,
+        "rr": geo_rr,
+        "structure_state": signal.structure_state,
+        "risk_usdt": calculated_qty * sl_distance,
+        "market_features": market_features,
+        "raw_context": signal.raw_context if isinstance(signal.raw_context, dict) else {},
+        "session": signal.session,
+        "minute_of_day": signal.minute_of_day,
+        "day_of_week": signal.day_of_week,
+    }
+
+
+def _submit_signal_analytics(analysis_data: Dict[str, Any], event_id: str) -> None:
+    mf = analysis_data.get("market_features") or {}
+    logger.info(
+        f"[{event_id}] market_features pydantic OK: keys={len(mf)} "
+        f"non_null={sum(1 for v in mf.values() if v is not None)} "
+        f"matched_liq={mf.get('matched_liq_volume')} "
+        f"funding_rate={mf.get('funding_rate')} "
+        f"real_wall_detected={mf.get('real_wall_detected')}"
+    )
+    _bq_executor.submit(_log_analysis_result_bg, analysis_data)
+
+
 def _apply_trailing_stop_for_open_position(
     executor: BybitExecutor,
     order_link_id: str,
@@ -344,6 +472,29 @@ async def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecut
             planned_2r_price = round_price_by_tick(f_entry + 2 * sl_distance, tick_size, "up")
         else:
             planned_2r_price = round_price_by_tick(f_entry - 2 * sl_distance, tick_size, "down")
+
+        mark_price = await asyncio.to_thread(_mark_price_for_symbol, executor, symbol)
+        adjusted_sl = _ensure_sl_valid_for_bybit(
+            f_sl, f_entry, is_long, tick_size, mark_price, event_id, symbol,
+        )
+        if adjusted_sl is None:
+            return
+        if adjusted_sl != f_sl:
+            f_sl = adjusted_sl
+            sl_distance = abs(f_entry - f_sl)
+            if sl_distance == 0:
+                logger.warning(f"[{event_id}] signal_input: REJECT — sl_distance=0 po korekcie SL symbol={symbol}")
+                return
+            planned_risk_usdt = calculated_qty * sl_distance
+            if planned_risk_usdt > 2.5:
+                logger.warning(
+                    f"[{event_id}] signal_input: REJECT — planned_risk {planned_risk_usdt:.3f} USDT > 2.5 po korekcie SL"
+                )
+                return
+            if is_long:
+                planned_2r_price = round_price_by_tick(f_entry + 2 * sl_distance, tick_size, "up")
+            else:
+                planned_2r_price = round_price_by_tick(f_entry - 2 * sl_distance, tick_size, "down")
     except Exception as e:
         logger.error(f"[{event_id}] signal_input: Błąd obliczeń rozmiaru symbol={symbol} error={e}")
         return
@@ -366,6 +517,7 @@ async def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecut
         "params": order_params,
         "event_id": event_id,
         "signal_id": signal.signal_id,
+        "timestamp_signal": signal.timestamp,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "planned_entry_price": f_entry,
         "planned_sl_price": f_sl,
@@ -377,6 +529,12 @@ async def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecut
 
     await asyncio.to_thread(state_manager.save_active_order_transactional, event_id, state_payload)
     logger.info(f"[{event_id}] state: zapisano active_order PLACING (Market) symbol={symbol}")
+
+    sl_distance = abs(f_entry - f_sl)
+    analysis_data = _build_signal_analysis_data(
+        signal, event_id, symbol, f_entry, f_sl, planned_2r_price, calculated_qty, sl_distance,
+    )
+    _submit_signal_analytics(analysis_data, event_id)
 
     # 7. Egzekucja: async place_order (HTTP w wątku w executorze)
     try:
@@ -418,51 +576,34 @@ async def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecut
         logger.error(f"[{event_id}] execution: krytyczny błąd egzekucji symbol={symbol} error={e}")
         return
 
-    # 8. Analytics (BigQuery) — cykl log-pnl pozostaje osobno (/log-pnl)
-    sl_distance = abs(f_entry - f_sl)
-    if is_long:
-        geo_rr = (planned_2r_price - f_entry) / sl_distance if sl_distance > 0 else None
-    else:
-        geo_rr = (f_entry - planned_2r_price) / sl_distance if sl_distance > 0 else None
-    geo_risk_pct = (sl_distance / f_entry * 100.0) if f_entry > 0 else None
-    actual_risk_usdt = calculated_qty * sl_distance
-
-    market_features = signal.market_features if isinstance(signal.market_features, dict) else {}
-    mf_keys = len(market_features)
-    mf_non_null = sum(1 for v in market_features.values() if v is not None)
-    logger.info(
-        f"[{event_id}] market_features pydantic OK: keys={mf_keys} non_null={mf_non_null} "
-        f"matched_liq={market_features.get('matched_liq_volume')} "
-        f"funding_rate={market_features.get('funding_rate')} "
-        f"real_wall_detected={market_features.get('real_wall_detected')}"
-    )
-
-    analysis_data = {
-        "event_id": event_id,
-        "signal_id": signal.signal_id,
-        "symbol": symbol,
-        "timestamp": signal.timestamp,
-        "direction": signal.direction.upper(),
-        "entry": f_entry,
-        "sl": f_sl,
-        "tp": planned_2r_price,
-        "risk_pct": geo_risk_pct,
-        "rr": geo_rr,
-        "structure_state": signal.structure_state,
-        "risk_usdt": actual_risk_usdt,
-        "market_features": market_features,
-        "raw_context": signal.raw_context if isinstance(signal.raw_context, dict) else {},
-        "session": signal.session,
-        "minute_of_day": signal.minute_of_day,
-        "day_of_week": signal.day_of_week,
-    }
-    _bq_executor.submit(_log_analysis_result_bg, analysis_data)
     elapsed_ms = (perf_counter() - start_total) * 1000.0
     logger.info(f"[{event_id}] handle_immediate_signal zakończone w {elapsed_ms:.1f} ms")
     
 # =====================================================================
 # === 4. ORDER UPDATER (Management) ===
 # =====================================================================
+
+def _mark_order_closed_reconciled(
+    order_link_id: str,
+    reason: str,
+    *,
+    symbol: Optional[str] = None,
+    stage: str = "ghost_reconcile",
+) -> None:
+    """Oznacza wpis active_orders jako CLOSED_RECONCILED — nie zostawia widma OPEN/ERROR."""
+    state_manager.update_active_order(order_link_id, {
+        "status": "CLOSED_RECONCILED",
+        "closed_at": datetime.now(timezone.utc).isoformat(),
+        "closed_reason": reason,
+    })
+    log_struct(
+        "warning", stage,
+        "Order marked CLOSED_RECONCILED",
+        event_id=order_link_id,
+        symbol=symbol,
+        reason=reason,
+    )
+
 
 def update_filled_orders(executor: BybitExecutor):
     """Cykl zarządzania otwartymi zleceniami i Trailing Stopem."""
@@ -545,22 +686,30 @@ def update_filled_orders(executor: BybitExecutor):
         except Exception as e:
             log_struct("error", "updater", "Failed to update placed order", event_id=order_link_id, error=str(e))
 
-    # --- CZĘŚĆ 2: Retry trailingu dla OPEN bez trailing_stop_set ---
+    # --- CZĘŚĆ 2: Weryfikacja OPEN vs Bybit + retry trailingu ---
     open_docs = list(state_manager.get_orders_by_status('OPEN'))
     log_struct("info", "updater", "Open orders trailing retry count", count=len(open_docs))
 
     for doc in open_docs:
         data = doc.to_dict()
         order_link_id = doc.id
-        if data.get('trailing_stop_set'):
-            continue
         symbol = data.get('symbol')
         if not symbol:
             continue
         try:
             pos = call_with_retry(executor.get_position_info, symbol)
             if not pos or safe_float(pos.get('size')) <= 0:
+                _mark_order_closed_reconciled(
+                    order_link_id,
+                    "no_bybit_position",
+                    symbol=symbol,
+                    stage="updater",
+                )
                 continue
+
+            if data.get('trailing_stop_set'):
+                continue
+
             real_entry = _real_entry_from_position(pos)
             if real_entry > 0 and not data.get('real_entry_price'):
                 state_manager.update_active_order(order_link_id, {'real_entry_price': real_entry})
