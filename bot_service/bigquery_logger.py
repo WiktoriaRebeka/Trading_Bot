@@ -1,4 +1,5 @@
 # Lokalizacja: bot_service/bigquery_logger.py
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
@@ -38,6 +39,8 @@ REAL_TRADES_COLUMNS = (
     "planned_entry_price", "planned_sl_price", "planned_2r_price",
     "entry_slippage_pct", "trailing_activated", "trailing_active_price", "session",
 )
+
+BQ_NUMERIC_PRECISION = 8
 
 
 def initialize_bigquery() -> bool:
@@ -101,17 +104,60 @@ def _normalize_timestamp(value: Any) -> Optional[str]:
         return text
 
 
+def _round_bq_numerics(value: Any, ndigits: int = BQ_NUMERIC_PRECISION) -> Any:
+    """Rekurencyjnie zaokrągla floaty do precyzji akceptowanej przez BigQuery NUMERIC."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if value != value:  # NaN
+            return None
+        return round(value, ndigits)
+    if isinstance(value, dict):
+        return {k: _round_bq_numerics(v, ndigits) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_round_bq_numerics(v, ndigits) for v in value]
+    return value
+
+
+def _parse_raw_context(value: Any) -> Dict[str, Any]:
+    """Kolumna raw_context w BQ ma typ JSON — wymaga dict, nie json.dumps string."""
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return {}
+        try:
+            parsed = json.loads(text)
+            return parsed if isinstance(parsed, dict) else {}
+        except (json.JSONDecodeError, TypeError):
+            return {}
+    return {}
+
+
 def _sanitize_bq_value(value: Any) -> Any:
     if value is None:
         return None
-    if isinstance(value, (bool, str, int, float)):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return _round_bq_numerics(value)
+    if isinstance(value, str):
         return value
     if isinstance(value, datetime):
         return _normalize_timestamp(value)
     if isinstance(value, dict):
-        return value
+        return _round_bq_numerics(value)
     if isinstance(value, (list, tuple)):
-        return [_sanitize_bq_value(v) for v in value]
+        return _round_bq_numerics(list(value))
     return str(value)
 
 
@@ -122,7 +168,7 @@ def filter_row_columns(row: Dict[str, Any], columns: tuple) -> Dict[str, Any]:
 
 def build_market_structure_signal_row(result_data: Dict[str, Any]) -> Dict[str, Any]:
     """Buduje wiersz insertu do market_structure_signals (używane też w smoke testach)."""
-    raw_ctx = result_data.get("raw_context") or {}
+    raw_ctx = _parse_raw_context(result_data.get("raw_context"))
     mf = result_data.get("market_features") or {}
 
     row: Dict[str, Any] = {
@@ -141,11 +187,11 @@ def build_market_structure_signal_row(result_data: Dict[str, Any]) -> Dict[str, 
         "session": result_data.get("session"),
         "minute_of_day": result_data.get("minute_of_day"),
         "day_of_week": result_data.get("day_of_week"),
-        "raw_context": raw_ctx if isinstance(raw_ctx, dict) else {},
+        "raw_context": raw_ctx,
     }
     for col in MARKET_FEATURE_COLUMNS:
         row[col] = mf.get(col)
-    return row
+    return _round_bq_numerics(row)
 
 
 def log_analysis_result(result_data: Dict[str, Any]):
