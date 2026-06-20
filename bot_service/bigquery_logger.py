@@ -1,5 +1,4 @@
 # Lokalizacja: bot_service/bigquery_logger.py
-import json
 import logging
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
@@ -123,24 +122,6 @@ def _round_bq_numerics(value: Any, ndigits: int = BQ_NUMERIC_PRECISION) -> Any:
     return value
 
 
-def _parse_raw_context(value: Any) -> Dict[str, Any]:
-    """Kolumna raw_context w BQ ma typ JSON — wymaga dict, nie json.dumps string."""
-    if value is None:
-        return {}
-    if isinstance(value, dict):
-        return value
-    if isinstance(value, str):
-        text = value.strip()
-        if not text:
-            return {}
-        try:
-            parsed = json.loads(text)
-            return parsed if isinstance(parsed, dict) else {}
-        except (json.JSONDecodeError, TypeError):
-            return {}
-    return {}
-
-
 def _sanitize_bq_value(value: Any) -> Any:
     if value is None:
         return None
@@ -168,7 +149,6 @@ def filter_row_columns(row: Dict[str, Any], columns: tuple) -> Dict[str, Any]:
 
 def build_market_structure_signal_row(result_data: Dict[str, Any]) -> Dict[str, Any]:
     """Buduje wiersz insertu do market_structure_signals (używane też w smoke testach)."""
-    raw_ctx = _parse_raw_context(result_data.get("raw_context"))
     mf = result_data.get("market_features") or {}
 
     row: Dict[str, Any] = {
@@ -187,7 +167,7 @@ def build_market_structure_signal_row(result_data: Dict[str, Any]) -> Dict[str, 
         "session": result_data.get("session"),
         "minute_of_day": result_data.get("minute_of_day"),
         "day_of_week": result_data.get("day_of_week"),
-        "raw_context": raw_ctx,
+        "raw_context": None,
     }
     for col in MARKET_FEATURE_COLUMNS:
         row[col] = mf.get(col)
