@@ -12,7 +12,11 @@ from typing import Any, Dict, Optional
 from shared_lib.models import AlertData
 from shared_lib.firebase_client import get_instrument_rules
 from shared_lib.risk_manager import calculate_position_size, round_qty_by_step
-from shared_lib.ob_execution import setup_from_levels, validate_ob_sanity
+from shared_lib.ob_execution import (
+    setup_from_levels,
+    validate_ob_sanity,
+    compute_trailing_levels,
+)
 
 from bot_service import state_manager
 from bot_service.bot_logic import (
@@ -26,6 +30,7 @@ from bot_service.bot_logic import (
     round_price_by_tick,
 )
 from bot_service.bybit_executor import BybitExecutor
+from bot_service.orderblock_bq_logger import log_order_placed
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +167,10 @@ async def handle_msi_ob_limit_signal(
         )
         return
 
+    risk_ob = setup.risk_ob
+    if raw.get("ob_high") is not None and raw.get("ob_low") is not None:
+        risk_ob = float(raw["ob_high"]) - float(raw["ob_low"])
+
     # Anuluj stare niewypełnione limity (OPEN pozostają — trailing)
     n_cancelled = await _cancel_superseded_msi_limits(executor, symbol, event_id)
     if n_cancelled:
@@ -199,10 +208,12 @@ async def handle_msi_ob_limit_signal(
             )
             return
 
-        if is_long:
-            planned_2r_price = round_price_by_tick(f_entry + 2 * sl_distance, tick_size, "up")
-        else:
-            planned_2r_price = round_price_by_tick(f_entry - 2 * sl_distance, tick_size, "down")
+        raw_2r, _ = compute_trailing_levels(
+            signal.direction, f_entry, risk_ob, fee_adjusted=True,
+        )
+        planned_2r_price = round_price_by_tick(
+            raw_2r, tick_size, "up" if is_long else "down",
+        )
 
         mark_price = await asyncio.to_thread(_mark_price_for_symbol, executor, symbol)
         adjusted_sl = _ensure_sl_valid_for_bybit(
@@ -238,10 +249,23 @@ async def handle_msi_ob_limit_signal(
                     event_id=event_id,
                 )
                 return
-            if is_long:
-                planned_2r_price = round_price_by_tick(f_entry + 2 * sl_distance, tick_size, "up")
-            else:
-                planned_2r_price = round_price_by_tick(f_entry - 2 * sl_distance, tick_size, "down")
+            sl_distance = abs(f_entry - f_sl)
+            planned_risk_usdt = calculated_qty * sl_distance
+            if planned_risk_usdt > 2.5:
+                log_struct(
+                    "warning",
+                    "msi_signal",
+                    f"REJECT — planned_risk {planned_risk_usdt:.3f} po korekcie SL",
+                    symbol=symbol,
+                    event_id=event_id,
+                )
+                return
+            raw_2r, _ = compute_trailing_levels(
+                signal.direction, f_entry, risk_ob, fee_adjusted=True,
+            )
+            planned_2r_price = round_price_by_tick(
+                raw_2r, tick_size, "up" if is_long else "down",
+            )
 
     except Exception as e:
         logger.error(f"[{event_id}] msi_signal: błąd obliczeń qty symbol={symbol} error={e}")
@@ -277,7 +301,7 @@ async def handle_msi_ob_limit_signal(
         "signal_mode": "msi_orderblock",
         "order_kind": "msi_limit",
         "chain_id": chain_id,
-        "risk_ob": setup.risk_ob,
+        "risk_ob": risk_ob,
     }
 
     await asyncio.to_thread(state_manager.save_active_order_transactional, event_id, state_payload)
@@ -337,6 +361,19 @@ async def handle_msi_ob_limit_signal(
                 entry=f_entry,
                 sl=f_sl,
                 qty=calculated_qty,
+            )
+            mf = signal.market_features if isinstance(signal.market_features, dict) else {}
+            log_order_placed(
+                chain_id=chain_id,
+                symbol=symbol,
+                direction=signal.direction,
+                entry_limit=f_entry,
+                sl=f_sl,
+                risk_ob=risk_ob,
+                event_id=event_id,
+                order_id=order_result.get("orderId"),
+                session=signal.session,
+                market_features=mf,
             )
         else:
             await asyncio.to_thread(

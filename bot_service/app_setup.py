@@ -11,6 +11,7 @@ from bot_service.bigquery_logger import initialize_bigquery
 from bot_service.bybit_executor import BybitExecutor
 from bot_service.bot_logic import handle_immediate_signal, log_closed_positions_pnl, update_filled_orders
 from shared_lib.constants import ORDERFLOW_ENGINE_URL
+from shared_lib.signal_mode import get_signal_mode, is_msi_orderblock_mode
 
 # NEW imports for OrderFlow async client
 from bot_service.orderflow_client import AsyncOrderFlowClient, SyncOrderFlowAdapter
@@ -125,6 +126,11 @@ def initialize_app_services(app: Flask):
                     executor = BybitExecutor(api_key=api_key, api_secret=api_secret, testnet=USE_TESTNET)
                     app.config['BYBIT_EXECUTOR'] = executor
                     logger.info(f"BybitExecutor pomyślnie zainicjalizowany. Tryb Testnet: {USE_TESTNET}")
+                    logger.info(
+                        "SIGNAL_MODE=%s | MSI orders=%s",
+                        get_signal_mode(),
+                        is_msi_orderblock_mode(),
+                    )
 
                     # --- NOWY KROK: Inicjalizacja Async OrderFlow Client ---
                     orderflow_url = os.getenv("ORDERFLOW_ENGINE_URL", ORDERFLOW_ENGINE_URL)

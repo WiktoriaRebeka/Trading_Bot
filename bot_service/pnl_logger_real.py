@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from decimal import Decimal, getcontext
 
 from bot_service import bigquery_logger, state_manager
+from bot_service.orderblock_bq_logger import compute_msi_realized_r, log_trade_outcome
+from shared_lib.orderblock_bq import outcome_from_net_pnl
 
 logger = logging.getLogger(__name__)
 getcontext().prec = 18
@@ -362,13 +364,34 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
                         realized_rrr = float(realized_rrr_dec)
 
             trade_direction = active_order_data.get("direction") if is_matched else None
+            risk_ob_val = None
+            if is_matched:
+                raw_rob = ao.get("risk_ob")
+                if raw_rob is not None:
+                    try:
+                        risk_ob_val = float(raw_rob)
+                    except (TypeError, ValueError):
+                        risk_ob_val = None
+
             if is_matched and planned_sl_price_dec is not None and trade_direction:
-                realized_r = _compute_realized_r(
-                    direction=trade_direction,
-                    avg_exit_price=float(avg_exit_price),
-                    avg_entry_price=float(avg_entry_price),
-                    planned_sl_price=float(planned_sl_price_dec),
-                )
+                if (
+                    str(ao.get("signal_mode", "")).lower() == "msi_orderblock"
+                    and risk_ob_val is not None
+                    and risk_ob_val > 0
+                ):
+                    realized_r = compute_msi_realized_r(
+                        trade_direction,
+                        float(avg_entry_price),
+                        float(avg_exit_price),
+                        risk_ob_val,
+                    )
+                else:
+                    realized_r = _compute_realized_r(
+                        direction=trade_direction,
+                        avg_exit_price=float(avg_exit_price),
+                        avg_entry_price=float(avg_entry_price),
+                        planned_sl_price=float(planned_sl_price_dec),
+                    )
 
             if planned_tp_price_dec is not None and planned_sl_price_dec is not None:
                 if trade_direction:
@@ -476,6 +499,43 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
         if not errors:
             state_manager.mark_closed_pnl_record_logged(order_id)
             logger.info(f"{log_prefix} ✅ Zapisano wynik transakcji do BigQuery.")
+            if (
+                is_matched
+                and str(ao.get("signal_mode", "")).lower() == "msi_orderblock"
+                and ao.get("chain_id")
+            ):
+                try:
+                    chain_id = str(ao.get("chain_id"))
+                    rob = ao.get("risk_ob")
+                    risk_ob_out = float(rob) if rob is not None else None
+                    msi_r = realized_r
+                    if risk_ob_out and risk_ob_out > 0 and trade_direction:
+                        msi_r = compute_msi_realized_r(
+                            trade_direction,
+                            float(avg_entry_price),
+                            float(avg_exit_price),
+                            risk_ob_out,
+                        )
+                    log_trade_outcome(
+                        chain_id=chain_id,
+                        symbol=symbol,
+                        direction=str(trade_direction or ao.get("direction", "")),
+                        trade_event_id=str(event_id),
+                        trade_order_id=order_id,
+                        outcome=outcome_from_net_pnl(float(net_pnl)) or "UNKNOWN",
+                        realized_r=msi_r,
+                        net_pnl_usdt=float(net_pnl),
+                        avg_entry_price=float(avg_entry_price),
+                        avg_exit_price=float(avg_exit_price),
+                        exit_type=exit_type,
+                        risk_ob=risk_ob_out,
+                        session=ao.get("session"),
+                    )
+                except Exception as ob_exc:
+                    logger.error(
+                        f"{log_prefix} orderblock_events TRADE_OUTCOME failed: {ob_exc}",
+                        exc_info=True,
+                    )
             if is_matched:
                 order_link_id_to_delete = active_order_data.get('id')
                 if order_link_id_to_delete:

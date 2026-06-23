@@ -10,17 +10,14 @@ from typing import Any, Dict, Optional
 
 from orderflow_engine.bot_sender import send_alert_to_bot
 from orderflow_engine.msi_engine import OrderBlock, StructureEvent
+from orderflow_engine.ob_orderflow_snapshot import collect_ob_orderflow_features
 from orderflow_engine.settings import get_trading_session
 from shared_lib.ob_execution import build_ob_trade_setup
+from shared_lib.signal_mode import msi_trade_enabled
 
 logger = logging.getLogger(__name__)
 
-MSI_TRADE_ENABLED = os.environ.get("MSI_TRADE_ENABLED", "true").strip().lower() in (
-    "1",
-    "true",
-    "yes",
-    "on",
-)
+MSI_TRADE_ENABLED = msi_trade_enabled()
 DEFAULT_RISK_USDT = float(os.environ.get("MSI_RISK_USDT", "2.5"))
 
 
@@ -50,25 +47,7 @@ def build_msi_ob_alert(
     else:
         planned_2r = setup.entry_limit - 2 * sl_distance
 
-    market_features: Dict[str, Any] = {}
-    try:
-        ctx = processor.get_full_context(sym) if processor else {}
-        dom = ctx.get("dom") or {}
-        ticker = ctx.get("ticker") or {}
-        market_features = {
-            "obi": dom.get("obi"),
-            "funding_rate": ticker.get("funding_rate"),
-        }
-        if hasattr(processor, "get_recent_deltas"):
-            deltas = processor.get_recent_deltas(sym, limit=1)
-            if deltas:
-                market_features["delta"] = deltas[-1].get("delta")
-        if hasattr(processor, "get_dom_snapshot"):
-            snap = processor.get_dom_snapshot(sym)
-            walls = (snap.get("bid_walls") or []) + (snap.get("ask_walls") or [])
-            market_features["dom_wall"] = bool(walls)
-    except Exception as e:
-        logger.debug("[MSI-TRADE] market_features partial: %s", e)
+    market_features: Dict[str, Any] = collect_ob_orderflow_features(processor, sym, setup.direction)
 
     risk_pct = (sl_distance / setup.entry_limit * 100.0) if setup.entry_limit > 0 else 0.0
 

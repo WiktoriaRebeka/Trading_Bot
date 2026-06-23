@@ -12,9 +12,12 @@ if str(ROOT) not in sys.path:
 from orderflow_engine.msi_engine import MsiCandle, OrderBlock
 from shared_lib.ob_execution import (
     MIN_OB_HEIGHT_PCT,
+    ROUND_TRIP_FEE_PCT,
     build_ob_trade_setup,
     compute_ob_entry_sl,
+    compute_trailing_levels,
     passes_min_ob_height,
+    resolve_trailing_r,
     validate_ob_sanity,
 )
 
@@ -90,6 +93,44 @@ def test_build_accepts_valid_ob():
     assert math.isclose(s.risk_ob, 200.0)
 
 
+def test_trailing_msi_long_with_fee():
+    entry = 100.0
+    r = 0.5
+    raw_active, trail = compute_trailing_levels("LONG", entry, r, fee_adjusted=True)
+    assert math.isclose(trail, r)
+    expected = entry + 2 * r + entry * ROUND_TRIP_FEE_PCT
+    assert math.isclose(raw_active, expected)
+
+
+def test_trailing_msi_short_with_fee():
+    entry = 99.0
+    r = 0.8
+    raw_active, trail = compute_trailing_levels("SHORT", entry, r, fee_adjusted=True)
+    assert math.isclose(trail, r)
+    expected = entry - 2 * r - entry * ROUND_TRIP_FEE_PCT
+    assert math.isclose(raw_active, expected)
+
+
+def test_trailing_footprint_no_fee():
+    entry = 100.0
+    r = 0.5
+    raw_active, trail = compute_trailing_levels("LONG", entry, r, fee_adjusted=False)
+    assert math.isclose(raw_active, entry + 2 * r)
+    assert math.isclose(trail, r)
+
+
+def test_resolve_trailing_r_msi_uses_risk_ob():
+    data = {"signal_mode": "msi_orderblock", "risk_ob": 1.25}
+    r = resolve_trailing_r(data, real_entry=100.1, planned_sl=98.5)
+    assert math.isclose(r, 1.25)
+
+
+def test_resolve_trailing_r_footprint_uses_fill_sl():
+    data = {"signal_mode": "footprint_hunter"}
+    r = resolve_trailing_r(data, real_entry=100.1, planned_sl=99.0)
+    assert math.isclose(r, 1.1)
+
+
 if __name__ == "__main__":
     test_long_entry_sl()
     test_short_entry_sl()
@@ -97,4 +138,9 @@ if __name__ == "__main__":
     test_min_height_filter()
     test_build_rejects_tight_ob()
     test_build_accepts_valid_ob()
+    test_trailing_msi_long_with_fee()
+    test_trailing_msi_short_with_fee()
+    test_trailing_footprint_no_fee()
+    test_resolve_trailing_r_msi_uses_risk_ob()
+    test_resolve_trailing_r_footprint_uses_fill_sl()
     print("OK — wszystkie testy ob_execution przeszły")

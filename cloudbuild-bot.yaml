@@ -32,7 +32,7 @@ steps:
     - 'managed'
     - '--service-account'
     - 'trading-bot-runner@$PROJECT_ID.iam.gserviceaccount.com'
-    - '--set-env-vars=GCP_PROJECT=$PROJECT_ID'
+    - '--set-env-vars=GCP_PROJECT=$PROJECT_ID,SIGNAL_MODE=msi_orderblock'
     - '--update-secrets'
     - 'BYBIT_API_KEY=bybit-api-key:latest,BYBIT_API_SECRET=bybit-api-secret:latest'
 

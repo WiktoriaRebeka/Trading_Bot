@@ -14,6 +14,12 @@ from flask import current_app
 from shared_lib.models import AlertData
 from shared_lib.firebase_client import get_instrument_rules
 from shared_lib.risk_manager import calculate_position_size, round_qty_by_step
+from shared_lib.signal_mode import get_signal_mode, is_msi_orderblock_mode
+from shared_lib.ob_execution import (
+    ROUND_TRIP_FEE_PCT,
+    compute_trailing_levels,
+    resolve_trailing_r,
+)
 from bot_service import state_manager
 from bot_service.bybit_executor import BybitExecutor
 from bot_service.fetch_from_firestore import load_last_processed_timestamp, save_last_processed_timestamp
@@ -298,8 +304,8 @@ def _apply_trailing_stop_for_open_position(
     pos: Dict[str, Any],
 ) -> bool:
     """
-    Ustawia trailing 1R z aktywacją przy 2R (activePrice od realnego fill).
-    Zapisuje real_entry_price i trailing_active_price w active_orders.
+    Ustawia trailing 1R z aktywacją przy 2R (+ 0.075% fee dla MSI OrderBlock).
+    MSI: R = risk_ob (wysokość strefy OB). Footprint: R = |real_entry − planned_sl|.
     """
     planned_sl = data.get("planned_sl_price")
     direction = str(data.get("direction", "")).upper()
@@ -327,25 +333,40 @@ def _apply_trailing_stop_for_open_position(
         return False
 
     is_long = direction == "LONG"
-    sl_distance = abs(real_entry - float(planned_sl))
-    if sl_distance <= 0:
+    is_msi = str(data.get("signal_mode", "")).lower() == "msi_orderblock"
+    r_one = resolve_trailing_r(data, real_entry, float(planned_sl))
+    if r_one <= 0:
         log_struct(
             "warning", "trailing_stop",
-            "sl_distance=0 — pomijam trailing",
+            "R=0 — pomijam trailing",
+            symbol=symbol, event_id=order_link_id,
+            signal_mode=data.get("signal_mode"),
+        )
+        return False
+
+    raw_active, trailing_distance_val = compute_trailing_levels(
+        direction,
+        real_entry,
+        r_one,
+        fee_adjusted=is_msi,
+    )
+    if raw_active <= 0:
+        log_struct(
+            "warning", "trailing_stop",
+            "raw_active<=0 — pomijam trailing",
             symbol=symbol, event_id=order_link_id,
         )
         return False
 
     if is_long:
-        raw_active = real_entry + 2 * sl_distance
         active_price = round_price_by_tick(raw_active, tick_size, "up")
     else:
-        raw_active = real_entry - 2 * sl_distance
         active_price = round_price_by_tick(raw_active, tick_size, "down")
 
-    trailing_distance_val = round_price_by_tick(sl_distance, tick_size, "none")
+    trailing_distance_val = round_price_by_tick(trailing_distance_val, tick_size, "none")
     trailing_distance = _price_api_str(trailing_distance_val)
     active_price_str = _price_api_str(active_price)
+    fee_adj = real_entry * ROUND_TRIP_FEE_PCT if is_msi else 0.0
 
     ts_result = call_with_retry(
         executor.set_trailing_stop_for_position,
@@ -358,14 +379,20 @@ def _apply_trailing_stop_for_open_position(
             "trailing_stop_set": True,
             "trailing_distance": trailing_distance,
             "trailing_active_price": active_price,
+            "trailing_r": r_one,
+            "trailing_fee_adjustment": fee_adj if is_msi else None,
             "real_entry_price": real_entry,
             "planned_tp_price": active_price,
         })
         log_struct(
-            "info", "trailing_stop", "Trailing Stop ustawiony (2R active, 1R trail)",
+            "info", "trailing_stop",
+            "Trailing Stop ustawiony (2R+fee active, 1R trail)" if is_msi
+            else "Trailing Stop ustawiony (2R active, 1R trail)",
             symbol=symbol, event_id=order_link_id,
             real_entry=real_entry, active_price=active_price,
             trailing_distance=trailing_distance, direction=direction,
+            risk_r=r_one, fee_adjustment=fee_adj if is_msi else 0.0,
+            signal_mode=data.get("signal_mode"),
         )
         return True
 
@@ -381,9 +408,31 @@ def _apply_trailing_stop_for_open_position(
 # =====================================================================
 
 async def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor) -> None:
-    if str(payload.get("signal_mode", "")).lower() == "msi_orderblock":
+    payload_mode = str(payload.get("signal_mode", "")).strip().lower()
+
+    if payload_mode == "msi_orderblock":
+        if not is_msi_orderblock_mode():
+            log_struct(
+                "warning",
+                "signal_routing",
+                "Odrzucono alert MSI — aktywny SIGNAL_MODE=footprint_hunter",
+                event_id=payload.get("event_id"),
+                symbol=payload.get("symbol"),
+            )
+            return
         from bot_service.msi_order_handler import handle_msi_ob_limit_signal
         await handle_msi_ob_limit_signal(payload, executor)
+        return
+
+    if is_msi_orderblock_mode():
+        log_struct(
+            "warning",
+            "signal_routing",
+            "Odrzucono alert footprint — aktywny SIGNAL_MODE=msi_orderblock",
+            event_id=payload.get("event_id"),
+            symbol=payload.get("symbol"),
+            payload_signal_mode=payload_mode or None,
+        )
         return
 
     start_total = perf_counter()

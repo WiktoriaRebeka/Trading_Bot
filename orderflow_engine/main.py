@@ -18,6 +18,7 @@ from orderflow_engine.integration import (
     set_context_firestore_client,
 )
 from shared_lib.firebase_client import initialize_firebase, get_db, verify_firestore_connection
+from shared_lib.signal_mode import get_signal_mode, msi_engine_enabled, footprint_alerts_enabled
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -129,6 +130,12 @@ async def lifespan(app: FastAPI):
         db = get_db()
         set_context_firestore_client(db)
         METRICS_PROCESSOR = OrderFlowMetrics(firestore_client=db)
+        logger.info(
+            "SIGNAL_MODE=%s | MSI engine=%s | footprint evaluate=%s",
+            get_signal_mode(),
+            msi_engine_enabled(),
+            footprint_alerts_enabled(),
+        )
         CONTEXT_BUILDER = SignalContextBuilder(METRICS_PROCESSOR)
         ws_manager = MultiConnectionWSManager(symbols=ALL_SYMBOLS_FOR_WS, metrics_processor=METRICS_PROCESSOR)
         asyncio.create_task(ws_manager.start_all_connections())

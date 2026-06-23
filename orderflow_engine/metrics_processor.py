@@ -19,12 +19,16 @@ from orderflow_engine.risk_levels import calculate_structure_risk_levels
 from orderflow_engine.settings import get_trading_session, settings
 from orderflow_engine.msi_engine import MsiCandle, MsiEngine
 from orderflow_engine.msi_event_logger import MsiEventLogger
+from shared_lib.signal_mode import (
+    footprint_alerts_enabled,
+    get_signal_mode,
+    msi_engine_enabled,
+    msi_trade_enabled,
+)
 
 logger = logging.getLogger(__name__)
 
-MSI_ENGINE_ENABLED = os.environ.get("MSI_ENGINE_ENABLED", "true").strip().lower() in (
-    "1", "true", "yes", "on",
-)
+MSI_ENGINE_ENABLED = msi_engine_enabled()
 
 
 def _coerce_liquidation_ts_ms(raw: int) -> int:
@@ -72,7 +76,7 @@ class OrderFlowMetrics:
         self.engines = defaultdict(lambda: MarketStructureEngine(lookback_bars=500))
         self.bq_logger = OrderFlowBigQueryLogger()
         self.scorer = ConfidenceScorer()
-        self.msi_logger = MsiEventLogger() if MSI_ENGINE_ENABLED else None
+        self.msi_logger = MsiEventLogger(processor=self) if MSI_ENGINE_ENABLED else None
         self.msi_engines: Dict[str, MsiEngine] = {}
         self._msi_sink = None
         if MSI_ENGINE_ENABLED and self.msi_logger is not None:
@@ -111,9 +115,15 @@ class OrderFlowMetrics:
         logger.info(f"[MetricsProcessor] BOT_SERVICE_URL={'env' if os.environ.get('BOT_SERVICE_URL') else 'fallback'}: {self.bot_url}")
 
         logger.info("✅ OrderFlow V7.1: Institutional Engine Active.")
+        logger.info(
+            "[SIGNAL_MODE] %s | MSI engine=%s trade=%s | footprint_eval=%s",
+            get_signal_mode(),
+            MSI_ENGINE_ENABLED,
+            msi_trade_enabled(),
+            footprint_alerts_enabled(),
+        )
         if MSI_ENGINE_ENABLED:
-            from orderflow_engine.msi_trade_signal import MSI_TRADE_ENABLED
-            trade_msg = "trade alerts ON" if MSI_TRADE_ENABLED else "trade alerts OFF"
+            trade_msg = "trade alerts ON" if msi_trade_enabled() else "trade alerts OFF"
             logger.info("[MSI] Engine enabled (1M structure + %s).", trade_msg)
 
     def _get_msi_engine(self, symbol: str) -> Optional[MsiEngine]:

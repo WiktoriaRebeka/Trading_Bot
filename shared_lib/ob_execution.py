@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union
 
 logger = logging.getLogger(__name__)
 
@@ -229,3 +229,53 @@ def setup_from_levels(
         chain_id=str(chain_id),
         symbol=str(symbol).upper(),
     )
+
+
+def resolve_trailing_r(
+    data: Dict[str, Any],
+    real_entry: float,
+    planned_sl: float,
+) -> float:
+    """
+    1R do trailingu.
+    MSI OrderBlock: risk_ob ze strefy OB (|entry−SL| z limitem).
+    Footprint: |real_entry − planned_sl| po fillu.
+    """
+    if str(data.get("signal_mode", "")).lower() == "msi_orderblock":
+        raw = data.get("risk_ob")
+        if raw is not None:
+            r = float(raw)
+            if r > 0:
+                return r
+    return abs(float(real_entry) - float(planned_sl))
+
+
+def compute_trailing_levels(
+    direction: str,
+    real_entry: float,
+    risk_r: float,
+    *,
+    fee_adjusted: bool = False,
+) -> tuple[float, float]:
+    """
+    Zwraca (raw_active_price, trailing_distance=1R).
+
+    MSI (fee_adjusted=True):
+      LONG  active = entry + 2R + 0.075%×entry
+      SHORT active = entry − 2R − 0.075%×entry
+    Footprint (fee_adjusted=False):
+      LONG  active = entry + 2R
+      SHORT active = entry − 2R
+    """
+    if risk_r <= 0 or real_entry <= 0:
+        return 0.0, 0.0
+
+    fee_adj = real_entry * ROUND_TRIP_FEE_PCT if fee_adjusted else 0.0
+    direction_u = str(direction).upper()
+    if direction_u == "LONG":
+        raw_active = real_entry + 2 * risk_r + fee_adj
+    elif direction_u == "SHORT":
+        raw_active = real_entry - 2 * risk_r - fee_adj
+    else:
+        return 0.0, 0.0
+    return raw_active, risk_r

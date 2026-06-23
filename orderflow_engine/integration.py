@@ -20,6 +20,10 @@ from orderflow_engine.signal_detector import (
 from orderflow_engine.bot_sender import send_alert_to_bot
 from orderflow_engine.risk_levels import calculate_structure_risk_levels
 from orderflow_engine.settings import get_trading_session, settings
+from shared_lib.signal_mode import (
+    footprint_alerts_enabled,
+    get_signal_mode,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -348,6 +352,13 @@ def _build_market_features(ctx: SignalContext, processor, risk_levels, div_resul
 
 async def evaluate_and_maybe_alert(symbol: str, processor):
     sym = str(symbol).upper()
+    if not footprint_alerts_enabled():
+        logger.debug(
+            "[evaluate] %s: footprint wyłączony (SIGNAL_MODE=%s)",
+            sym,
+            get_signal_mode(),
+        )
+        return
     with _eval_locks_mutex:
         if sym not in _eval_locks:
             _eval_locks[sym] = asyncio.Lock()

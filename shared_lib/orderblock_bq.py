@@ -1,0 +1,163 @@
+# shared_lib/orderblock_bq.py
+# Sanitizacja wierszy orderblock_events (BigQuery NUMERIC max 8 miejsc po przecinku).
+
+from __future__ import annotations
+
+import logging
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
+
+BQ_NUMERIC_PRECISION = 8
+
+ORDERBLOCK_EVENTS_COLUMNS = (
+    "event_id",
+    "event_type",
+    "symbol",
+    "event_ts",
+    "session",
+    "minute_of_day",
+    "day_of_week",
+    "ob_id",
+    "chain_id",
+    "ob_formed_ts",
+    "ob_candle_ts",
+    "ob_high",
+    "ob_low",
+    "ob_height",
+    "ob_direction",
+    "initial_trend",
+    "hl_lh_level",
+    "bos_level",
+    "liquidity_level",
+    "is_first_ob",
+    "entry_limit",
+    "sl",
+    "risk_ob",
+    "matched_liq_volume",
+    "obi",
+    "funding_rate",
+    "dom_wall",
+    "delta",
+    "outcome",
+    "realized_r",
+    "trade_order_id",
+    "trade_event_id",
+    "raw_context",
+)
+
+
+def round_bq_float(value: Any, ndigits: int = BQ_NUMERIC_PRECISION) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if value != value:  # NaN
+            return None
+        return round(value, ndigits)
+    return value
+
+
+def round_bq_numerics(value: Any, ndigits: int = BQ_NUMERIC_PRECISION) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return round_bq_float(value, ndigits)
+    if isinstance(value, dict):
+        return {str(k): round_bq_numerics(v, ndigits) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [round_bq_numerics(v, ndigits) for v in value]
+    return value
+
+
+def normalize_bq_timestamp(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    if isinstance(value, (int, float)):
+        try:
+            ms = float(value)
+            if ms < 10**12:
+                ms *= 1000.0
+            return normalize_bq_timestamp(datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc))
+        except (TypeError, ValueError, OSError):
+            return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return text
+
+
+def sanitize_raw_context(value: Any) -> Optional[Dict[str, Any]]:
+    """raw_context musi być dict lub None — nigdy json.dumps string."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        logger.warning("orderblock_bq: raw_context był stringiem — odrzucam (wymagany dict)")
+        return None
+    if isinstance(value, dict):
+        return round_bq_numerics(value)
+    return None
+
+
+def sanitize_orderblock_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    for col in ORDERBLOCK_EVENTS_COLUMNS:
+        val = row.get(col)
+        if col in ("event_ts", "ob_formed_ts", "ob_candle_ts"):
+            out[col] = normalize_bq_timestamp(val)
+        elif col == "raw_context":
+            out[col] = sanitize_raw_context(val)
+        elif col in (
+            "minute_of_day",
+            "day_of_week",
+        ):
+            out[col] = int(val) if val is not None else None
+        elif col in ("is_first_ob", "dom_wall"):
+            out[col] = bool(val) if val is not None else None
+        elif col in (
+            "ob_high", "ob_low", "ob_height", "hl_lh_level", "bos_level", "liquidity_level",
+            "entry_limit", "sl", "risk_ob", "matched_liq_volume", "obi", "funding_rate",
+            "delta", "realized_r",
+        ):
+            out[col] = round_bq_float(val)
+        else:
+            out[col] = val
+    return out
+
+
+def insert_orderblock_rows(client: Any, table_id: str, rows: List[Dict[str, Any]]) -> List[Any]:
+    payload = [sanitize_orderblock_row(r) for r in rows]
+    return client.insert_rows_json(table_id, payload)
+
+
+def outcome_from_net_pnl(net_pnl: Optional[float]) -> Optional[str]:
+    if net_pnl is None:
+        return None
+    try:
+        pnl = float(net_pnl)
+    except (TypeError, ValueError):
+        return None
+    if pnl > 0:
+        return "WIN"
+    if pnl < 0:
+        return "LOSS"
+    return "BREAKEVEN"
