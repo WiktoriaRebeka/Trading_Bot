@@ -169,6 +169,22 @@ async def debug_ip():
             data = await resp.json()
     return {"egress_ip": data.get("ip"), "expected": "34.158.226.157"}
 
+@app.get("/msi-state/{symbol}")
+async def get_msi_state(symbol: str):
+    symbol_clean = symbol.upper().replace(".P", "")
+    if METRICS_PROCESSOR is None:
+        raise HTTPException(status_code=503, detail="Engine not ready")
+    state = METRICS_PROCESSOR.get_msi_state(symbol_clean)
+    if state is None:
+        return JSONResponse(
+            content={
+                "status": "ok",
+                "data": None,
+                "message": "MSI engine disabled or symbol not yet fed",
+            }
+        )
+    return JSONResponse(content={"status": "ok", "data": state})
+
 @app.get("/context/{symbol}")
 async def get_signal_context(symbol: str):
     symbol_clean = symbol.upper().replace(".P", "")

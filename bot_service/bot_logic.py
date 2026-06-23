@@ -381,6 +381,11 @@ def _apply_trailing_stop_for_open_position(
 # =====================================================================
 
 async def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecutor) -> None:
+    if str(payload.get("signal_mode", "")).lower() == "msi_orderblock":
+        from bot_service.msi_order_handler import handle_msi_ob_limit_signal
+        await handle_msi_ob_limit_signal(payload, executor)
+        return
+
     start_total = perf_counter()
     event_id = payload.get("event_id", "unknown")
     symbol = payload.get("symbol", "unknown")

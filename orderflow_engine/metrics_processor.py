@@ -17,8 +17,14 @@ from orderflow_engine.confidence_scorer import ConfidenceScorer
 from orderflow_engine.integration import update_symbol_context
 from orderflow_engine.risk_levels import calculate_structure_risk_levels
 from orderflow_engine.settings import get_trading_session, settings
+from orderflow_engine.msi_engine import MsiCandle, MsiEngine
+from orderflow_engine.msi_event_logger import MsiEventLogger
 
 logger = logging.getLogger(__name__)
+
+MSI_ENGINE_ENABLED = os.environ.get("MSI_ENGINE_ENABLED", "true").strip().lower() in (
+    "1", "true", "yes", "on",
+)
 
 
 def _coerce_liquidation_ts_ms(raw: int) -> int:
@@ -66,6 +72,12 @@ class OrderFlowMetrics:
         self.engines = defaultdict(lambda: MarketStructureEngine(lookback_bars=500))
         self.bq_logger = OrderFlowBigQueryLogger()
         self.scorer = ConfidenceScorer()
+        self.msi_logger = MsiEventLogger() if MSI_ENGINE_ENABLED else None
+        self.msi_engines: Dict[str, MsiEngine] = {}
+        self._msi_sink = None
+        if MSI_ENGINE_ENABLED and self.msi_logger is not None:
+            from orderflow_engine.msi_event_sink import MsiEventSink
+            self._msi_sink = MsiEventSink(self.msi_logger, self)
         
         self.trades = defaultdict(lambda: deque(maxlen=20000))
         self.tickers = {}
@@ -99,6 +111,31 @@ class OrderFlowMetrics:
         logger.info(f"[MetricsProcessor] BOT_SERVICE_URL={'env' if os.environ.get('BOT_SERVICE_URL') else 'fallback'}: {self.bot_url}")
 
         logger.info("✅ OrderFlow V7.1: Institutional Engine Active.")
+        if MSI_ENGINE_ENABLED:
+            from orderflow_engine.msi_trade_signal import MSI_TRADE_ENABLED
+            trade_msg = "trade alerts ON" if MSI_TRADE_ENABLED else "trade alerts OFF"
+            logger.info("[MSI] Engine enabled (1M structure + %s).", trade_msg)
+
+    def _get_msi_engine(self, symbol: str) -> Optional[MsiEngine]:
+        if not MSI_ENGINE_ENABLED or self.msi_logger is None:
+            return None
+        sym = str(symbol).upper()
+        if sym not in self.msi_engines:
+            on_event = self._msi_sink.handle_event if self._msi_sink else self.msi_logger.handle_event
+            self.msi_engines[sym] = MsiEngine(
+                symbol=sym,
+                on_event=on_event,
+            )
+        return self.msi_engines[sym]
+
+    def _feed_msi_candle(self, symbol: str, candle: dict) -> None:
+        engine = self._get_msi_engine(symbol)
+        if engine is None:
+            return
+        try:
+            engine.on_candle_close(MsiCandle.from_dict(candle))
+        except Exception as e:
+            logger.error("[MSI] on_candle_close failed symbol=%s: %s", symbol, e, exc_info=True)
 
     def pre_load_history(self, symbol, history_m1, history_d1):
         symbol = str(symbol).upper()
@@ -108,6 +145,7 @@ class OrderFlowMetrics:
             engine.major_low = min([k['low'] for k in history_d1])
         for c in history_m1:
             engine.update_candles(c['open'], c['high'], c['low'], c['close'], c['ts'])
+            self._feed_msi_candle(symbol, c)
 
     def process_trade(self, timestamp: int, symbol: str, side: str, qty: float, price: float):
         sym = str(symbol).upper()
@@ -122,6 +160,7 @@ class OrderFlowMetrics:
         new_candle = builder.process_tick(price, qty, timestamp)
         if new_candle:
             self.engines[sym].update_candles(new_candle['open'], new_candle['high'], new_candle['low'], new_candle['close'], new_candle['ts'])
+            self._feed_msi_candle(sym, new_candle)
         delta, _, _ = self._calculate_delta_window_volumes(sym, 300)
         self.delta_history[sym].append({'price': price, 'delta': delta, 'timestamp': timestamp})
 
@@ -478,6 +517,12 @@ class OrderFlowMetrics:
             'bid_walls': [_wall_dict(w) for w in snap.bid_walls],
             'ask_walls': [_wall_dict(w) for w in snap.ask_walls],
         }
+
+    def get_msi_state(self, symbol: str) -> Optional[dict]:
+        engine = self.msi_engines.get(str(symbol).upper())
+        if engine is None:
+            return None
+        return engine.get_state_snapshot()
 
     def get_full_context(self, symbol):
         sym = str(symbol).upper()

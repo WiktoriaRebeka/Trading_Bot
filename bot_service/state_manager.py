@@ -151,6 +151,30 @@ def find_active_order_by_details(symbol: str, side: str, qty: float) -> Optional
         return None
 
 
+def get_pending_msi_limit_orders(symbol: str) -> list:
+    """
+    Niewypełnione limity MSI (status PLACED lub PLACING) dla symbolu.
+    Nie obejmuje pozycji OPEN — te zostają przy nowym OB.
+    """
+    sym = str(symbol).upper().replace(".P", "")
+    pending_statuses = {"PLACED", "PLACING"}
+    results = []
+    try:
+        for doc in _collection_active_orders().stream():
+            data = doc.to_dict() or {}
+            if data.get("signal_mode") != "msi_orderblock":
+                continue
+            if data.get("status") not in pending_statuses:
+                continue
+            doc_sym = str(data.get("symbol", "")).upper().replace(".P", "")
+            if doc_sym != sym:
+                continue
+            results.append(doc)
+    except Exception as e:
+        logger.exception("[state_manager] get_pending_msi_limit_orders failed for %s: %s", sym, e)
+    return results
+
+
 def get_latest_active_order_for_symbol(symbol: str, side: str) -> Optional[Dict[str, Any]]:
     try:
         q = _collection_active_orders().where("symbol", "==", symbol).where("direction", "==", side).order_by("created_at", direction=firestore.Query.DESCENDING).limit(1)

@@ -124,8 +124,10 @@ class BybitExecutor:
         side: str,
         qty: float,
         order_type: str = "Market",
+        price: Optional[float] = None,
         take_profit: Optional[float] = None,
         stop_loss: Optional[float] = None,
+        time_in_force: Optional[str] = None,
         event_id: Optional[str] = None,
     ) -> Optional[Dict[str, str]]:
         params: Dict[str, Any] = {
@@ -134,13 +136,52 @@ class BybitExecutor:
             "orderType": order_type,
             "qty": qty,
         }
+        if price is not None:
+            params["price"] = price
         if take_profit is not None:
             params["takeProfit"] = take_profit
         if stop_loss is not None:
             params["stopLoss"] = stop_loss
+        if time_in_force is not None:
+            params["timeInForce"] = time_in_force
         if event_id:
             params["orderLinkId"] = event_id
         return await asyncio.to_thread(self.place_order_sync, params)
+
+    def cancel_order_by_link_id(self, symbol: str, order_link_id: str) -> bool:
+        """Anuluje pojedyncze zlecenie po orderLinkId (np. stary limit MSI)."""
+        if not order_link_id:
+            logger.error("[%s] cancel_order_by_link_id: brak order_link_id", symbol)
+            return False
+        api_symbol = symbol.replace(".P", "")
+        payload = {
+            "category": "linear",
+            "symbol": api_symbol,
+            "orderLinkId": order_link_id,
+        }
+        logger.info("[%s] Anulowanie zlecenia orderLinkId=%s", symbol, order_link_id)
+        try:
+            self._send_request("POST", "/v5/order/cancel", params=payload)
+            logger.info("[%s] Anulowano zlecenie orderLinkId=%s", symbol, order_link_id)
+            return True
+        except BybitAPIError as e:
+            if e.ret_code in (110001, 110021, 110008):
+                logger.info(
+                    "[%s] Zlecenie orderLinkId=%s już nie istnieje (code=%s) — traktuję jako anulowane",
+                    symbol, order_link_id, e.ret_code,
+                )
+                return True
+            logger.warning(
+                "[%s] Błąd API przy anulowaniu orderLinkId=%s: %s",
+                symbol, order_link_id, e,
+            )
+            return False
+        except Exception as e:
+            logger.error(
+                "[%s] Nieoczekiwany błąd anulowania orderLinkId=%s: %s",
+                symbol, order_link_id, e, exc_info=True,
+            )
+            return False
 
     def set_trailing_stop_for_position(
         self,

@@ -1,0 +1,2 @@
+symbol,detected_at_ts,detected_at_iso,ob_candle_ts,ob_candle_iso,direction,ob_high,ob_low,ob_height,chain_id,initial_trend,hl_lh_level,bos_level,liquidity_level,is_first
+BTCUSDT,1782089760000,2026-06-22T00:56:00+00:00,1782089640000,2026-06-22T00:54:00+00:00,LONG,63785.4,63757.0,28.400000000001455,BTCUSDT-1782089640000-1,UP,63757.0,63823.6,63761.0,True
