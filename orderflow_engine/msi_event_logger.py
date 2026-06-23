@@ -84,6 +84,13 @@ class MsiEventLogger:
     def _log_ob_detected(self, ob: OrderBlock, event: StructureEvent) -> None:
         dt = _ts_ms_to_datetime(ob.detected_at_ts)
         session = get_trading_session(dt)
+        setup = build_ob_trade_setup(ob, symbol=sym, log_prefix="[MSI-BQ]")
+        extra = ""
+        if setup is not None:
+            extra = (
+                f" entry_limit={setup.entry_limit} sl={setup.sl} "
+                f"risk_ob={setup.risk_ob:.8f} height_pct={setup.ob_height_pct:.4f}%"
+            )
         msg = (
             f"[MSI][OB_DETECTED] symbol={event.symbol} "
             f"ts={dt.isoformat()} direction={ob.direction} "
@@ -91,7 +98,7 @@ class MsiEventLogger:
             f"chain_id={ob.chain_id} initial_trend={ob.initial_trend} "
             f"hl_lh_level={ob.hl_lh_level} bos_level={ob.bos_level} "
             f"liquidity_level={ob.liquidity_level} session={session} "
-            f"is_first={ob.is_first}"
+            f"is_first={ob.is_first}{extra}"
         )
         logger.info(msg)
         self._persist_row(self._build_row(event, ob, "OB_NEW"))

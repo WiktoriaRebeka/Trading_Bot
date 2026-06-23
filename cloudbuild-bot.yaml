@@ -32,7 +32,8 @@ steps:
     - 'managed'
     - '--service-account'
     - 'trading-bot-runner@$PROJECT_ID.iam.gserviceaccount.com'
-    - '--set-env-vars=GCP_PROJECT=$PROJECT_ID,SIGNAL_MODE=msi_orderblock'
+    # ETAP 1: footprint handluje. ETAP 2: SIGNAL_MODE=msi_orderblock
+    - '--set-env-vars=GCP_PROJECT=$PROJECT_ID,SIGNAL_MODE=footprint_hunter'
     - '--update-secrets'
     - 'BYBIT_API_KEY=bybit-api-key:latest,BYBIT_API_SECRET=bybit-api-secret:latest'
 

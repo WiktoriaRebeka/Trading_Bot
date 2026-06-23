@@ -9,7 +9,11 @@ from typing import Optional
 
 from orderflow_engine.msi_engine import OrderBlock, StructureEvent
 from orderflow_engine.msi_event_logger import MsiEventLogger
-from orderflow_engine.msi_trade_signal import MSI_TRADE_ENABLED, send_msi_ob_alert
+from orderflow_engine.msi_trade_signal import (
+    MSI_TRADE_ENABLED,
+    build_msi_ob_alert,
+    send_msi_ob_alert,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -27,12 +31,32 @@ class MsiEventSink:
         except Exception as e:
             logger.error("[MSI] logger.handle_event failed: %s", e, exc_info=True)
 
-        if (
-            MSI_TRADE_ENABLED
-            and event.event_type == "OB_NEW"
-            and ob is not None
-        ):
-            self._schedule_trade_alert(ob, event)
+        if event.event_type == "OB_NEW" and ob is not None:
+            if MSI_TRADE_ENABLED:
+                self._schedule_trade_alert(ob, event)
+            else:
+                self._log_dry_run_trade_setup(ob, event)
+
+    def _log_dry_run_trade_setup(self, ob: OrderBlock, event: StructureEvent) -> None:
+        """Etap 1: geometria entry/SL w logach bez wysyłki do bot_service."""
+        alert = build_msi_ob_alert(ob, event, self._processor)
+        if alert is None:
+            logger.info(
+                "[MSI-TRADE-DRY] OB odrzucony (filtr/sanity) symbol=%s chain=%s",
+                event.symbol,
+                ob.chain_id,
+            )
+            return
+        logger.info(
+            "[MSI-TRADE-DRY] symbol=%s %s chain=%s entry=%s sl=%s risk_ob=%s "
+            "(SIGNAL_MODE=footprint — bez zlecenia)",
+            alert["symbol"],
+            alert["direction"],
+            ob.chain_id,
+            alert["entry"],
+            alert["sl"],
+            alert.get("raw_context", {}).get("risk_ob"),
+        )
 
     def _schedule_trade_alert(self, ob: OrderBlock, event: StructureEvent) -> None:
         try:

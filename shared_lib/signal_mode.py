@@ -23,7 +23,7 @@ _ALIASES = {
 
 def normalize_signal_mode(raw: str | None) -> str:
     if raw is None or not str(raw).strip():
-        return SIGNAL_MODE_MSI
+        return SIGNAL_MODE_FOOTPRINT
     key = str(raw).strip().lower()
     if key in (SIGNAL_MODE_MSI, SIGNAL_MODE_FOOTPRINT):
         return key
@@ -32,9 +32,9 @@ def normalize_signal_mode(raw: str | None) -> str:
     logger.warning(
         "Nieznany SIGNAL_MODE=%r — używam domyślnego %s",
         raw,
-        SIGNAL_MODE_MSI,
+        SIGNAL_MODE_FOOTPRINT,
     )
-    return SIGNAL_MODE_MSI
+    return SIGNAL_MODE_FOOTPRINT
 
 
 def get_signal_mode() -> str:
@@ -58,10 +58,12 @@ def env_flag(name: str, default_when_unset: bool) -> bool:
 
 
 def msi_engine_enabled() -> bool:
-    return env_flag("MSI_ENGINE_ENABLED", is_msi_orderblock_mode())
+    """Domyślnie ON — silnik MSI loguje OB także w etapie 1 (footprint handluje)."""
+    return env_flag("MSI_ENGINE_ENABLED", True)
 
 
 def msi_trade_enabled() -> bool:
+    """Handel MSI tylko przy SIGNAL_MODE=msi_orderblock (lub jawne MSI_TRADE_ENABLED=true)."""
     return env_flag("MSI_TRADE_ENABLED", is_msi_orderblock_mode())
 
 
