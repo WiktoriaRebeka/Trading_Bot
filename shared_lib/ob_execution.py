@@ -163,7 +163,7 @@ def build_ob_trade_setup(
 
     ok, reason = validate_ob_sanity(setup)
     if not ok:
-        logger.error(
+        logger.warning(
             "%sOB REJECTED sanity [%s %s chain=%s]: %s",
             prefix,
             setup.symbol,
@@ -175,7 +175,7 @@ def build_ob_trade_setup(
 
     ok, reason = passes_min_ob_height(setup, min_height_pct)
     if not ok:
-        logger.warning(
+        logger.debug(
             "%sOB REJECTED min_height [%s %s chain=%s]: %s",
             prefix,
             setup.symbol,
@@ -185,7 +185,7 @@ def build_ob_trade_setup(
         )
         return None
 
-    logger.info(
+    logger.debug(
         "%sOB ACCEPTED [%s %s chain=%s] entry=%s sl=%s R=%s height_pct=%.4f%%",
         prefix,
         setup.symbol,

@@ -23,10 +23,13 @@ class OrderflowSettings:
 
     SKIP_SESSIONS: List[str]
     REQUIRE_ZERO_DELTA: bool
+    LOG_EVAL_VERBOSE: bool
 
     def __init__(self) -> None:
         self.SKIP_SESSIONS = _parse_skip_sessions(os.environ.get("SKIP_SESSIONS"))
         self.REQUIRE_ZERO_DELTA = _parse_bool(os.environ.get("REQUIRE_ZERO_DELTA"), True)
+        # Dev-only: LOG_EVAL_VERBOSE=true restores per-filter debug lines in evaluate_and_maybe_alert.
+        self.LOG_EVAL_VERBOSE = _parse_bool(os.environ.get("LOG_EVAL_VERBOSE"), False)
 
 
 settings = OrderflowSettings()

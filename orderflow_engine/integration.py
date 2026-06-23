@@ -28,6 +28,12 @@ from shared_lib.signal_mode import (
 logger = logging.getLogger(__name__)
 
 
+def _eval_filter_log(msg: str, *args) -> None:
+    """Per-filter evaluate logs — only when LOG_EVAL_VERBOSE=true (dev)."""
+    if settings.LOG_EVAL_VERBOSE:
+        logger.debug(msg, *args)
+
+
 def _get_min_liq_volume(symbol: str) -> float:
     return 1.0  # TEST MODE - tymczasowe
 
@@ -369,6 +375,7 @@ async def evaluate_and_maybe_alert(symbol: str, processor):
             return
         builder = SignalContextBuilder(processor)
         for direction in ["LONG", "SHORT"]:
+            eval_failed_at: Optional[str] = None
             try:
                 ctx = builder.build_signal_context(sym, direction)
                 if ctx is None:
@@ -376,39 +383,44 @@ async def evaluate_and_maybe_alert(symbol: str, processor):
 
                 session = get_trading_session()
                 if session in settings.SKIP_SESSIONS:
-                    logger.info(
+                    logger.debug(
                         f"⏭️ {sym} SKIPPED: session={session} in SKIP_SESSIONS"
                     )
+                    eval_failed_at = "session"
                     continue
 
                 div_early = processor._detect_delta_divergence(sym)
                 delta_strength = float(div_early.get("strength", 0) or 0)
                 if settings.REQUIRE_ZERO_DELTA and delta_strength != 0:
-                    logger.info(
+                    logger.debug(
                         f"⏭️ {sym} SKIPPED: delta_strength={delta_strength:.3f} != 0 "
                         f"(REQUIRE_ZERO_DELTA=True)"
                     )
+                    eval_failed_at = "delta"
                     continue
 
-                # STRESS-TEST
                 liq_total = sum(float(l.get("volume_usd", 0)) for l in ctx.liquidations)
-                logger.info(f"[STRESS-TEST] [{sym}] {direction}: liq_vol=${liq_total:.0f} obi={ctx.dom_snapshot.obi:.3f}")
+                _eval_filter_log(
+                    f"[STRESS-TEST] [{sym}] {direction}: liq_vol=${liq_total:.0f} obi={ctx.dom_snapshot.obi:.3f}"
+                )
 
                 if not detect_liquidity_sweep(ctx):
-                    logger.info(f"[FILTER] {sym} {direction}: ❌ liquidity_sweep FAILED")
+                    _eval_filter_log(f"[FILTER] {sym} {direction}: ❌ liquidity_sweep FAILED")
+                    eval_failed_at = "liquidity_sweep"
                     continue
-                logger.info(f"[FILTER] {sym} {direction}: ✅ liquidity_sweep OK")
+                _eval_filter_log(f"[FILTER] {sym} {direction}: ✅ liquidity_sweep OK")
 
                 liq_threshold = float(processor.LIQUIDATION_CASCADE_THRESHOLD_USD)
                 matched = matched_liquidation_volume_usd(ctx)
                 if matched < liq_threshold:
                     buffer_total = sum(float(l.get("volume_usd", 0)) for l in ctx.liquidations)
-                    logger.info(
+                    _eval_filter_log(
                         f"[FILTER] {sym} {direction}: ❌ liquidations FAILED "
                         f"matched_vol={matched:.0f} buffer_total_usd={buffer_total:.0f} threshold={liq_threshold:.0f}"
                     )
+                    eval_failed_at = "liquidations"
                     continue
-                logger.info(
+                _eval_filter_log(
                     f"[FILTER] {sym} {direction}: ✅ liquidations OK matched_vol={matched:.0f} threshold={liq_threshold:.0f}"
                 )
 
@@ -429,28 +441,30 @@ async def evaluate_and_maybe_alert(symbol: str, processor):
                         ref_d = max(dvals[-10:-1])
                         cond_p = last_p > ref_p
                         cond_d = last_d < ref_d
-                    logger.info(
+                    _eval_filter_log(
                         f"[DELTA_DIAG] {sym} {direction}: samples={n} "
                         f"last_price={last_p:.6f} ref_price={ref_p:.6f} cond_price={cond_p} "
                         f"last_delta={last_d:.4f} ref_delta={ref_d:.4f} cond_delta={cond_d}"
                     )
                 else:
-                    logger.info(
+                    _eval_filter_log(
                         f"[DELTA_DIAG] {sym} {direction}: samples={n} — za mało punktów (min 10)"
                     )
 
-                logger.info(f"[{sym}] delta_divergence INPUT: samples={n} direction={direction}")
+                _eval_filter_log(f"[{sym}] delta_divergence INPUT: samples={n} direction={direction}")
 
                 if not check_dom_wall(ctx):
-                    logger.info(f"[FILTER] {sym} {direction}: ❌ dom_wall FAILED")
+                    _eval_filter_log(f"[FILTER] {sym} {direction}: ❌ dom_wall FAILED")
+                    eval_failed_at = "dom_wall"
                     continue
-                logger.info(f"[FILTER] {sym} {direction}: ✅ dom_wall OK")
+                _eval_filter_log(f"[FILTER] {sym} {direction}: ✅ dom_wall OK")
 
                 score = compute_confidence_score(ctx, liq_ok=True, delta_ok=True, dom_ok=True)
-                if score < 30:  # STRESS-TEST
-                    logger.info(f"[FILTER] {sym} {direction}: ❌ score FAILED score={score:.1f} < 30")
+                if score < 30:
+                    _eval_filter_log(f"[FILTER] {sym} {direction}: ❌ score FAILED score={score:.1f} < 30")
+                    eval_failed_at = "score"
                     continue
-                logger.info(f"[FILTER] {sym} {direction}: ✅ score OK score={score:.1f}")
+                _eval_filter_log(f"[FILTER] {sym} {direction}: ✅ score OK score={score:.1f}")
 
                 _now = datetime.now(timezone.utc)
                 _session = get_trading_session(_now)
@@ -465,6 +479,7 @@ async def evaluate_and_maybe_alert(symbol: str, processor):
                 )
                 if risk_levels is None:
                     logger.error(f"[FILTER] {sym} {direction}: ❌ structure_risk FAILED")
+                    eval_failed_at = "structure_risk"
                     continue
 
                 market_features = _build_market_features(ctx, processor, risk_levels, div_early)
@@ -499,3 +514,11 @@ async def evaluate_and_maybe_alert(symbol: str, processor):
                 break
             except Exception as e:
                 logger.error(f"Error evaluating {sym}: {e}")
+            finally:
+                if settings.LOG_EVAL_VERBOSE and eval_failed_at is not None:
+                    logger.debug(
+                        "[%s] %s evaluate: failed_at=%s",
+                        sym,
+                        direction,
+                        eval_failed_at,
+                    )

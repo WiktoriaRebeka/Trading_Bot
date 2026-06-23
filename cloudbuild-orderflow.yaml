@@ -42,6 +42,7 @@ steps:
       - 'BYBIT_API_KEY=bybit-api-key:latest,BYBIT_API_SECRET=bybit-api-secret:latest'
       # ETAP 1: footprint handluje, MSI tylko loguje OB do BQ (bez alertów do bota).
       # ETAP 2: zmień SIGNAL_MODE=msi_orderblock (+ MSI_TRADE_ENABLED=true) na obu serwisach.
+      # LOG_EVAL_VERBOSE=true — dev only: przywraca debug [FILTER]/[DELTA_DIAG] w evaluate_and_maybe_alert.
       - '--update-env-vars'
       - 'SIGNAL_MODE=footprint_hunter,MSI_ENGINE_ENABLED=true,MSI_TRADE_ENABLED=false,MSI_LOG_TO_BQ=true,LIQ_CASCADE_THRESHOLD_USD=0,GCP_PROJECT=$PROJECT_ID,WS_OPEN_TIMEOUT_SEC=90,BOT_SERVICE_URL=https://trading-bot-service-785819958951.europe-central2.run.app/process-alerts,BOT_SERVICE_TIMEOUT_SEC=120,BOT_SERVICE_RETRIES=3,BOT_SERVICE_CONNECT_TIMEOUT_SEC=20'
       - '--clear-network'

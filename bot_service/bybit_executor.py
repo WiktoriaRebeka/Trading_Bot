@@ -320,7 +320,7 @@ class BybitExecutor:
             params_realtime = {"category": "linear", "symbol": api_symbol, "orderLinkId": order_link_id}
             result_realtime = self._send_request("GET", endpoint_realtime, params=params_realtime)
             if result_realtime and result_realtime.get('list'):
-                logger.info(f"{log_prefix} Znaleziono zlecenie w czasie rzeczywistym (realtime).")
+                logger.debug(f"{log_prefix} Znaleziono zlecenie w czasie rzeczywistym (realtime).")
                 return result_realtime['list'][0]
         except BybitAPIError as e:
             # Ignorujemy błąd "order does not exist", bo to oczekiwane, jeśli zlecenie jest już w historii
@@ -336,7 +336,7 @@ class BybitExecutor:
             params_history = {"category": "linear", "symbol": api_symbol, "orderLinkId": order_link_id}
             result_history = self._send_request("GET", endpoint_history, params=params_history)
             if result_history and result_history.get('list'):
-                logger.info(f"{log_prefix} Znaleziono zlecenie w historii.")
+                logger.debug(f"{log_prefix} Znaleziono zlecenie w historii.")
                 return result_history['list'][0]
         except Exception as e:
             logger.error(f"{log_prefix} Błąd podczas sprawdzania historii zleceń: {e}", exc_info=True)
@@ -353,7 +353,7 @@ class BybitExecutor:
         try:
             result = self._send_request("GET", endpoint, params=params)
             order_list = result.get('list', [])
-            logger.info(f"[{symbol}] Znaleziono {len(order_list)} aktywnych zleceň TP/SL.")
+            logger.debug(f"[{symbol}] Znaleziono {len(order_list)} aktywnych zleceň TP/SL.")
             return order_list
         except (RequestException, BybitAPIError) as e:
             logger.error(f"[{symbol}] Błąd podczas pobierania aktywnych zleceň TP/SL: {e}")
@@ -386,10 +386,10 @@ class BybitExecutor:
             if result and result.get('list'):
                 for position_data in result['list']:
                     if position_data.get('symbol') == api_symbol and float(position_data.get("size", "0")) > 0:
-                        logger.info(f"[{symbol}] Znaleziono aktywną pozycję dla {api_symbol} na liście pozycji USDT.")
+                        logger.debug(f"[{symbol}] Znaleziono aktywną pozycję dla {api_symbol} na liście pozycji USDT.")
                         return position_data
             
-            logger.warning(f"[{symbol}] Nie znaleziono aktywnej pozycji dla symbolu {api_symbol} na liście wszystkich otwartych pozycji USDT.")
+            logger.debug(f"[{symbol}] Nie znaleziono aktywnej pozycji dla symbolu {api_symbol} na liście wszystkich otwartych pozycji USDT.")
             return None
             
         except (RequestException, BybitAPIError) as e:
@@ -428,7 +428,7 @@ class BybitExecutor:
                 for ticker in result['list']:
                     full_symbol = f"{ticker.get('symbol')}.P"
                     price_data[full_symbol] = ticker
-                logger.info(f"Pobrano aktualne ceny dla {len(price_data)}/{len(symbols)} symboli.")
+                logger.debug(f"Pobrano aktualne ceny dla {len(price_data)}/{len(symbols)} symboli.")
                 return price_data
             return {}
         except Exception as e:

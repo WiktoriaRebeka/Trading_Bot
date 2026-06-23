@@ -24,6 +24,13 @@ USE_TESTNET = os.getenv("USE_TESTNET", "true").lower() == "true"
 def register_endpoints(app: Flask):
     @app.before_request
     def log_request_info():
+        if request.path in ("/health", "/"):
+            logger.debug(
+                "Health probe: path=%s method=%s",
+                request.path,
+                request.method,
+            )
+            return
         safe_headers = {str(k): str(v) for k, v in request.headers.items() if k.lower() not in ['authorization', 'cookie']}
         logger.info(
             f"--- OTRZYMANO ŻĄDANIE --- Endpoint: {request.path}, Metoda: {request.method}",

@@ -91,7 +91,9 @@ def log_struct(level: str, stage: str, msg: str, **fields):
     """Ustrukturyzowany logger JSON dla Cloud Logging / Stackdriver."""
     entry = {"stage": stage, "msg": msg}
     entry.update(fields)
-    if level == "info":
+    if level == "debug":
+        logger.debug(json.dumps(entry))
+    elif level == "info":
         logger.info(json.dumps(entry))
     elif level == "warning":
         logger.warning(json.dumps(entry))
@@ -661,14 +663,14 @@ def _mark_order_closed_reconciled(
 
 def update_filled_orders(executor: BybitExecutor):
     """Cykl zarządzania otwartymi zleceniami i Trailing Stopem."""
-    log_struct("info", "updater", "Cycle started")
+    log_struct("debug", "updater", "Cycle started")
 
     # --- CZĘŚĆ 1: Obsługa zleceń oczekujących na wejście (status: PLACED) ---
     placed_docs = list(state_manager.get_orders_by_status('PLACED'))
     legacy_docs = list(state_manager.get_orders_without_status())
     orders_to_check = placed_docs + legacy_docs
 
-    log_struct("info", "updater", "Placed orders count", count=len(orders_to_check))
+    log_struct("debug", "updater", "Placed orders count", count=len(orders_to_check))
 
     for doc in orders_to_check:
         data = doc.to_dict()
@@ -694,7 +696,7 @@ def update_filled_orders(executor: BybitExecutor):
                 continue
 
             status = details.get('orderStatus')
-            log_struct("info", "updater", "Order status fetched", symbol=symbol, event_id=order_link_id, order_status=status)
+            log_struct("debug", "updater", "Order status fetched", symbol=symbol, event_id=order_link_id, order_status=status)
 
             if status == 'Filled':
                 pos = call_with_retry(executor.get_position_info, symbol)
@@ -742,7 +744,7 @@ def update_filled_orders(executor: BybitExecutor):
 
     # --- CZĘŚĆ 2: Weryfikacja OPEN vs Bybit + retry trailingu ---
     open_docs = list(state_manager.get_orders_by_status('OPEN'))
-    log_struct("info", "updater", "Open orders trailing retry count", count=len(open_docs))
+    log_struct("debug", "updater", "Open orders trailing retry count", count=len(open_docs))
 
     for doc in open_docs:
         data = doc.to_dict()

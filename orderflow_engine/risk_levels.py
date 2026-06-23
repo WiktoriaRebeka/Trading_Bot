@@ -178,16 +178,20 @@ def calculate_structure_risk_levels(
         return None
 
     risk_pct = (net_sl_risk / entry) * 100
-    tp_distance_pct = (tp_distance_final / entry) * 100
 
-    logger.warning(f"🎯 {sym} {side} STRUCTURE-BASED SETUP (fee-adjusted):")
-    logger.warning(f"   Swept swing level: {float(swing_level):.4f}")
-    logger.warning(f"   Entry: {entry:.4f}")
-    logger.warning(f"   SL: {sl_price:.4f} (net risk {risk_pct:.4f}% incl. fees)")
-    logger.warning(f"   TP: {tp_price:.4f} ({tp_distance_pct:.2f}% price move)")
-    logger.warning(f"   Net SL risk (price+fees): {net_sl_risk:.8f}")
-    logger.warning(f"   Confidence: {confidence:.1f}/100  Target RR: {TARGET_NET_RR:.1f}")
-    logger.warning(f"✅ {sym} Net RR after fees: {actual_net_rr:.2f}")
+    logger.debug(
+        "%s %s STRUCTURE-BASED SETUP: swing=%.4f entry=%.4f sl=%.4f tp=%.4f "
+        "risk_pct=%.4f%% net_rr=%.2f confidence=%.1f",
+        sym,
+        side,
+        float(swing_level),
+        entry,
+        sl_price,
+        tp_price,
+        risk_pct,
+        actual_net_rr,
+        confidence,
+    )
 
     return StructureRiskLevels(
         sl=sl_price,

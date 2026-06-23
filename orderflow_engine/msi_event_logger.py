@@ -78,12 +78,13 @@ class MsiEventLogger:
             f"ts={_ts_ms_to_datetime(event.ts).isoformat()} "
             f"payload={json.dumps(event.payload, default=str)}"
         )
-        logger.info(msg)
+        logger.debug(msg)
         self._persist_row(self._build_row(event, None, bq_type))
 
     def _log_ob_detected(self, ob: OrderBlock, event: StructureEvent) -> None:
         dt = _ts_ms_to_datetime(ob.detected_at_ts)
         session = get_trading_session(dt)
+        sym = str(event.symbol).upper()
         setup = build_ob_trade_setup(ob, symbol=sym, log_prefix="[MSI-BQ]")
         extra = ""
         if setup is not None:
