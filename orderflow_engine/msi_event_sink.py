@@ -25,7 +25,8 @@ class MsiEventSink:
         self._logger = msi_logger
         self._processor = processor
 
-    def __call__(self, event: StructureEvent, ob: Optional[OrderBlock] = None) -> None:
+    def handle_event(self, event: StructureEvent, ob: Optional[OrderBlock] = None) -> None:
+        """Spójny interfejs z MsiEventLogger — używany przez MsiEngine.on_event."""
         try:
             self._logger.handle_event(event, ob)
         except Exception as e:
@@ -36,6 +37,9 @@ class MsiEventSink:
                 self._schedule_trade_alert(ob, event)
             else:
                 self._log_dry_run_trade_setup(ob, event)
+
+    def __call__(self, event: StructureEvent, ob: Optional[OrderBlock] = None) -> None:
+        self.handle_event(event, ob)
 
     def _log_dry_run_trade_setup(self, ob: OrderBlock, event: StructureEvent) -> None:
         """Etap 1: geometria entry/SL w logach bez wysyłki do bot_service."""
