@@ -294,7 +294,6 @@ class OrderFlowMetrics:
         for wall in ask_walls: wall.distance_from_mid = wall.price - mid_price
         snapshot = DOMSnapshot(symbol=symbol, bids=bids[:10], asks=asks[:10], timestamp=ob_data['timestamp'], obi=obi, best_bid=bids[0][0], best_ask=asks[0][0], bid_walls=bid_walls, ask_walls=ask_walls)
         self.orderbook_snapshots[symbol] = snapshot
-        if bid_walls or ask_walls: self._log_dom_walls_to_bq(symbol, snapshot)
         now = time.time()
         last_r = self._orderbook_ctx_refresh_at.get(symbol, 0.0)
         if now - last_r >= self.ORDERBOOK_CONTEXT_REFRESH_SEC:
@@ -478,10 +477,6 @@ class OrderFlowMetrics:
         total = sum([e.value_usd for e in liqs])
         if total > self.LIQUIDATION_CASCADE_THRESHOLD_USD:
             self.bq_logger.log_liquidation_cascade({'event_id': f"LIQ-{int(time.time())}", 'symbol': symbol, 'cascade_type': 'LONG_CASCADE' if sum([e.value_usd for e in liqs if e.side=='Buy']) > total*0.7 else 'SHORT_CASCADE', 'total_volume_usd': total, 'count': len(liqs)})
-
-    def _log_dom_walls_to_bq(self, symbol, snapshot):
-        for wall in snapshot.bid_walls + snapshot.ask_walls:
-            if wall.distance_from_mid / wall.price < 0.005: self.bq_logger.log_dom_wall({'symbol': symbol, 'side': wall.side.upper(), 'price': wall.price, 'size': wall.size, 'obi': snapshot.obi})
 
     def get_last_price(self, symbol: str) -> Optional[float]:
         t = self.tickers.get(str(symbol).upper()); return t['price'] if t else None

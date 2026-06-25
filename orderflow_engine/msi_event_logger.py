@@ -18,7 +18,11 @@ from orderflow_engine.ob_orderflow_snapshot import collect_ob_orderflow_features
 from orderflow_engine.settings import get_trading_session
 from shared_lib import constants
 from shared_lib.ob_execution import build_ob_trade_setup
-from shared_lib.orderblock_bq import insert_orderblock_rows, sanitize_orderblock_row
+from shared_lib.orderblock_bq import (
+    coerce_raw_context_dict,
+    insert_orderblock_rows,
+    sanitize_orderblock_row,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -122,7 +126,7 @@ class MsiEventLogger:
             "session": session,
             "minute_of_day": dt.hour * 60 + dt.minute,
             "day_of_week": dt.weekday(),
-            "raw_context": dict(event.payload) if event.payload else None,
+            "raw_context": coerce_raw_context_dict(event.payload),
         }
 
         if ob is not None:
@@ -212,6 +216,13 @@ class MsiEventLogger:
 
     def _do_insert(self, table_id: str, row: dict) -> None:
         if self._bq_client is None:
+            return
+        rc = row.get("raw_context")
+        if rc is not None and not isinstance(rc, dict):
+            logger.error(
+                "[MSI][BQ] raw_context musi być dict (otrzymano %s) — pomijam insert",
+                type(rc).__name__,
+            )
             return
         try:
             errors = insert_orderblock_rows(self._bq_client, table_id, [row])

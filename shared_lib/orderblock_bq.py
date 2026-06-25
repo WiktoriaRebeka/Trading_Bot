@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -106,16 +108,53 @@ def normalize_bq_timestamp(value: Any) -> Optional[str]:
         return text
 
 
-def sanitize_raw_context(value: Any) -> Optional[Dict[str, Any]]:
-    """raw_context musi być dict lub None — nigdy json.dumps string."""
+def _coerce_json_native(value: Any) -> Any:
+    """Wartości zgodne z insert_rows_json do kolumny BigQuery JSON."""
+    if value is None or isinstance(value, (bool, str, int, float)):
+        return value
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, datetime):
+        dt = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).isoformat()
+    if isinstance(value, dict):
+        return {str(k): _coerce_json_native(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_coerce_json_native(v) for v in value]
+    return str(value)
+
+
+def coerce_raw_context_dict(value: Any) -> Optional[Dict[str, Any]]:
+    """
+    raw_context dla orderblock_events: dict lub None.
+    Akceptuje dict; JSON-string parsuje do dict (nigdy nie zostawia stringa).
+    """
     if value is None:
         return None
     if isinstance(value, str):
-        logger.warning("orderblock_bq: raw_context był stringiem — odrzucam (wymagany dict)")
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError:
+            logger.warning("orderblock_bq: raw_context string nie jest poprawnym JSON — pomijam")
+            return None
+    if not isinstance(value, dict):
+        logger.warning(
+            "orderblock_bq: raw_context wymaga dict, otrzymano %s — pomijam",
+            type(value).__name__,
+        )
         return None
-    if isinstance(value, dict):
-        return round_bq_numerics(value)
-    return None
+    return {str(k): _coerce_json_native(v) for k, v in value.items()}
+
+
+def sanitize_raw_context(value: Any) -> Optional[Dict[str, Any]]:
+    """raw_context musi być dict lub None — nigdy json.dumps string."""
+    coerced = coerce_raw_context_dict(value)
+    if coerced is None:
+        return None
+    return round_bq_numerics(coerced)
 
 
 def sanitize_orderblock_row(row: Dict[str, Any]) -> Dict[str, Any]:

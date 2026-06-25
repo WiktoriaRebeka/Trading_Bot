@@ -27,7 +27,7 @@ class OrderFlowBigQueryLogger:
     Używa istniejących tabel:
     - market_structure_signals (rozszerzona)
     - liquidation_events (nowa)
-    - dom_events (nowa)
+    - dom_events (wyłączone — tabela nie istnieje)
 
     Zapisy (insert_rows_json) wykonywane są w ThreadPoolExecutor — gorąca ścieżka
     tylko submituje zadanie i natychmiast wraca.
@@ -145,22 +145,8 @@ class OrderFlowBigQueryLogger:
         _bq_executor.submit(self._do_insert, table_id, row)
 
     def log_dom_wall(self, wall_data):
-        """Zapisuje DOM wall event (NOWA TABELA)"""
-        if self.client is None:
-            logger.warning("[BQ] BigQuery client not available, skipping.")
-            return
-        table_id = f"{self.dataset}.dom_events"
-
-        row = {
-            'symbol': wall_data['symbol'],
-            'side': wall_data['side'],
-            'price': wall_data['price'],
-            'size': wall_data['size'],
-            'obi': wall_data['obi'],
-            'timestamp': datetime.utcnow()
-        }
-
-        _bq_executor.submit(self._do_insert, table_id, row)
+        """Wyłączone — tabela dom_events nie istnieje (stara telemetria)."""
+        return
 
     def _get_session(self, dt):
         """Określa sesję tradingową na podstawie godziny UTC"""

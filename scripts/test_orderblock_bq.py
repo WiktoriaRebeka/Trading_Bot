@@ -19,8 +19,15 @@ def test_round_bq_float_8_places():
     assert round_bq_float(1.123456789) == 1.12345679
 
 
-def test_raw_context_rejects_string():
-    assert sanitize_raw_context('{"a": 1}') is None
+def test_raw_context_parses_json_string():
+    ctx = sanitize_raw_context('{"a": 1, "nested": {"x": 1.111111111}}')
+    assert isinstance(ctx, dict)
+    assert ctx["a"] == 1
+    assert ctx["nested"]["x"] == 1.11111111
+
+
+def test_raw_context_invalid_string():
+    assert sanitize_raw_context("not-json") is None
 
 
 def test_raw_context_keeps_dict():
@@ -54,7 +61,8 @@ def test_outcome_from_pnl():
 
 if __name__ == "__main__":
     test_round_bq_float_8_places()
-    test_raw_context_rejects_string()
+    test_raw_context_parses_json_string()
+    test_raw_context_invalid_string()
     test_raw_context_keeps_dict()
     test_sanitize_orderblock_row()
     test_outcome_from_pnl()
