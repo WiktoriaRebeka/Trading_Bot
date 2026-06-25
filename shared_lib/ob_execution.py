@@ -279,3 +279,38 @@ def compute_trailing_levels(
     else:
         return 0.0, 0.0
     return raw_active, risk_r
+
+
+def adjust_trailing_active_price(
+    active_price: float,
+    real_entry: float,
+    is_long: bool,
+    market_price: float,
+    tick: float,
+) -> Optional[float]:
+    """
+    Bybit trailing activePrice (TrailingProfit):
+    LONG:  activePrice > market i > avg entry.
+    SHORT: activePrice < market i < avg entry.
+    Gdy cena już przeszła poziom 2R — klamruj względem rynku.
+    """
+    if tick <= 0 or market_price <= 0 or real_entry <= 0:
+        return None
+
+    adjusted = active_price
+    ref = market_price
+
+    if is_long:
+        ceiling = max(ref, real_entry)
+        if adjusted <= ceiling:
+            adjusted = (int((ceiling + tick) / tick + 0.999999)) * tick
+            if adjusted <= ceiling:
+                return None
+        return adjusted
+
+    floor = min(ref, real_entry)
+    if adjusted >= floor:
+        adjusted = (int((floor - tick) / tick)) * tick
+        if adjusted >= floor:
+            return None
+    return adjusted

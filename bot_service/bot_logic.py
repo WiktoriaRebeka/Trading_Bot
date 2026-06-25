@@ -17,6 +17,7 @@ from shared_lib.risk_manager import calculate_position_size, round_qty_by_step
 from shared_lib.signal_mode import get_signal_mode, is_msi_orderblock_mode
 from shared_lib.ob_execution import (
     ROUND_TRIP_FEE_PCT,
+    adjust_trailing_active_price,
     compute_trailing_levels,
     resolve_trailing_r,
 )
@@ -247,6 +248,37 @@ def _ensure_sl_valid_for_bybit(
     return f_sl
 
 
+def _ensure_trailing_active_price_valid_for_bybit(
+    active_price: float,
+    real_entry: float,
+    is_long: bool,
+    tick_size: str,
+    mark_price: Optional[float],
+    event_id: str,
+    symbol: str,
+) -> Optional[float]:
+    """Wrapper: tick rounding + logowanie korekty activePrice dla Bybit."""
+    tick = safe_float(tick_size, 0.0)
+    if tick <= 0:
+        return None
+    ref = mark_price if mark_price and mark_price > 0 else real_entry
+    adjusted = adjust_trailing_active_price(active_price, real_entry, is_long, ref, tick)
+    if adjusted is None:
+        logger.warning(
+            f"[{event_id}] trailing_stop: REJECT — nie można ustawić "
+            f"{'LONG' if is_long else 'SHORT'} activePrice "
+            f"(active={active_price}, ref={ref}, entry={real_entry}) symbol={symbol}"
+        )
+        return None
+    if adjusted != active_price:
+        logger.info(
+            f"[{event_id}] trailing activePrice adjust "
+            f"{'LONG' if is_long else 'SHORT'}: {active_price} → {adjusted} "
+            f"(ref={ref}, entry={real_entry}) symbol={symbol}"
+        )
+    return round_price_by_tick(adjusted, tick_size, "up" if is_long else "down")
+
+
 def _build_signal_analysis_data(
     signal: AlertData,
     event_id: str,
@@ -364,6 +396,26 @@ def _apply_trailing_stop_for_open_position(
         active_price = round_price_by_tick(raw_active, tick_size, "up")
     else:
         active_price = round_price_by_tick(raw_active, tick_size, "down")
+
+    mark_price = _mark_price_for_symbol(executor, symbol)
+    adjusted_active = _ensure_trailing_active_price_valid_for_bybit(
+        active_price,
+        real_entry,
+        is_long,
+        tick_size,
+        mark_price,
+        order_link_id,
+        symbol,
+    )
+    if adjusted_active is None:
+        log_struct(
+            "warning", "trailing_stop",
+            "activePrice odrzucone przez walidację Bybit — retry w kolejnym cyklu",
+            symbol=symbol, event_id=order_link_id,
+            raw_active=raw_active, mark_price=mark_price, real_entry=real_entry,
+        )
+        return False
+    active_price = adjusted_active
 
     trailing_distance_val = round_price_by_tick(trailing_distance_val, tick_size, "none")
     trailing_distance = _price_api_str(trailing_distance_val)
