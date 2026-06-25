@@ -26,7 +26,7 @@ class OrderFlowBigQueryLogger:
     Logger do BigQuery dla OrderFlow Engine.
     Używa istniejących tabel:
     - market_structure_signals (rozszerzona)
-    - liquidation_events (nowa)
+    - liquidation_events (wyłączone — tabela nie istnieje)
     - dom_events (wyłączone — tabela nie istnieje)
 
     Zapisy (insert_rows_json) wykonywane są w ThreadPoolExecutor — gorąca ścieżka
@@ -126,23 +126,8 @@ class OrderFlowBigQueryLogger:
         _bq_executor.submit(self._do_insert, table_id, row)
 
     def log_liquidation_cascade(self, event_data):
-        """Zapisuje liquidation cascade event (NOWA TABELA)"""
-        if self.client is None:
-            logger.warning("[BQ] BigQuery client not available, skipping.")
-            return
-        table_id = f"{self.dataset}.liquidation_events"
-
-        row = {
-            'event_id': event_data.get('event_id'),
-            'symbol': event_data['symbol'],
-            'cascade_type': event_data['cascade_type'],
-            'total_volume_usd': event_data['total_volume_usd'],
-            'dominant_volume_usd': event_data.get('dominant_volume_usd', 0),
-            'count': event_data['count'],
-            'timestamp': datetime.utcnow()
-        }
-
-        _bq_executor.submit(self._do_insert, table_id, row)
+        """Wyłączone — tabela liquidation_events nie istnieje (stara telemetria)."""
+        return
 
     def log_dom_wall(self, wall_data):
         """Wyłączone — tabela dom_events nie istnieje (stara telemetria)."""

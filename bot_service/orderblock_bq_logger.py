@@ -11,6 +11,7 @@ from typing import Any, Dict, Optional
 
 from shared_lib import constants
 from shared_lib.orderblock_bq import (
+    coerce_raw_context_dict,
     insert_orderblock_rows,
     outcome_from_net_pnl,
     round_bq_float,
@@ -39,6 +40,15 @@ def _submit_row(row: dict) -> None:
 
 
 def _do_insert(client: Any, table_id: str, row: dict) -> None:
+    rc = row.get("raw_context")
+    if rc is not None and not isinstance(rc, dict):
+        logger.error(
+            "[OB-BQ] raw_context musi być dict (otrzymano %s) — pomijam insert chain=%s type=%s",
+            type(rc).__name__,
+            row.get("chain_id"),
+            row.get("event_type"),
+        )
+        return
     try:
         errors = insert_orderblock_rows(client, table_id, [row])
         if errors:
@@ -91,11 +101,11 @@ def log_order_placed(
         "delta": mf.get("delta") or mf.get("delta_last"),
         "trade_event_id": event_id,
         "trade_order_id": order_id,
-        "raw_context": {
+        "raw_context": coerce_raw_context_dict({
             "source": "bot_service",
             "trade_event_id": event_id,
             "order_id": order_id,
-        },
+        }),
     }
     _submit_row(row)
 
@@ -137,7 +147,7 @@ def log_trade_outcome(
         "risk_ob": round_bq_float(risk_ob),
         "trade_event_id": trade_event_id,
         "trade_order_id": trade_order_id,
-        "raw_context": {
+        "raw_context": coerce_raw_context_dict({
             "source": "pnl_logger_real",
             "trade_event_id": trade_event_id,
             "trade_order_id": trade_order_id,
@@ -145,7 +155,7 @@ def log_trade_outcome(
             "net_pnl_usdt": round_bq_float(net_pnl_usdt),
             "avg_entry_price": round_bq_float(avg_entry_price),
             "avg_exit_price": round_bq_float(avg_exit_price),
-        },
+        }),
     }
     _submit_row(row)
 

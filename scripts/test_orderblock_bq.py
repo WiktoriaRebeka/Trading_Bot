@@ -53,6 +53,30 @@ def test_sanitize_orderblock_row():
     assert row["raw_context"]["meta"] == 2.0
 
 
+def test_order_placed_row_raw_context_dict():
+    row = sanitize_orderblock_row({
+        "event_id": "e2",
+        "event_type": "ORDER_PLACED",
+        "symbol": "AVAXUSDT",
+        "event_ts": "2024-01-15T10:30:00Z",
+        "chain_id": "AVAXUSDT-1782337020000-1",
+        "ob_id": "AVAXUSDT-1782337020000-1",
+        "ob_direction": "SHORT",
+        "entry_limit": 6.356,
+        "sl": 6.384,
+        "risk_ob": 0.028,
+        "trade_event_id": "AVAXUSDT-1782337020000-1",
+        "trade_order_id": "484af99b-9ca9-4115-93b2-e262a4c45673",
+        "raw_context": {
+            "source": "bot_service",
+            "trade_event_id": "AVAXUSDT-1782337020000-1",
+            "order_id": "484af99b-9ca9-4115-93b2-e262a4c45673",
+        },
+    })
+    assert isinstance(row["raw_context"], dict)
+    assert row["raw_context"]["source"] == "bot_service"
+
+
 def test_outcome_from_pnl():
     assert outcome_from_net_pnl(1.5) == "WIN"
     assert outcome_from_net_pnl(-0.1) == "LOSS"
@@ -65,5 +89,6 @@ if __name__ == "__main__":
     test_raw_context_invalid_string()
     test_raw_context_keeps_dict()
     test_sanitize_orderblock_row()
+    test_order_placed_row_raw_context_dict()
     test_outcome_from_pnl()
     print("OK — test_orderblock_bq")

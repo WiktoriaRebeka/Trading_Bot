@@ -475,8 +475,9 @@ class OrderFlowMetrics:
         liqs = self.liquidations.get(symbol, [])
         if not liqs: return
         total = sum([e.value_usd for e in liqs])
+        # Kaskady likwidacji nadal w buforze in-memory (footprint); bez zapisu do BQ (tabela nie istnieje).
         if total > self.LIQUIDATION_CASCADE_THRESHOLD_USD:
-            self.bq_logger.log_liquidation_cascade({'event_id': f"LIQ-{int(time.time())}", 'symbol': symbol, 'cascade_type': 'LONG_CASCADE' if sum([e.value_usd for e in liqs if e.side=='Buy']) > total*0.7 else 'SHORT_CASCADE', 'total_volume_usd': total, 'count': len(liqs)})
+            pass
 
     def get_last_price(self, symbol: str) -> Optional[float]:
         t = self.tickers.get(str(symbol).upper()); return t['price'] if t else None
