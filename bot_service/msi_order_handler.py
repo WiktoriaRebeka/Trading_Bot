@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import replace
 from datetime import datetime, timezone
 from time import perf_counter
 from typing import Any, Dict, Optional
@@ -13,9 +14,9 @@ from shared_lib.models import AlertData
 from shared_lib.firebase_client import get_instrument_rules
 from shared_lib.risk_manager import calculate_position_size, round_qty_by_step
 from shared_lib.ob_execution import (
+    compute_ob_tp,
     setup_from_levels,
     validate_ob_sanity,
-    compute_trailing_levels,
 )
 
 from bot_service import state_manager
@@ -101,7 +102,7 @@ async def handle_msi_ob_limit_signal(
     payload: Dict[str, Any],
     executor: BybitExecutor,
 ) -> None:
-    """Limit GTC + stopLoss, bez fixed TP. Drugi sanity check przed place_order."""
+    """Limit GTC + stopLoss + takeProfit (fixed 2R). Drugi sanity check przed place_order."""
     start_total = perf_counter()
     event_id = str(payload.get("event_id", "unknown"))
     symbol = _normalize_symbol(payload.get("symbol", "unknown"))
@@ -132,14 +133,29 @@ async def handle_msi_ob_limit_signal(
     f_entry = round_price_by_tick(signal.entry, tick_size, "down" if is_long else "up")
     f_sl = round_price_by_tick(signal.sl, tick_size, "up" if is_long else "down")
 
-    setup = setup_from_levels(
-        signal.direction,
-        f_entry,
-        f_sl,
-        chain_id=chain_id,
-        symbol=symbol,
-        ob_high=raw.get("ob_high"),
-        ob_low=raw.get("ob_low"),
+    risk_ob = (
+        float(raw["ob_high"]) - float(raw["ob_low"])
+        if raw.get("ob_high") is not None and raw.get("ob_low") is not None
+        else abs(f_entry - f_sl)
+    )
+    f_tp = round_price_by_tick(
+        compute_ob_tp(f_entry, risk_ob, signal.direction),
+        tick_size,
+        "up" if is_long else "down",
+    )
+
+    setup = replace(
+        setup_from_levels(
+            signal.direction,
+            f_entry,
+            f_sl,
+            chain_id=chain_id,
+            symbol=symbol,
+            ob_high=raw.get("ob_high"),
+            ob_low=raw.get("ob_low"),
+        ),
+        tp=f_tp,
+        risk_ob=risk_ob,
     )
     ok, reason = validate_ob_sanity(setup)
     if not ok:
@@ -152,6 +168,7 @@ async def handle_msi_ob_limit_signal(
             chain_id=chain_id,
             entry=f_entry,
             sl=f_sl,
+            tp=f_tp,
         )
         return
 
@@ -167,11 +184,7 @@ async def handle_msi_ob_limit_signal(
         )
         return
 
-    risk_ob = setup.risk_ob
-    if raw.get("ob_high") is not None and raw.get("ob_low") is not None:
-        risk_ob = float(raw["ob_high"]) - float(raw["ob_low"])
-
-    # Anuluj stare niewypełnione limity (OPEN pozostają — trailing)
+    # Anuluj stare niewypełnione limity MSI (otwarte pozycje mają fixed TP na Bybit)
     n_cancelled = await _cancel_superseded_msi_limits(executor, symbol, event_id)
     if n_cancelled:
         log_struct(
@@ -208,13 +221,6 @@ async def handle_msi_ob_limit_signal(
             )
             return
 
-        raw_2r, _ = compute_trailing_levels(
-            signal.direction, f_entry, risk_ob, fee_adjusted=True,
-        )
-        planned_2r_price = round_price_by_tick(
-            raw_2r, tick_size, "up" if is_long else "down",
-        )
-
         mark_price = await asyncio.to_thread(_mark_price_for_symbol, executor, symbol)
         adjusted_sl = _ensure_sl_valid_for_bybit(
             f_sl, f_entry, is_long, tick_size, mark_price, event_id, symbol,
@@ -223,11 +229,7 @@ async def handle_msi_ob_limit_signal(
             return
         if adjusted_sl != f_sl:
             f_sl = adjusted_sl
-            setup = setup_from_levels(
-                signal.direction, f_entry, f_sl,
-                chain_id=chain_id, symbol=symbol,
-                ob_high=raw.get("ob_high"), ob_low=raw.get("ob_low"),
-            )
+            setup = replace(setup, sl=f_sl)
             ok, reason = validate_ob_sanity(setup)
             if not ok:
                 log_struct(
@@ -249,23 +251,6 @@ async def handle_msi_ob_limit_signal(
                     event_id=event_id,
                 )
                 return
-            sl_distance = abs(f_entry - f_sl)
-            planned_risk_usdt = calculated_qty * sl_distance
-            if planned_risk_usdt > 2.5:
-                log_struct(
-                    "warning",
-                    "msi_signal",
-                    f"REJECT — planned_risk {planned_risk_usdt:.3f} po korekcie SL",
-                    symbol=symbol,
-                    event_id=event_id,
-                )
-                return
-            raw_2r, _ = compute_trailing_levels(
-                signal.direction, f_entry, risk_ob, fee_adjusted=True,
-            )
-            planned_2r_price = round_price_by_tick(
-                raw_2r, tick_size, "up" if is_long else "down",
-            )
 
     except Exception as e:
         logger.error(f"[{event_id}] msi_signal: błąd obliczeń qty symbol={symbol} error={e}")
@@ -278,6 +263,7 @@ async def handle_msi_ob_limit_signal(
         "qty": str(calculated_qty),
         "price": _price_api_str(f_entry),
         "stopLoss": _price_api_str(f_sl),
+        "takeProfit": _price_api_str(f_tp),
         "timeInForce": "GTC",
         "orderLinkId": event_id,
     }
@@ -294,8 +280,8 @@ async def handle_msi_ob_limit_signal(
         "created_at": datetime.now(timezone.utc).isoformat(),
         "planned_entry_price": f_entry,
         "planned_sl_price": f_sl,
-        "planned_tp_price": planned_2r_price,
-        "planned_2r_price": planned_2r_price,
+        "planned_tp_price": f_tp,
+        "planned_2r_price": f_tp,
         "session": signal.session,
         "tick_size": tick_size,
         "signal_mode": "msi_orderblock",
@@ -314,10 +300,11 @@ async def handle_msi_ob_limit_signal(
         chain_id=chain_id,
         entry=f_entry,
         sl=f_sl,
+        tp=f_tp,
     )
 
     analysis_data = _build_signal_analysis_data(
-        signal, event_id, symbol, f_entry, f_sl, planned_2r_price, calculated_qty, sl_distance,
+        signal, event_id, symbol, f_entry, f_sl, f_tp, calculated_qty, sl_distance,
     )
     analysis_data["signal_mode"] = "msi_orderblock"
     analysis_data["chain_id"] = chain_id
@@ -332,6 +319,7 @@ async def handle_msi_ob_limit_signal(
                 order_type="Limit",
                 price=f_entry,
                 stop_loss=f_sl,
+                take_profit=f_tp,
                 time_in_force="GTC",
                 event_id=event_id,
             )
@@ -354,12 +342,13 @@ async def handle_msi_ob_limit_signal(
             log_struct(
                 "info",
                 "msi_place",
-                "Limit GTC + SL wysłany na Bybit demo",
+                "Limit GTC + SL + TP (2R) wysłany na Bybit demo",
                 symbol=symbol,
                 event_id=event_id,
                 order_id=order_result.get("orderId"),
                 entry=f_entry,
                 sl=f_sl,
+                tp=f_tp,
                 qty=calculated_qty,
             )
             mf = signal.market_features if isinstance(signal.market_features, dict) else {}
@@ -369,6 +358,7 @@ async def handle_msi_ob_limit_signal(
                 direction=signal.direction,
                 entry_limit=f_entry,
                 sl=f_sl,
+                tp=f_tp,
                 risk_ob=risk_ob,
                 event_id=event_id,
                 order_id=order_result.get("orderId"),

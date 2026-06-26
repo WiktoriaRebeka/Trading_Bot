@@ -81,6 +81,7 @@ def log_order_placed(
     order_id: Optional[str] = None,
     session: Optional[str] = None,
     market_features: Optional[Dict[str, Any]] = None,
+    tp: Optional[float] = None,
 ) -> None:
     """ORDER_PLACED — faktyczne poziomy po tick rounding (bot_service)."""
     now = datetime.now(timezone.utc)
@@ -110,6 +111,7 @@ def log_order_placed(
             "source": "bot_service",
             "trade_event_id": event_id,
             "order_id": order_id,
+            "planned_tp_price": tp,
         }),
     }
     _submit_row(row)
@@ -130,6 +132,7 @@ def log_trade_outcome(
     exit_type: Optional[str] = None,
     risk_ob: Optional[float] = None,
     session: Optional[str] = None,
+    planned_tp_price: Optional[float] = None,
 ) -> None:
     """TRADE_OUTCOME — link do OB po chain_id (wywołane z pnl_logger_real)."""
     now = datetime.now(timezone.utc)
@@ -160,6 +163,7 @@ def log_trade_outcome(
             "net_pnl_usdt": round_bq_float(net_pnl_usdt),
             "avg_entry_price": round_bq_float(avg_entry_price),
             "avg_exit_price": round_bq_float(avg_exit_price),
+            "planned_tp_price": round_bq_float(planned_tp_price),
         }),
     }
     _submit_row(row)

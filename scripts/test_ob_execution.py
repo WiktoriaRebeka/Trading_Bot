@@ -15,6 +15,7 @@ from shared_lib.ob_execution import (
     ROUND_TRIP_FEE_PCT,
     build_ob_trade_setup,
     compute_ob_entry_sl,
+    compute_ob_tp,
     compute_trailing_levels,
     passes_min_ob_height,
     resolve_trailing_r,
@@ -42,6 +43,8 @@ def test_long_entry_sl():
     assert s.entry_limit == 100.5
     assert s.sl == 100.0
     assert math.isclose(s.risk_ob, 0.5)
+    expected_tp = 100.5 + 2 * 0.5 + 100.5 * ROUND_TRIP_FEE_PCT
+    assert math.isclose(s.tp, expected_tp)
     ok, _ = validate_ob_sanity(s)
     assert ok
 
@@ -53,8 +56,34 @@ def test_short_entry_sl():
     assert s.entry_limit == 99.0
     assert s.sl == 99.8
     assert math.isclose(s.risk_ob, 0.8)
+    expected_tp = 99.0 - 2 * 0.8 - 99.0 * ROUND_TRIP_FEE_PCT
+    assert math.isclose(s.tp, expected_tp)
     ok, _ = validate_ob_sanity(s)
     assert ok
+
+
+def test_compute_ob_tp_long_short():
+    entry = 100.0
+    r = 0.5
+    assert math.isclose(
+        compute_ob_tp(entry, r, "LONG"),
+        entry + 2 * r + entry * ROUND_TRIP_FEE_PCT,
+    )
+    assert math.isclose(
+        compute_ob_tp(entry, r, "SHORT"),
+        entry - 2 * r - entry * ROUND_TRIP_FEE_PCT,
+    )
+
+
+def test_sanity_rejects_bad_tp_order():
+    ob = _make_ob("LONG", low=100.0, high=100.5)
+    s = compute_ob_entry_sl(ob)
+    from dataclasses import replace
+
+    bad_tp = replace(s, tp=s.entry_limit - 0.01)
+    ok, msg = validate_ob_sanity(bad_tp)
+    assert not ok
+    assert "TP" in msg
 
 
 def test_sanity_rejects_wrong_side():
@@ -134,6 +163,8 @@ def test_resolve_trailing_r_footprint_uses_fill_sl():
 if __name__ == "__main__":
     test_long_entry_sl()
     test_short_entry_sl()
+    test_compute_ob_tp_long_short()
+    test_sanity_rejects_bad_tp_order()
     test_sanity_rejects_wrong_side()
     test_min_height_filter()
     test_build_rejects_tight_ob()

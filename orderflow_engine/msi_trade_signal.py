@@ -42,14 +42,10 @@ def build_msi_ob_alert(
     now = datetime.now(timezone.utc)
     session = get_trading_session(now)
     sl_distance = setup.risk_ob
-    if setup.direction == "LONG":
-        planned_2r = setup.entry_limit + 2 * sl_distance
-    else:
-        planned_2r = setup.entry_limit - 2 * sl_distance
+    planned_tp = setup.tp
+    risk_pct = (sl_distance / setup.entry_limit * 100.0) if setup.entry_limit > 0 else 0.0
 
     market_features: Dict[str, Any] = collect_ob_orderflow_features(processor, sym, setup.direction)
-
-    risk_pct = (sl_distance / setup.entry_limit * 100.0) if setup.entry_limit > 0 else 0.0
 
     return {
         "event_id": event_id,
@@ -59,7 +55,7 @@ def build_msi_ob_alert(
         "direction": setup.direction,
         "entry": setup.entry_limit,
         "sl": setup.sl,
-        "tp": planned_2r,
+        "tp": planned_tp,
         "risk_pct": risk_pct,
         "rr": 2.0,
         "risk_usdt": DEFAULT_RISK_USDT,
@@ -103,12 +99,13 @@ async def send_msi_ob_alert(
 
     sym = alert["symbol"]
     logger.info(
-        "[MSI-TRADE] Wysyłam OB limit alert %s %s chain=%s entry=%s sl=%s event_id=%s",
+        "[MSI-TRADE] Wysyłam OB limit alert %s %s chain=%s entry=%s sl=%s tp=%s event_id=%s",
         sym,
         alert["direction"],
         ob.chain_id,
         alert["entry"],
         alert["sl"],
+        alert["tp"],
         alert["event_id"],
     )
     ok = await send_alert_to_bot(alert)

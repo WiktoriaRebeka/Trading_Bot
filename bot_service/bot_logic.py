@@ -338,9 +338,12 @@ def _apply_trailing_stop_for_open_position(
     pos: Dict[str, Any],
 ) -> bool:
     """
-    Ustawia trailing 1R z aktywacją przy 2R (+ 0.075% fee dla MSI OrderBlock).
-    MSI: R = risk_ob (wysokość strefy OB). Footprint: R = |real_entry − planned_sl|.
+    Ustawia trailing 1R z aktywacją przy 2R (tylko footprint — MSI ma fixed TP).
+    Footprint: R = |real_entry − planned_sl|.
     """
+    if str(data.get("signal_mode", "")).lower() == "msi_orderblock":
+        return False
+
     planned_sl = data.get("planned_sl_price")
     direction = str(data.get("direction", "")).upper()
     if not planned_sl or direction not in ("LONG", "SHORT"):
@@ -767,7 +770,10 @@ def update_filled_orders(executor: BybitExecutor):
                         real_entry=real_entry,
                     )
 
-                    if not data.get('trailing_stop_set'):
+                    if (
+                        not data.get('trailing_stop_set')
+                        and str(data.get("signal_mode", "")).lower() != "msi_orderblock"
+                    ):
                         try:
                             _apply_trailing_stop_for_open_position(
                                 executor, order_link_id, data, symbol, pos,
@@ -794,7 +800,7 @@ def update_filled_orders(executor: BybitExecutor):
         except Exception as e:
             log_struct("error", "updater", "Failed to update placed order", event_id=order_link_id, error=str(e))
 
-    # --- CZĘŚĆ 2: Weryfikacja OPEN vs Bybit + retry trailingu ---
+    # --- CZĘŚĆ 2: Weryfikacja OPEN vs Bybit + retry trailingu (footprint only) ---
     open_docs = list(state_manager.get_orders_by_status('OPEN'))
     log_struct("debug", "updater", "Open orders trailing retry count", count=len(open_docs))
 
@@ -803,6 +809,8 @@ def update_filled_orders(executor: BybitExecutor):
         order_link_id = doc.id
         symbol = data.get('symbol')
         if not symbol:
+            continue
+        if str(data.get("signal_mode", "")).lower() == "msi_orderblock":
             continue
         try:
             pos = call_with_retry(executor.get_position_info, symbol)

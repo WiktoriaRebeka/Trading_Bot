@@ -475,10 +475,14 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
             "realized_r": safe_round(realized_r, 4),
             "alert_entry_price": safe_round(ao.get("planned_entry_price")) if active_order_data else None,
             "alert_sl_price": safe_round(ao.get("planned_sl_price")) if active_order_data else None,
-            "alert_tp_price": safe_round(ao.get("planned_2r_price")) if active_order_data else None,
+            "alert_tp_price": safe_round(
+                ao.get("planned_tp_price") or ao.get("planned_2r_price")
+            ) if active_order_data else None,
             "planned_entry_price": safe_round(ao.get("planned_entry_price")) if active_order_data else None,
             "planned_sl_price": safe_round(ao.get("planned_sl_price")) if active_order_data else None,
-            "planned_2r_price": safe_round(ao.get("planned_2r_price")) if is_matched else None,
+            "planned_2r_price": safe_round(
+                ao.get("planned_tp_price") or ao.get("planned_2r_price")
+            ) if is_matched else None,
             "exit_price_result": safe_round(exit_price_result),
             "event_id": event_id,
             "signal_id": ao.get("signal_id") if active_order_data else None,
@@ -530,6 +534,9 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
                         exit_type=exit_type,
                         risk_ob=risk_ob_out,
                         session=ao.get("session"),
+                        planned_tp_price=safe_round(
+                            ao.get("planned_tp_price") or ao.get("planned_2r_price")
+                        ),
                     )
                 except Exception as ob_exc:
                     logger.error(

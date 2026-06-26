@@ -10,7 +10,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 logger = logging.getLogger(__name__)
 
 MIN_OB_HEIGHT_PCT = 0.002  # 0.2% — poniżej opłaty round-trip (~0.075%) zjadają trade
-ROUND_TRIP_FEE_PCT = 0.00075  # 0.075% — używane przy trailingu (krok 4)
+ROUND_TRIP_FEE_PCT = 0.00075  # 0.075% — fee adjustment na fixed TP 2R (netto po opłatach)
 
 
 @dataclass(frozen=True)
@@ -20,6 +20,7 @@ class ObTradeSetup:
     direction: str  # LONG | SHORT
     entry_limit: float
     sl: float
+    tp: float  # fixed 2R + fee adjustment
     risk_ob: float  # 1R = |entry − SL| = wysokość strefy OB
     ob_high: float
     ob_low: float
@@ -62,6 +63,21 @@ def _ob_symbol(ob: Any, fallback: str = "") -> str:
     return fallback.upper()
 
 
+def compute_ob_tp(entry_limit: float, risk_ob: float, direction: str) -> float:
+    """
+    Fixed Target 2R netto po opłatach.
+    LONG:  entry + 2R + 0.075%×entry
+    SHORT: entry − 2R − 0.075%×entry
+    """
+    fee_adj = entry_limit * ROUND_TRIP_FEE_PCT
+    direction_u = str(direction).upper()
+    if direction_u == "LONG":
+        return entry_limit + 2 * risk_ob + fee_adj
+    if direction_u == "SHORT":
+        return entry_limit - 2 * risk_ob - fee_adj
+    raise ValueError(f"Nieobsługiwany kierunek: {direction_u}")
+
+
 def compute_ob_entry_sl(ob: Any, *, symbol: str = "") -> ObTradeSetup:
     """
     Wylicza entry (Limit) i SL z granic strefy OB.
@@ -86,11 +102,13 @@ def compute_ob_entry_sl(ob: Any, *, symbol: str = "") -> ObTradeSetup:
     ob_height = ob_high - ob_low
     risk_ob = abs(entry_limit - sl)
     ob_height_pct = (ob_height / entry_limit * 100.0) if entry_limit > 0 else 0.0
+    tp = compute_ob_tp(entry_limit, risk_ob, direction)
 
     return ObTradeSetup(
         direction=direction,
         entry_limit=entry_limit,
         sl=sl,
+        tp=tp,
         risk_ob=risk_ob,
         ob_high=ob_high,
         ob_low=ob_low,
@@ -105,7 +123,7 @@ def validate_ob_sanity(setup: ObTradeSetup) -> Tuple[bool, str]:
     """
     Obowiązkowy sanity check (orderflow_engine ORAZ bot_service).
 
-    SHORT: SL > entry.  LONG: SL < entry.  R > 0.
+    SHORT: TP < entry < SL.  LONG: SL < entry < TP.  R > 0.
   """
     if setup.risk_ob <= 0:
         return False, f"risk_ob={setup.risk_ob} <= 0"
@@ -116,11 +134,33 @@ def validate_ob_sanity(setup: ObTradeSetup) -> Tuple[bool, str]:
                 False,
                 f"LONG sanity fail: SL ({setup.sl}) >= entry ({setup.entry_limit})",
             )
+        if setup.tp <= setup.entry_limit:
+            return (
+                False,
+                f"LONG sanity fail: TP ({setup.tp}) <= entry ({setup.entry_limit})",
+            )
+        if not (setup.sl < setup.entry_limit < setup.tp):
+            return (
+                False,
+                f"LONG sanity fail: wymagane SL<entry<TP "
+                f"({setup.sl} < {setup.entry_limit} < {setup.tp})",
+            )
     elif setup.direction == "SHORT":
         if setup.sl <= setup.entry_limit:
             return (
                 False,
                 f"SHORT sanity fail: SL ({setup.sl}) <= entry ({setup.entry_limit})",
+            )
+        if setup.tp >= setup.entry_limit:
+            return (
+                False,
+                f"SHORT sanity fail: TP ({setup.tp}) >= entry ({setup.entry_limit})",
+            )
+        if not (setup.tp < setup.entry_limit < setup.sl):
+            return (
+                False,
+                f"SHORT sanity fail: wymagane TP<entry<SL "
+                f"({setup.tp} < {setup.entry_limit} < {setup.sl})",
             )
     else:
         return False, f"Nieznany kierunek: {setup.direction}"
@@ -186,13 +226,14 @@ def build_ob_trade_setup(
         return None
 
     logger.debug(
-        "%sOB ACCEPTED [%s %s chain=%s] entry=%s sl=%s R=%s height_pct=%.4f%%",
+        "%sOB ACCEPTED [%s %s chain=%s] entry=%s sl=%s tp=%s R=%s height_pct=%.4f%%",
         prefix,
         setup.symbol,
         setup.direction,
         setup.chain_id,
         setup.entry_limit,
         setup.sl,
+        setup.tp,
         setup.risk_ob,
         setup.ob_height_pct,
     )
@@ -217,10 +258,12 @@ def setup_from_levels(
     risk = abs(float(entry_limit) - float(sl))
     entry_f = float(entry_limit)
     height_pct = (height / entry_f * 100.0) if entry_f > 0 else 0.0
+    tp = compute_ob_tp(entry_f, risk, direction_u)
     return ObTradeSetup(
         direction=direction_u,
         entry_limit=entry_f,
         sl=float(sl),
+        tp=tp,
         risk_ob=risk,
         ob_high=hi,
         ob_low=lo,
