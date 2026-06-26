@@ -49,6 +49,11 @@ def _do_insert(client: Any, table_id: str, row: dict) -> None:
             row.get("event_type"),
         )
         return
+    logger.error(
+        "[OB-BQ DEBUG] raw_context type=%s value=%s",
+        type(row.get("raw_context")),
+        repr(row.get("raw_context"))[:200],
+    )
     try:
         errors = insert_orderblock_rows(client, table_id, [row])
         if errors:
