@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from shared_lib.orderblock_bq import (
+    insert_orderblock_rows,
     outcome_from_net_pnl,
     round_bq_float,
     sanitize_orderblock_row,
@@ -83,6 +84,28 @@ def test_outcome_from_pnl():
     assert outcome_from_net_pnl(0.0) == "BREAKEVEN"
 
 
+def test_insert_encodes_raw_context_as_json_string():
+    import json
+    from unittest.mock import MagicMock
+
+    client = MagicMock()
+    client.insert_rows_json.return_value = []
+    insert_orderblock_rows(
+        client,
+        "proj.ds.orderblock_events",
+        [{
+            "event_id": "e1",
+            "event_type": "OB_NEW",
+            "symbol": "BTCUSDT",
+            "event_ts": "2024-01-15T10:30:00Z",
+            "raw_context": {"chain_id": "BTC-1", "meta": 1.5},
+        }],
+    )
+    sent = client.insert_rows_json.call_args[0][1][0]
+    assert isinstance(sent["raw_context"], str)
+    assert json.loads(sent["raw_context"]) == {"chain_id": "BTC-1", "meta": 1.5}
+
+
 if __name__ == "__main__":
     test_round_bq_float_8_places()
     test_raw_context_parses_json_string()
@@ -91,4 +114,5 @@ if __name__ == "__main__":
     test_sanitize_orderblock_row()
     test_order_placed_row_raw_context_dict()
     test_outcome_from_pnl()
+    test_insert_encodes_raw_context_as_json_string()
     print("OK — test_orderblock_bq")

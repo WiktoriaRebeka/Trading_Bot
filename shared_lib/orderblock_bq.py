@@ -191,10 +191,26 @@ def _json_row_default(obj: Any) -> Any:
     raise TypeError(f"Nieobsługiwany typ JSON: {type(obj)}")
 
 
+def _encode_raw_context_for_bq_insert(value: Any) -> Any:
+    """
+    BigQuery streaming insert (insert_rows_json): kolumna JSON wymaga
+    JSON-formatted string, nie zagnieżdżonego dict — inaczej „is not a record”.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False)
+    return json.dumps(value, ensure_ascii=False, default=_json_row_default)
+
+
 def insert_orderblock_rows(client: Any, table_id: str, rows: List[Dict[str, Any]]) -> List[Any]:
     payload = [sanitize_orderblock_row(r) for r in rows]
-    # json round-trip — usuwa typy nieakceptowane przez insert_rows_json (jak w orderflow BQ)
     clean = [json.loads(json.dumps(row, default=_json_row_default)) for row in payload]
+    for row in clean:
+        if "raw_context" in row:
+            row["raw_context"] = _encode_raw_context_for_bq_insert(row.get("raw_context"))
     return client.insert_rows_json(table_id, clean)
 
 
