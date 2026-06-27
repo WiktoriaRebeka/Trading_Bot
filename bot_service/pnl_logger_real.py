@@ -113,10 +113,12 @@ def determine_exit_type(
     tick_tolerance: float,
     net_pnl: Optional[float] = None,
     bybit_close_type: Optional[str] = None,
+    planned_entry_price: Optional[float] = None,
 ) -> Tuple[str, bool]:
     """
     Klasyfikacja wyjścia na podstawie avg_exit_price vs planowane poziomy (tick-size tol).
     Zwraca (exit_type, at_level) — at_level=True gdy exit w tolerancji TP lub SL.
+    Nigdy nie oznacza ręcznego zamknięcia — „Other” = poza planowanymi poziomami.
     """
     side = str(direction).upper()
     tol = tick_tolerance
@@ -150,11 +152,33 @@ def determine_exit_type(
     if sl_hit:
         return "StopLoss", True
 
+    dist_tp = abs(e - tp)
+    dist_sl = abs(e - sl)
+    soft_tol = tol * 5
+    if dist_tp <= dist_sl and dist_tp <= soft_tol:
+        logger.info(
+            f"EXIT SOFT-TP: direction={side}, exit={e}, tp={tp}, sl={sl}, "
+            f"dist_tp={dist_tp}, tol={tol}"
+        )
+        return "TakeProfit", False
+    if dist_sl < dist_tp and dist_sl <= soft_tol:
+        logger.info(
+            f"EXIT SOFT-SL: direction={side}, exit={e}, tp={tp}, sl={sl}, "
+            f"dist_sl={dist_sl}, tol={tol}"
+        )
+        return "StopLoss", False
+
+    if planned_entry_price is not None and abs(e - planned_entry_price) <= soft_tol:
+        logger.info(
+            f"EXIT BREAKEVEN: direction={side}, exit={e}, entry={planned_entry_price}, tol={tol}"
+        )
+        return "Breakeven", False
+
     logger.info(
-        f"EXIT BETWEEN LEVELS: direction={side}, exit={e}, tp={tp}, sl={sl}, "
-        f"tol={tol} → Manual"
+        f"EXIT OTHER (not at TP/SL): direction={side}, exit={e}, tp={tp}, sl={sl}, "
+        f"tol={tol}, bybit={bybit_close_type}"
     )
-    return "Manual", False
+    return "Other", False
 
 
 def _signal_ts_for_bq(value: Any) -> Optional[str]:
@@ -410,12 +434,17 @@ def log_real_trade_result(pnl_data: Dict[str, Any], active_order_data: Optional[
                         tick_tolerance=tick_tol,
                         net_pnl=float(net_pnl),
                         bybit_close_type=bybit_exit_type,
+                        planned_entry_price=(
+                            float(ao["planned_entry_price"])
+                            if ao.get("planned_entry_price") is not None
+                            else None
+                        ),
                     )
                 elif exit_type is None:
                     exit_type = bybit_exit_type
 
         if exit_type == "TakeProfit" and float(net_pnl) < 0:
-            corrected = "StopLoss" if exit_at_level else "Manual"
+            corrected = "StopLoss" if exit_at_level else "Other"
             logger.warning(
                 f"{log_prefix} SANITY: TakeProfit with negative net_pnl={float(net_pnl):.6f} "
                 f"(exit={float(avg_exit_price)}, at_level={exit_at_level}) — correcting to {corrected}"

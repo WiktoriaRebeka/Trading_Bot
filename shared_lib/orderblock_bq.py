@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import json
 import logging
 from datetime import datetime, timezone
 from enum import Enum
@@ -183,9 +184,18 @@ def sanitize_orderblock_row(row: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _json_row_default(obj: Any) -> Any:
+    if isinstance(obj, datetime):
+        dt = obj if obj.tzinfo else obj.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).isoformat()
+    raise TypeError(f"Nieobsługiwany typ JSON: {type(obj)}")
+
+
 def insert_orderblock_rows(client: Any, table_id: str, rows: List[Dict[str, Any]]) -> List[Any]:
     payload = [sanitize_orderblock_row(r) for r in rows]
-    return client.insert_rows_json(table_id, payload)
+    # json round-trip — usuwa typy nieakceptowane przez insert_rows_json (jak w orderflow BQ)
+    clean = [json.loads(json.dumps(row, default=_json_row_default)) for row in payload]
+    return client.insert_rows_json(table_id, clean)
 
 
 def outcome_from_net_pnl(net_pnl: Optional[float]) -> Optional[str]:
