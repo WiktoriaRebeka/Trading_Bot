@@ -67,6 +67,8 @@ class MsiEventLogger:
                 self.log_to_bq = False
 
     def handle_event(self, event: StructureEvent, ob: Optional[OrderBlock] = None) -> None:
+        if event.event_type == "TEMP_UPDATE":
+            return  # wyłączone — telemetria co świeczkę 1M, zaśmieca orderblock_events
         if event.event_type == "OB_NEW" and ob is not None:
             self._log_ob_detected(ob, event)
         else:
