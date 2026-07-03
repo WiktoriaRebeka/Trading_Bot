@@ -175,7 +175,9 @@ def build_market_structure_signal_row(result_data: Dict[str, Any]) -> Dict[str, 
 
 
 def log_analysis_result(result_data: Dict[str, Any]):
-    event_id = result_data.get("event_id", "unknown")
+    from bot_service import state_manager
+
+    event_id = str(result_data.get("event_id") or "unknown")
     mf = result_data.get("market_features") or {}
     logger.info(
         f"[SIGNAL_ANALYTICS][{event_id}] "
@@ -190,6 +192,12 @@ def log_analysis_result(result_data: Dict[str, Any]):
         f"session={result_data.get('session')} "
         f"minute_of_day={result_data.get('minute_of_day')}"
     )
+    if state_manager.is_signal_logged(event_id):
+        logger.info(f"[BQ] market_structure_signals SKIP duplicate event_id={event_id}")
+        return
+    if not state_manager.try_claim_signal_bq_log(event_id):
+        logger.info(f"[BQ] market_structure_signals SKIP concurrent duplicate event_id={event_id}")
+        return
     try:
         if not initialize_bigquery():
             raise RuntimeError("BigQuery nie zainicjalizowane")
@@ -199,10 +207,13 @@ def log_analysis_result(result_data: Dict[str, Any]):
         row = build_market_structure_signal_row(result_data)
         errors = client.insert_rows_json(SIGNALS_TABLE_REF, [row])
         if errors:
+            state_manager.release_signal_bq_log_claim(event_id)
             logger.error(f"[BQ] market_structure_signals insert errors: {errors}")
         else:
+            state_manager.mark_signal_logged(event_id)
             logger.info(f"[BQ] market_structure_signals OK event_id={event_id}")
     except Exception as e:
+        state_manager.release_signal_bq_log_claim(event_id)
         logger.error(f"[BQ] market_structure_signals insert failed: {e}", exc_info=True)
 
 

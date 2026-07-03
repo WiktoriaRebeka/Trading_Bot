@@ -107,6 +107,16 @@ async def handle_msi_ob_limit_signal(
     event_id = str(payload.get("event_id", "unknown"))
     symbol = _normalize_symbol(payload.get("symbol", "unknown"))
 
+    if state_manager.is_signal_logged(event_id):
+        log_struct(
+            "info",
+            "msi_duplicate",
+            "Duplicate alert delivery — signal already logged to BQ, skipping",
+            symbol=symbol,
+            event_id=event_id,
+        )
+        return
+
     try:
         signal = AlertData.model_validate(payload)
     except Exception as e:

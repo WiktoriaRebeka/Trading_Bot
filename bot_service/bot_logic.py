@@ -493,8 +493,14 @@ async def handle_immediate_signal(payload: Dict[str, Any], executor: BybitExecut
         return
 
     start_total = perf_counter()
-    event_id = payload.get("event_id", "unknown")
+    event_id = str(payload.get("event_id", "unknown"))
     symbol = payload.get("symbol", "unknown")
+
+    if state_manager.is_signal_logged(event_id):
+        logger.info(
+            f"[{event_id}] duplicate alert delivery — signal already logged to BQ, skipping"
+        )
+        return
 
     # 1. Walidacja sygnału
     try:

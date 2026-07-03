@@ -190,6 +190,68 @@ def get_latest_active_order_for_symbol(symbol: str, side: str) -> Optional[Dict[
 
 
 # -------------------------
+# Signal dedup helpers (processed_alert_ids — dopiero po sukcesie zapisu do BigQuery)
+# -------------------------
+def _processed_alert_ids_collection():
+    return _get_client().collection(app_constants.PROCESSED_ALERT_IDS_COLLECTION)
+
+
+def is_signal_logged(event_id: Optional[str]) -> bool:
+    """True, jeśli sygnał został już zapisany do market_structure_signals."""
+    if not event_id:
+        return False
+    try:
+        return _processed_alert_ids_collection().document(str(event_id)).get().exists
+    except Exception as e:
+        logger.exception(f"[state_manager] Failed to check processed_alert_ids for {event_id}: {e}")
+        return False
+
+
+def try_claim_signal_bq_log(event_id: str) -> bool:
+    """
+    Atomowo rezerwuje event_id przed insertem do BQ.
+    False = duplikat (już zalogowany lub równoległy insert w toku).
+    """
+    if not event_id:
+        return False
+    doc_ref = _processed_alert_ids_collection().document(str(event_id))
+    transaction = _get_client().transaction()
+
+    @firestore.transactional
+    def _claim(txn, ref):
+        snap = ref.get(transaction=txn)
+        if snap.exists:
+            return False
+        txn.set(ref, {"claimed_at": datetime.now(timezone.utc)})
+        return True
+
+    try:
+        return _claim(transaction, doc_ref)
+    except Exception as e:
+        logger.exception(f"[state_manager] Failed to claim signal BQ log for {event_id}: {e}")
+        return False
+
+
+def mark_signal_logged(event_id: str) -> None:
+    """Wywołuj wyłącznie po udanym insert_rows_json do market_structure_signals."""
+    doc_ref = _processed_alert_ids_collection().document(str(event_id))
+    doc_ref.set({"logged_at": datetime.now(timezone.utc)}, merge=True)
+
+
+def release_signal_bq_log_claim(event_id: str) -> None:
+    """Zwalnia rezerwację po nieudanym insertcie — pozwala na ponowną próbę."""
+    if not event_id:
+        return
+    try:
+        doc_ref = _processed_alert_ids_collection().document(str(event_id))
+        snap = doc_ref.get()
+        if snap.exists and snap.get("logged_at") is None:
+            doc_ref.delete()
+    except Exception as e:
+        logger.exception(f"[state_manager] Failed to release signal BQ claim for {event_id}: {e}")
+
+
+# -------------------------
 # PnL dedup helpers (processed_pnl_ids — dopiero po sukcesie zapisu do BigQuery)
 # -------------------------
 def _processed_pnl_ids_collection():
