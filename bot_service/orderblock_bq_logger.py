@@ -64,6 +64,59 @@ def _do_insert(client: Any, table_id: str, row: dict) -> None:
         logger.error("[OB-BQ] insert failed: %s", e, exc_info=True)
 
 
+def log_rejected_failed_break(
+    *,
+    chain_id: str,
+    symbol: str,
+    direction: str,
+    entry_limit: float,
+    sl: float,
+    risk_ob: float,
+    event_id: str,
+    timestamp_signal: str,
+    session: Optional[str] = None,
+    cooldown_minutes: int = 30,
+    min_low: Optional[float] = None,
+    max_high: Optional[float] = None,
+    market_features: Optional[Dict[str, Any]] = None,
+) -> None:
+    """REJECTED_FAILED_BREAK — cena dotknęła entry_limit w oknie karencji (failed break)."""
+    now = datetime.now(timezone.utc)
+    mf = market_features or {}
+    row = {
+        "event_id": str(uuid.uuid4()),
+        "event_type": "REJECTED_FAILED_BREAK",
+        "symbol": str(symbol).upper().replace(".P", ""),
+        "event_ts": now,
+        "session": session,
+        "minute_of_day": now.hour * 60 + now.minute,
+        "day_of_week": now.weekday(),
+        "ob_id": chain_id,
+        "chain_id": chain_id,
+        "ob_direction": str(direction).upper(),
+        "entry_limit": entry_limit,
+        "sl": sl,
+        "risk_ob": risk_ob,
+        "outcome": "REJECTED_FAILED_BREAK",
+        "matched_liq_volume": mf.get("matched_liq_volume"),
+        "obi": mf.get("obi") or mf.get("obi_value"),
+        "funding_rate": mf.get("funding_rate"),
+        "dom_wall": mf.get("dom_wall") if mf.get("dom_wall") is not None else mf.get("real_wall_detected"),
+        "delta": mf.get("delta") or mf.get("delta_last"),
+        "trade_event_id": event_id,
+        "raw_context": coerce_raw_context_dict({
+            "source": "bot_service",
+            "trade_event_id": event_id,
+            "timestamp_signal": timestamp_signal,
+            "cooldown_minutes": cooldown_minutes,
+            "min_low_in_window": min_low,
+            "max_high_in_window": max_high,
+            "reject_reason": "failed_break_entry_touched",
+        }),
+    }
+    _submit_row(row)
+
+
 def log_order_placed(
     *,
     chain_id: str,

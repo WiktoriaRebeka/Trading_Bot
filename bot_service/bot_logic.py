@@ -726,6 +726,9 @@ def update_filled_orders(executor: BybitExecutor):
     """Cykl zarządzania otwartymi zleceniami i Trailing Stopem."""
     log_struct("debug", "updater", "Cycle started")
 
+    from bot_service.msi_order_handler import process_msi_cooldown_queue
+    process_msi_cooldown_queue(executor)
+
     # --- CZĘŚĆ 1: Obsługa zleceń oczekujących na wejście (status: PLACED) ---
     placed_docs = list(state_manager.get_orders_by_status('PLACED'))
     legacy_docs = list(state_manager.get_orders_without_status())

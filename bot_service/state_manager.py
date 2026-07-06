@@ -153,11 +153,11 @@ def find_active_order_by_details(symbol: str, side: str, qty: float) -> Optional
 
 def get_pending_msi_limit_orders(symbol: str) -> list:
     """
-    Niewypełnione limity MSI (status PLACED lub PLACING) dla symbolu.
+    Niewypełnione limity MSI (PLACED / PLACING / COOLDOWN_PENDING) dla symbolu.
     Nie obejmuje pozycji OPEN — te zostają przy nowym OB.
     """
     sym = str(symbol).upper().replace(".P", "")
-    pending_statuses = {"PLACED", "PLACING"}
+    pending_statuses = {"PLACED", "PLACING", "COOLDOWN_PENDING"}
     results = []
     try:
         for doc in _collection_active_orders().stream():

@@ -411,6 +411,57 @@ class BybitExecutor:
             logger.warning(f"[{symbol}] Nie udało się pobrać ID zlecenia SL: {e}")
             return None
 
+    def get_klines_1m(
+        self,
+        symbol: str,
+        start_ms: int,
+        end_ms: int,
+    ) -> List[Dict[str, Any]]:
+        """
+        Świece 1M z Bybit w [start_ms, end_ms] (ms epoch, UTC).
+        Zwraca listę {ts, open, high, low, close} posortowaną rosnąco po ts.
+        """
+        if start_ms > end_ms:
+            return []
+        api_symbol = symbol.replace(".P", "")
+        by_ts: Dict[int, Dict[str, Any]] = {}
+        cursor_end = end_ms
+
+        while True:
+            params: Dict[str, Any] = {
+                "category": "linear",
+                "symbol": api_symbol,
+                "interval": "1",
+                "start": start_ms,
+                "end": cursor_end,
+                "limit": 200,
+            }
+            result = self._send_request("GET", "/v5/market/kline", params=params)
+            raw_list = result.get("list") or []
+            if not raw_list:
+                break
+
+            for k in raw_list:
+                ts = int(k[0])
+                if ts < start_ms or ts > end_ms:
+                    continue
+                by_ts[ts] = {
+                    "ts": ts,
+                    "open": float(k[1]),
+                    "high": float(k[2]),
+                    "low": float(k[3]),
+                    "close": float(k[4]),
+                }
+
+            if len(raw_list) < 200:
+                break
+            oldest_ts = int(raw_list[-1][0])
+            if oldest_ts <= start_ms:
+                break
+            cursor_end = oldest_ts - 1
+
+        return [by_ts[k] for k in sorted(by_ts)]
+
     def get_latest_prices(self, symbols: List[str]) -> Dict[str, Dict[str, Any]]:
         if not symbols:
             return {}
