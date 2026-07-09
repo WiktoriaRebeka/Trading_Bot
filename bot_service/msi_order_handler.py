@@ -640,7 +640,12 @@ async def _evaluate_cooldown_doc(
         )
         return
 
-    failed, min_low, max_high = cooldown_failed_break(direction, entry_limit, klines)
+    failed, min_low, max_high = cooldown_failed_break(
+        direction,
+        entry_limit,
+        klines,
+        signal_ts_ms=start_ms,
+    )
 
     if failed:
         state_manager.update_active_order(doc_id, {
