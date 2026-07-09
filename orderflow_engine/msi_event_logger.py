@@ -14,7 +14,10 @@ from typing import Any, Optional
 from google.cloud import bigquery
 
 from orderflow_engine.msi_engine import OrderBlock, StructureEvent
-from orderflow_engine.ob_orderflow_snapshot import collect_ob_orderflow_features
+from orderflow_engine.ob_orderflow_snapshot import (
+    collect_ob_orderflow_features,
+    compute_ob_vp_features,
+)
 from orderflow_engine.settings import get_trading_session
 from shared_lib import constants
 from shared_lib.ob_execution import build_ob_trade_setup
@@ -174,6 +177,20 @@ class MsiEventLogger:
         elif event.payload and event.payload.get("chain_id"):
             row["chain_id"] = event.payload.get("chain_id")
             row["ob_id"] = event.payload.get("chain_id")
+
+        if event_type == "OB_NEW":
+            if ob is not None:
+                vp_hi, vp_lo, vp_ts = ob.ob_high, ob.ob_low, ob.candle.ts
+            else:
+                p = event.payload or {}
+                vp_hi, vp_lo = p.get("ob_high"), p.get("ob_low")
+                vp_ts = p.get("ob_candle_ts", event.ts)
+            vp = compute_ob_vp_features(self._processor, sym, vp_hi, vp_lo, vp_ts)
+            rc = row.get("raw_context")
+            if not isinstance(rc, dict):
+                rc = {}
+            rc.update(vp)
+            row["raw_context"] = rc
 
         return row
 

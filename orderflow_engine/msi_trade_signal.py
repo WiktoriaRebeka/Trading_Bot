@@ -10,7 +10,10 @@ from typing import Any, Dict, Optional
 
 from orderflow_engine.bot_sender import send_alert_to_bot
 from orderflow_engine.msi_engine import OrderBlock, StructureEvent
-from orderflow_engine.ob_orderflow_snapshot import collect_ob_orderflow_features
+from orderflow_engine.ob_orderflow_snapshot import (
+    collect_ob_orderflow_features,
+    compute_ob_vp_features,
+)
 from orderflow_engine.settings import get_trading_session
 from shared_lib.ob_execution import build_ob_trade_setup
 from shared_lib.signal_mode import msi_trade_enabled
@@ -46,6 +49,9 @@ def build_msi_ob_alert(
     risk_pct = (sl_distance / setup.entry_limit * 100.0) if setup.entry_limit > 0 else 0.0
 
     market_features: Dict[str, Any] = collect_ob_orderflow_features(processor, sym, setup.direction)
+    vp_features: Dict[str, Any] = compute_ob_vp_features(
+        processor, sym, ob.ob_high, ob.ob_low, ob.candle.ts
+    )
 
     return {
         "event_id": event_id,
@@ -80,6 +86,7 @@ def build_msi_ob_alert(
             "ob_formed_ts": ob.detected_at_ts,
             "is_first_ob": ob.is_first,
             "msi_event_ts": event.ts,
+            **vp_features,
         },
     }
 

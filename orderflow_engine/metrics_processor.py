@@ -19,6 +19,7 @@ from orderflow_engine.risk_levels import calculate_structure_risk_levels
 from orderflow_engine.settings import get_trading_session, settings
 from orderflow_engine.msi_engine import MsiCandle, MsiEngine
 from orderflow_engine.msi_event_logger import MsiEventLogger
+from orderflow_engine.ob_orderflow_snapshot import VP_HISTORY_MAXLEN
 from shared_lib.signal_mode import (
     footprint_alerts_enabled,
     get_signal_mode,
@@ -84,6 +85,9 @@ class OrderFlowMetrics:
             self._msi_sink = MsiEventSink(self.msi_logger, self)
         
         self.trades = defaultdict(lambda: deque(maxlen=20000))
+        # Bufor zamkniętych świec 1M z wolumenem (ts/low/high/volume) — źródło profilu VP wokół OB.
+        # self.trades nie sięga 120 min wstecz dla płynnych symboli, dlatego osobny bufor świecowy.
+        self.candle_vol_history: Dict[str, deque] = defaultdict(lambda: deque(maxlen=VP_HISTORY_MAXLEN))
         self.tickers = {}
         self.liquidations = defaultdict(list)
         self.orderbook_snapshots = {}
@@ -156,6 +160,14 @@ class OrderFlowMetrics:
         for c in history_m1:
             engine.update_candles(c['open'], c['high'], c['low'], c['close'], c['ts'])
             self._feed_msi_candle(symbol, c)
+            # Seed bufora VP z backfillu REST (fetch_history niesie volume=k[5];
+            # ścieżka Firestore ma volume=0, więc profil zapełniamy z REST).
+            self.candle_vol_history[symbol].append({
+                'ts': c['ts'],
+                'low': c['low'],
+                'high': c['high'],
+                'volume': float(c.get('volume', 0.0) or 0.0),
+            })
 
     def process_trade(self, timestamp: int, symbol: str, side: str, qty: float, price: float):
         sym = str(symbol).upper()
@@ -171,6 +183,13 @@ class OrderFlowMetrics:
         if new_candle:
             self.engines[sym].update_candles(new_candle['open'], new_candle['high'], new_candle['low'], new_candle['close'], new_candle['ts'])
             self._feed_msi_candle(sym, new_candle)
+            # Przechwycenie wolumenu zamkniętej świecy do bufora VP (dotąd porzucany przy update_candles).
+            self.candle_vol_history[sym].append({
+                'ts': new_candle['ts'],
+                'low': new_candle['low'],
+                'high': new_candle['high'],
+                'volume': new_candle['volume'],
+            })
         delta, _, _ = self._calculate_delta_window_volumes(sym, 300)
         self.delta_history[sym].append({'price': price, 'delta': delta, 'timestamp': timestamp})
 
