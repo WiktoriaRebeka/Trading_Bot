@@ -26,95 +26,78 @@ logger = logging.getLogger(__name__)
 METRICS_PROCESSOR: OrderFlowMetrics | None = None
 CONTEXT_BUILDER: SignalContextBuilder | None = None
 
+VP_SEED_RETRIES = int(os.environ.get("VP_SEED_RETRIES", "5"))
+VP_SEED_M1_LIMIT = int(os.environ.get("VP_SEED_M1_LIMIT", "280"))
+VP_SEED_CONCURRENCY = int(os.environ.get("VP_SEED_CONCURRENCY", "4"))
+VP_SEED_BACKOFF_SEC = [2, 5, 15, 30, 60]
 
-async def fetch_single_backfill(symbol, processor, backfiller, semaphore):
-    async with semaphore:
-        for attempt in range(3):
+
+async def _fetch_symbol_vp_and_msi(symbol: str, processor: OrderFlowMetrics, backfiller: HistoryBackfiller, semaphore: asyncio.Semaphore) -> None:
+    """
+    Per-symbol: REST M1 → bulk VP seed (priorytet), potem D1 + MSI bootstrap.
+    Retry z backoffem — bez globalnego gather+timeout anulującego symbole.
+    """
+    sym = str(symbol).upper()
+    for attempt in range(VP_SEED_RETRIES):
+        async with semaphore:
             try:
-                r_m1 = await backfiller.fetch_history(symbol, '1', 1000)
-                await asyncio.sleep(0.8)  # Oddech dla Bybit REST (kline) przy równoległym WS
-                r_d1 = await backfiller.fetch_history(symbol, 'D', 365)
-
+                r_m1 = await backfiller.fetch_history(symbol, "1", VP_SEED_M1_LIMIT)
                 if not r_m1.ok or not r_m1.rows:
                     logger.warning(
-                        f"⚠️ Backfill {symbol}: M1 nieudany lub pusty (ok={r_m1.ok}, n={len(r_m1.rows)}), "
-                        f"próba {attempt + 1}/3"
+                        "[VP-SEED] %s M1 pusty/nieudany ok=%s n=%s próba %s/%s",
+                        sym, r_m1.ok, len(r_m1.rows) if r_m1.ok else 0, attempt + 1, VP_SEED_RETRIES,
                     )
-                    await asyncio.sleep(2 * (attempt + 1))
-                    continue
-                if not r_d1.ok or not r_d1.rows:
+                else:
+                    if processor.seed_vp_buffer(symbol, r_m1.rows):
+                        await asyncio.sleep(0.5)
+                        r_d1 = await backfiller.fetch_history(symbol, "D", 365)
+                        if r_d1.ok and r_d1.rows:
+                            processor.bootstrap_msi_structure(symbol, r_m1.rows, r_d1.rows)
+                        else:
+                            processor.bootstrap_msi_structure(symbol, r_m1.rows, [])
+                            logger.warning("[VP-SEED] %s D1 pominięty — MSI z samym M1", sym)
+                        logger.info(
+                            "[VP-SEED] %s OK M1=%d D1=%s",
+                            sym, len(r_m1.rows), len(r_d1.rows) if r_d1.ok else 0,
+                        )
+                        return
                     logger.warning(
-                        f"⚠️ Backfill {symbol}: D1 nieudany lub pusty (ok={r_d1.ok}, n={len(r_d1.rows)}), "
-                        f"próba {attempt + 1}/3"
+                        "[VP-SEED] %s bulk seed niewystarczający próba %s/%s",
+                        sym, attempt + 1, VP_SEED_RETRIES,
                     )
-                    await asyncio.sleep(2 * (attempt + 1))
-                    continue
-
-                processor.pre_load_history(symbol, r_m1.rows, r_d1.rows)
-                logger.info(f"✅ {symbol} Backfill OK (M1={len(r_m1.rows)} D1={len(r_d1.rows)}).")
-                return
             except Exception as e:
                 logger.warning(
-                    f"⚠️ Backfill {symbol} próba {attempt + 1}/3: {type(e).__name__}: {e}",
+                    "[VP-SEED] %s próba %s/%s: %s: %s",
+                    sym, attempt + 1, VP_SEED_RETRIES, type(e).__name__, e,
                     exc_info=True,
                 )
-                await asyncio.sleep(2 * (attempt + 1))
-        logger.error(f"❌ Błąd backfillu {symbol} po 3 próbach (brak poprawnych danych M1/D1).")
+        if attempt + 1 < VP_SEED_RETRIES:
+            backoff = VP_SEED_BACKOFF_SEC[min(attempt, len(VP_SEED_BACKOFF_SEC) - 1)]
+            await asyncio.sleep(backoff)
+    processor.mark_vp_seed_failed(symbol)
+    logger.error("[VP-SEED] %s FAILED po %s próbach — OB_NEW będzie z vp_seed_failed=true", sym, VP_SEED_RETRIES)
 
 
-def _backfill_gather_timeout_sec(num_symbols: int) -> int:
-    raw = os.environ.get("BACKFILL_GATHER_TIMEOUT")
-    if raw is not None and raw.strip().isdigit():
-        return max(60, int(raw))
-    return max(300, min(900, num_symbols * 10))
-
-
-async def run_backfill_in_background(processor: OrderFlowMetrics):
-    semaphore = asyncio.Semaphore(2)  # Bezpieczne tempo dla Bybit
+async def run_vp_seed_parallel(processor: OrderFlowMetrics) -> None:
+    """VP seed + MSI bootstrap per symbol, równolegle z WS (nie czeka na subscribe)."""
     symbols = ALL_SYMBOLS_FOR_WS
-    gather_timeout = _backfill_gather_timeout_sec(len(symbols))
-    logger.info(f"📥 Start Backfill dla {len(symbols)} symboli (timeout gather={gather_timeout}s)...")
-
+    logger.info(
+        "[VP-SEED] Start dla %s symboli (conc=%s, m1_limit=%s, retries=%s)",
+        len(symbols), VP_SEED_CONCURRENCY, VP_SEED_M1_LIMIT, VP_SEED_RETRIES,
+    )
+    semaphore = asyncio.Semaphore(VP_SEED_CONCURRENCY)
     async with HistoryBackfiller() as backfiller:
-        task_objs = [
-            asyncio.create_task(fetch_single_backfill(symbol, processor, backfiller, semaphore))
-            for symbol in symbols
+        tasks = [
+            asyncio.create_task(_fetch_symbol_vp_and_msi(sym, processor, backfiller, semaphore))
+            for sym in symbols
         ]
-        try:
-            results = await asyncio.wait_for(
-                asyncio.gather(*task_objs, return_exceptions=True),
-                timeout=gather_timeout,
-            )
-        except asyncio.TimeoutError:
-            logger.warning(
-                f"⚠️ Backfill timeout po {gather_timeout}s — anulowanie pozostałych tasków, "
-                "system startuje bez pełnej historii"
-            )
-            for t in task_objs:
-                if not t.done():
-                    t.cancel()
-            results = await asyncio.gather(*task_objs, return_exceptions=True)
-            for sym, res in zip(symbols, results):
-                if isinstance(res, asyncio.CancelledError):
-                    logger.debug(f"Backfill {sym}: anulowano (timeout)")
-                elif isinstance(res, BaseException):
-                    logger.error(
-                        f"❌ Backfill task {sym} po anulowaniu: {type(res).__name__}: {res}",
-                        exc_info=(type(res), res, res.__traceback__),
-                    )
-            logger.info("🚀 SYSTEM GOTOWY - Start bez backfillu.")
-            return
-
-        for sym, res in zip(symbols, results):
-            if isinstance(res, asyncio.CancelledError):
-                logger.debug(f"Backfill {sym}: anulowano")
-            elif isinstance(res, BaseException):
-                logger.error(
-                    f"❌ Backfill task wyjątek {sym}: {type(res).__name__}: {res}",
-                    exc_info=(type(res), res, res.__traceback__),
-                )
-
-        logger.info("🚀 SYSTEM GOTOWY - Wszystkie dane załadowane.")
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+    ready = sum(1 for s in symbols if processor.is_vp_seed_ready(s))
+    failed = sum(1 for s in symbols if processor._vp_status(s) == "failed")
+    for sym, res in zip(symbols, results):
+        if isinstance(res, BaseException):
+            logger.error("[VP-SEED] task %s: %s: %s", sym, type(res).__name__, res, exc_info=res)
+    logger.info("[VP-SEED] Zakończono ready=%s failed=%s total=%s", ready, failed, len(symbols))
 
 
 @asynccontextmanager
@@ -140,22 +123,10 @@ async def lifespan(app: FastAPI):
         ws_manager = MultiConnectionWSManager(symbols=ALL_SYMBOLS_FOR_WS, metrics_processor=METRICS_PROCESSOR)
         asyncio.create_task(ws_manager.start_all_connections())
 
-        async def _backfill_after_ws_subscriptions_ready():
-            """
-            Backfill dopiero po pierwszym sukcesie subscribe na każdym połączeniu (lub timeout),
-            żeby REST Bybit nie konkurował z zestawianiem wszystkich WS przy starcie.
-            """
-            timeout = float(os.environ.get("WS_SUBSCRIBE_WAIT_TIMEOUT_SEC", "120"))
-            ok = await ws_manager.wait_until_subscriptions_confirmed(timeout)
-            if ok:
-                logger.info(
-                    "✅ Potwierdzono subskrypcję na wszystkich %s połączeniach WS — start backfillu w tle",
-                    ws_manager.connection_count(),
-                )
-            await run_backfill_in_background(METRICS_PROCESSOR)
+        # VP seed równolegle z WS — bez opóźnienia subscribe, bez globalnego timeoutu.
+        asyncio.create_task(run_vp_seed_parallel(METRICS_PROCESSOR))
 
-        asyncio.create_task(_backfill_after_ws_subscriptions_ready())
-        logger.info("✅ OrderFlow Engine startup complete (WS startuje; backfill po potwierdzeniu subscribe)")
+        logger.info("✅ OrderFlow Engine startup complete (WS + VP seed równolegle)")
     except Exception as e:
         logger.critical(f"💀 STARTUP FAILED: {e}", exc_info=True)
     yield

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import os
 import statistics
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 # --- Volume Profile wokół strefy OB (tylko log, bez gate'u wejścia) ---
 VP_LOOKBACK_CANDLES = int(os.environ.get("VP_LOOKBACK_CANDLES", "120"))
@@ -84,7 +84,56 @@ def _empty_vp(vp_window_candles: int = 0) -> Dict[str, Any]:
         "vp_window_candles": vp_window_candles,
         "ob_zone_bins_covered": 0,
         "ob_zone_in_window": False,
+        "vp_seed_failed": False,
     }
+
+
+def normalize_vol_candle(c: dict) -> Dict[str, Any]:
+    return {
+        "ts": int(c["ts"]),
+        "low": float(c["low"]),
+        "high": float(c["high"]),
+        "volume": float(c.get("volume", 0.0) or 0.0),
+    }
+
+
+def merge_vol_candles(
+    existing: List[Dict[str, Any]],
+    incoming: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Scala świece po ts; przy duplikacie wygrywa wpis z większym volume (live > REST zero)."""
+    by_ts: Dict[int, Dict[str, Any]] = {}
+    for c in existing:
+        row = normalize_vol_candle(c)
+        by_ts[row["ts"]] = row
+    for c in incoming:
+        row = normalize_vol_candle(c)
+        ts = row["ts"]
+        prev = by_ts.get(ts)
+        if prev is None or row["volume"] >= prev["volume"]:
+            by_ts[ts] = row
+    merged = sorted(by_ts.values(), key=lambda x: x["ts"])
+    return merged[-VP_HISTORY_MAXLEN:]
+
+
+def build_ob_vp_context(
+    processor: Any,
+    symbol: str,
+    ob_high: Optional[float],
+    ob_low: Optional[float],
+    ob_candle_ts: Optional[int],
+) -> Dict[str, Any]:
+    """
+    VP do raw_context przy OB_NEW — bez gate'u tradingu.
+    vp_seed_failed=true gdy seed REST pending/failed w momencie OB (jawny filtr SQL).
+    """
+    vp = compute_ob_vp_features(processor, symbol, ob_high, ob_low, ob_candle_ts)
+    sym = str(symbol).upper().replace(".P", "")
+    status = "pending"
+    if processor is not None and hasattr(processor, "vp_seed_status"):
+        status = processor.vp_seed_status.get(sym, "pending")
+    vp["vp_seed_failed"] = status in ("pending", "failed")
+    return vp
 
 
 def compute_ob_vp_features(

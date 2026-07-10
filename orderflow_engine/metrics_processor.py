@@ -4,6 +4,7 @@
 import os
 import time
 import logging
+import threading
 from collections import defaultdict, deque
 from typing import Dict, List, Optional, Tuple, Any, Iterable
 from dataclasses import dataclass
@@ -19,7 +20,13 @@ from orderflow_engine.risk_levels import calculate_structure_risk_levels
 from orderflow_engine.settings import get_trading_session, settings
 from orderflow_engine.msi_engine import MsiCandle, MsiEngine
 from orderflow_engine.msi_event_logger import MsiEventLogger
-from orderflow_engine.ob_orderflow_snapshot import VP_HISTORY_MAXLEN
+from orderflow_engine.ob_orderflow_snapshot import (
+    VP_HISTORY_MAXLEN,
+    VP_LOOKBACK_CANDLES,
+    VP_MIN_CANDLES,
+    merge_vol_candles,
+    normalize_vol_candle,
+)
 from shared_lib.signal_mode import (
     footprint_alerts_enabled,
     get_signal_mode,
@@ -88,6 +95,8 @@ class OrderFlowMetrics:
         # Bufor zamkniętych świec 1M z wolumenem (ts/low/high/volume) — źródło profilu VP wokół OB.
         # self.trades nie sięga 120 min wstecz dla płynnych symboli, dlatego osobny bufor świecowy.
         self.candle_vol_history: Dict[str, deque] = defaultdict(lambda: deque(maxlen=VP_HISTORY_MAXLEN))
+        self.vp_seed_status: Dict[str, str] = {}  # pending | ready | failed
+        self._vp_buf_lock = threading.Lock()
         self.tickers = {}
         self.liquidations = defaultdict(list)
         self.orderbook_snapshots = {}
@@ -151,23 +160,79 @@ class OrderFlowMetrics:
         except Exception as e:
             logger.error("[MSI] on_candle_close failed symbol=%s: %s", symbol, e, exc_info=True)
 
-    def pre_load_history(self, symbol, history_m1, history_d1):
+    def _vp_status(self, symbol: str) -> str:
+        sym = str(symbol).upper()
+        return self.vp_seed_status.get(sym, "pending")
+
+    def is_vp_seed_ready(self, symbol: str) -> bool:
+        return self._vp_status(symbol) == "ready"
+
+    def mark_vp_seed_ready(self, symbol: str) -> None:
+        sym = str(symbol).upper()
+        self.vp_seed_status[sym] = "ready"
+
+    def mark_vp_seed_failed(self, symbol: str) -> None:
+        sym = str(symbol).upper()
+        self.vp_seed_status[sym] = "failed"
+
+    def _set_vol_history_merged(self, symbol: str, merged: List[Dict[str, Any]]) -> None:
+        sym = str(symbol).upper()
+        with self._vp_buf_lock:
+            self.candle_vol_history[sym] = deque(merged, maxlen=VP_HISTORY_MAXLEN)
+
+    def merge_live_vol_candle(self, symbol: str, candle: dict) -> None:
+        """Live zamknięta świeca 1M — merge z REST seedem (dedupe po ts)."""
+        sym = str(symbol).upper()
+        row = normalize_vol_candle(candle)
+        with self._vp_buf_lock:
+            existing = list(self.candle_vol_history[sym])
+            merged = merge_vol_candles(existing, [row])
+            self.candle_vol_history[sym] = deque(merged, maxlen=VP_HISTORY_MAXLEN)
+
+    def seed_vp_buffer(self, symbol: str, rows: List[dict]) -> bool:
+        """
+        Bulk-load ostatnich VP_HISTORY_MAXLEN świec M1 z REST (nie 1000×append).
+        Merge z live już zebranymi od startu WS. Zwraca True gdy bufor spełnia próg seedu.
+        """
+        sym = str(symbol).upper()
+        if not rows:
+            return False
+        tail = rows[-VP_HISTORY_MAXLEN:]
+        incoming = [normalize_vol_candle(c) for c in tail]
+        with self._vp_buf_lock:
+            existing = list(self.candle_vol_history[sym])
+            merged = merge_vol_candles(existing, incoming)
+            self.candle_vol_history[sym] = deque(merged, maxlen=VP_HISTORY_MAXLEN)
+            buf = list(self.candle_vol_history[sym])
+        n_with_vol = sum(1 for c in buf if float(c.get("volume", 0.0) or 0.0) > 0.0)
+        if len(buf) >= VP_LOOKBACK_CANDLES and n_with_vol >= VP_MIN_CANDLES:
+            self.vp_seed_status[sym] = "ready"
+            logger.info(
+                "[VP-SEED] %s ready buf=%d with_volume=%d",
+                sym, len(buf), n_with_vol,
+            )
+            return True
+        logger.warning(
+            "[VP-SEED] %s insufficient after bulk buf=%d with_volume=%d (need >=%d)",
+            sym, len(buf), n_with_vol, VP_LOOKBACK_CANDLES,
+        )
+        return False
+
+    def bootstrap_msi_structure(self, symbol: str, history_m1: List[dict], history_d1: List[dict]) -> None:
+        """Replay MSI / market structure — bez dotykania bufora VP (już zaseedowanego)."""
         symbol = str(symbol).upper()
         engine = self.engines[symbol]
         if history_d1:
-            engine.major_high = max([k['high'] for k in history_d1])
-            engine.major_low = min([k['low'] for k in history_d1])
+            engine.major_high = max([k["high"] for k in history_d1])
+            engine.major_low = min([k["low"] for k in history_d1])
         for c in history_m1:
-            engine.update_candles(c['open'], c['high'], c['low'], c['close'], c['ts'])
+            engine.update_candles(c["open"], c["high"], c["low"], c["close"], c["ts"])
             self._feed_msi_candle(symbol, c)
-            # Seed bufora VP z backfillu REST (fetch_history niesie volume=k[5];
-            # ścieżka Firestore ma volume=0, więc profil zapełniamy z REST).
-            self.candle_vol_history[symbol].append({
-                'ts': c['ts'],
-                'low': c['low'],
-                'high': c['high'],
-                'volume': float(c.get('volume', 0.0) or 0.0),
-            })
+
+    def pre_load_history(self, symbol, history_m1, history_d1):
+        """Kompatybilność: VP bulk seed + MSI bootstrap."""
+        self.seed_vp_buffer(symbol, history_m1)
+        self.bootstrap_msi_structure(symbol, history_m1, history_d1)
 
     def process_trade(self, timestamp: int, symbol: str, side: str, qty: float, price: float):
         sym = str(symbol).upper()
@@ -183,13 +248,7 @@ class OrderFlowMetrics:
         if new_candle:
             self.engines[sym].update_candles(new_candle['open'], new_candle['high'], new_candle['low'], new_candle['close'], new_candle['ts'])
             self._feed_msi_candle(sym, new_candle)
-            # Przechwycenie wolumenu zamkniętej świecy do bufora VP (dotąd porzucany przy update_candles).
-            self.candle_vol_history[sym].append({
-                'ts': new_candle['ts'],
-                'low': new_candle['low'],
-                'high': new_candle['high'],
-                'volume': new_candle['volume'],
-            })
+            self.merge_live_vol_candle(sym, new_candle)
         delta, _, _ = self._calculate_delta_window_volumes(sym, 300)
         self.delta_history[sym].append({'price': price, 'delta': delta, 'timestamp': timestamp})
 
