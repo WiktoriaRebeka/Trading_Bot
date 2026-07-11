@@ -126,6 +126,7 @@ def build_ob_vp_context(
     """
     VP do raw_context przy OB_NEW — bez gate'u tradingu.
     vp_seed_failed=true gdy seed REST pending/failed w momencie OB (jawny filtr SQL).
+    vp_reliable=true gdy ten konkretny pomiast VP jest pełny i policzony (niezależnie od REST).
     """
     vp = compute_ob_vp_features(processor, symbol, ob_high, ob_low, ob_candle_ts)
     sym = str(symbol).upper().replace(".P", "")
@@ -133,6 +134,11 @@ def build_ob_vp_context(
     if processor is not None and hasattr(processor, "vp_seed_status"):
         status = processor.vp_seed_status.get(sym, "pending")
     vp["vp_seed_failed"] = status in ("pending", "failed")
+    vp["vp_reliable"] = (
+        int(vp.get("vp_window_candles") or 0) >= VP_LOOKBACK_CANDLES
+        and vp.get("ob_zone_in_window") is True
+        and vp.get("ob_vp_ratio") is not None
+    )
     return vp
 
 

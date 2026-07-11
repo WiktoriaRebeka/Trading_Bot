@@ -90,10 +90,36 @@ def test_mark_failed_sets_flag():
     assert ctx["vp_seed_failed"] is True
 
 
+def test_vp_reliable_false_with_short_window():
+    """Replay / live przed pełnym oknem — status seedu może być ready, pomiast nie."""
+    p = OrderFlowMetrics()
+    rows = _make_rows(8, start_ts=1_000_000)
+    p.seed_vp_buffer("BTCUSDT", rows)
+    p.vp_seed_status["BTCUSDT"] = "ready"
+    ob_ts = rows[-1]["ts"] + 60_000
+    ctx = build_ob_vp_context(p, "BTCUSDT", 101.0, 99.0, ob_ts)
+    assert ctx["vp_window_candles"] == 8
+    assert ctx["vp_reliable"] is False
+
+
+def test_vp_reliable_true_with_full_window():
+    p = OrderFlowMetrics()
+    rows = _make_rows(VP_LOOKBACK_CANDLES + 10, start_ts=1_000_000)
+    p.seed_vp_buffer("BTCUSDT", rows)
+    ob_ts = rows[-1]["ts"] + 60_000
+    ctx = build_ob_vp_context(p, "BTCUSDT", 101.0, 99.0, ob_ts)
+    assert ctx["vp_window_candles"] >= VP_LOOKBACK_CANDLES
+    assert ctx["ob_zone_in_window"] is True
+    assert ctx["ob_vp_ratio"] is not None
+    assert ctx["vp_reliable"] is True
+
+
 if __name__ == "__main__":
     test_bulk_seed_keeps_tail_not_first_appends()
     test_merge_live_rest_dedupe_prefers_higher_volume()
     test_live_merge_after_seed_preserves_rest_and_adds_new_ts()
     test_vp_seed_failed_flag_pending_and_ready()
     test_mark_failed_sets_flag()
+    test_vp_reliable_false_with_short_window()
+    test_vp_reliable_true_with_full_window()
     print("OK — test_vp_seed")
