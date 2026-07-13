@@ -155,3 +155,100 @@ class HistoryBackfiller:
         except Exception as e:
             logger.error(f"❌ Błąd backfillu dla {symbol}: {type(e).__name__}: {e}", exc_info=True)
         return FetchHistoryResult([], False)
+
+    async def fetch_klines_1m_paginated(
+        self,
+        symbol: str,
+        *,
+        end_ms: int,
+        total_candles: int,
+    ) -> FetchHistoryResult:
+        """
+        Świece 1M z volume, kończące się na end_ms (detected_at_ts).
+        Paginacja gdy total_candles > 1000 (limit Bybit).
+        Zwraca rows posortowane rosnąco; ok=True gdy len(rows) >= total_candles.
+        """
+        if self._session is None:
+            raise RuntimeError("HistoryBackfiller wymaga async with przed fetch_klines_1m_paginated")
+
+        sym_api = str(symbol).replace(".P", "").upper()
+        if total_candles <= 0:
+            return FetchHistoryResult([], False)
+
+        by_ts: dict[int, dict[str, Any]] = {}
+        cursor_end = int(end_ms)
+        start_target = cursor_end - (total_candles - 1) * 60_000
+        max_pages = (total_candles + 999) // 1000 + 2
+
+        for _ in range(max_pages):
+            if len(by_ts) >= total_candles:
+                break
+            remaining = total_candles - len(by_ts)
+            limit = min(1000, max(remaining, 200))
+            params = {
+                "category": "linear",
+                "symbol": sym_api,
+                "interval": "1",
+                "end": cursor_end,
+                "limit": limit,
+            }
+            try:
+                async with self._session.get(self.endpoint, params=params) as response:
+                    if response.status == 429:
+                        logger.warning("[VP-FETCH] %s rate limit HTTP 429 end=%s", sym_api, cursor_end)
+                        return FetchHistoryResult(
+                            sorted(by_ts.values(), key=lambda r: r["ts"])[-total_candles:],
+                            False,
+                        )
+                    if response.status != 200:
+                        logger.error(
+                            "[VP-FETCH] %s HTTP %s end=%s",
+                            sym_api, response.status, cursor_end,
+                        )
+                        break
+                    data = await response.json()
+            except (TimeoutError, aiohttp.ClientError) as e:
+                logger.warning(
+                    "[VP-FETCH] %s błąd HTTP end=%s: %s: %s",
+                    sym_api, cursor_end, type(e).__name__, e,
+                )
+                break
+
+            if data.get("retCode") != 0 or not data.get("result"):
+                logger.warning(
+                    "[VP-FETCH] %s retCode=%s retMsg=%s",
+                    sym_api, data.get("retCode"), data.get("retMsg"),
+                )
+                break
+
+            raw_list = data["result"]["list"] or []
+            if not raw_list:
+                break
+
+            oldest_ts = None
+            for k in raw_list:
+                ts = int(k[0])
+                if ts > cursor_end:
+                    continue
+                oldest_ts = ts if oldest_ts is None else min(oldest_ts, ts)
+                by_ts[ts] = {
+                    "ts": ts,
+                    "open": float(k[1]),
+                    "high": float(k[2]),
+                    "low": float(k[3]),
+                    "close": float(k[4]),
+                    "volume": float(k[5]),
+                }
+
+            if oldest_ts is None:
+                break
+            if len(raw_list) < limit:
+                break
+            if oldest_ts <= start_target:
+                break
+            cursor_end = oldest_ts - 60_000
+
+        rows = sorted(by_ts.values(), key=lambda r: r["ts"])
+        rows = [r for r in rows if r["ts"] <= end_ms][-total_candles:]
+        ok = len(rows) >= total_candles
+        return FetchHistoryResult(rows, ok)

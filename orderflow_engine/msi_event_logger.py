@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -16,7 +17,7 @@ from google.cloud import bigquery
 from orderflow_engine.msi_engine import OrderBlock, StructureEvent
 from orderflow_engine.ob_orderflow_snapshot import (
     collect_ob_orderflow_features,
-    build_ob_vp_context,
+    empty_dual_vp_context,
 )
 from orderflow_engine.settings import get_trading_session
 from shared_lib import constants
@@ -50,8 +51,14 @@ def _ts_ms_to_datetime(ts_ms: int) -> datetime:
 class MsiEventLogger:
     """Zapisuje eventy MSI do logów i BigQuery orderblock_events."""
 
-    def __init__(self, project_id: Optional[str] = None, processor: Any = None):
+    def __init__(
+        self,
+        project_id: Optional[str] = None,
+        processor: Any = None,
+        vp_fetcher: Any = None,
+    ):
         self._processor = processor
+        self._vp_fetcher = vp_fetcher
         self.log_to_bq = os.environ.get("MSI_LOG_TO_BQ", "true").strip().lower() in (
             "1",
             "true",
@@ -68,6 +75,9 @@ class MsiEventLogger:
             except Exception as e:
                 logger.error("[MSI] BigQuery init failed: %s — file/log only", e)
                 self.log_to_bq = False
+
+    def set_vp_fetcher(self, vp_fetcher: Any) -> None:
+        self._vp_fetcher = vp_fetcher
 
     def handle_event(self, event: StructureEvent, ob: Optional[OrderBlock] = None) -> None:
         if event.event_type == "TEMP_UPDATE":
@@ -111,13 +121,44 @@ class MsiEventLogger:
             f"is_first={ob.is_first}{extra}"
         )
         logger.info(msg)
-        self._persist_row(self._build_row(event, ob, "OB_NEW"))
+        self._schedule_vp_bq_persist(ob, event)
+
+    def _schedule_vp_bq_persist(self, ob: OrderBlock, event: StructureEvent) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self._persist_ob_with_vp(ob, event))
+        except RuntimeError:
+            logger.warning(
+                "[MSI][OB] Brak event loop — BQ bez VP symbol=%s chain=%s",
+                event.symbol,
+                ob.chain_id,
+            )
+            row = self._build_row(event, ob, "OB_NEW", vp_ctx=empty_dual_vp_context())
+            self._persist_row(row)
+
+    async def _persist_ob_with_vp(self, ob: OrderBlock, event: StructureEvent) -> None:
+        vp_ctx = empty_dual_vp_context()
+        sym = str(event.symbol).upper().replace(".P", "")
+        if self._vp_fetcher is not None:
+            try:
+                vp_ctx = await self._vp_fetcher.fetch_dual_vp(sym, ob.detected_at_ts, ob)
+            except Exception as e:
+                logger.error(
+                    "[MSI][VP] fetch failed symbol=%s chain=%s: %s",
+                    sym,
+                    ob.chain_id,
+                    e,
+                    exc_info=True,
+                )
+        row = self._build_row(event, ob, "OB_NEW", vp_ctx=vp_ctx)
+        self._persist_row(row)
 
     def _build_row(
         self,
         event: StructureEvent,
         ob: Optional[OrderBlock],
         event_type: str,
+        vp_ctx: Optional[Dict[str, Any]] = None,
     ) -> dict:
         dt = _ts_ms_to_datetime(event.ts)
         session = get_trading_session(dt)
@@ -179,13 +220,7 @@ class MsiEventLogger:
             row["ob_id"] = event.payload.get("chain_id")
 
         if event_type == "OB_NEW":
-            if ob is not None:
-                vp_hi, vp_lo, vp_ts = ob.ob_high, ob.ob_low, ob.candle.ts
-            else:
-                p = event.payload or {}
-                vp_hi, vp_lo = p.get("ob_high"), p.get("ob_low")
-                vp_ts = p.get("ob_candle_ts", event.ts)
-            vp = build_ob_vp_context(self._processor, sym, vp_hi, vp_lo, vp_ts)
+            vp = vp_ctx if vp_ctx is not None else empty_dual_vp_context()
             rc = row.get("raw_context")
             if not isinstance(rc, dict):
                 rc = {}

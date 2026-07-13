@@ -4,7 +4,6 @@
 import os
 import time
 import logging
-import threading
 from collections import defaultdict, deque
 from typing import Dict, List, Optional, Tuple, Any, Iterable
 from dataclasses import dataclass
@@ -20,13 +19,6 @@ from orderflow_engine.risk_levels import calculate_structure_risk_levels
 from orderflow_engine.settings import get_trading_session, settings
 from orderflow_engine.msi_engine import MsiCandle, MsiEngine
 from orderflow_engine.msi_event_logger import MsiEventLogger
-from orderflow_engine.ob_orderflow_snapshot import (
-    VP_HISTORY_MAXLEN,
-    VP_LOOKBACK_CANDLES,
-    VP_MIN_CANDLES,
-    merge_vol_candles,
-    normalize_vol_candle,
-)
 from shared_lib.signal_mode import (
     footprint_alerts_enabled,
     get_signal_mode,
@@ -78,25 +70,21 @@ class DOMSnapshot:
     ask_walls: List[OrderBookWall]
 
 class OrderFlowMetrics:
-    def __init__(self, firestore_client=None):
+    def __init__(self, firestore_client=None, vp_fetcher=None):
         self.firestore = firestore_client
+        self.vp_fetcher = vp_fetcher
         self.builders = defaultdict(lambda: CandleBuilder(""))
         self.engines = defaultdict(lambda: MarketStructureEngine(lookback_bars=500))
         self.bq_logger = OrderFlowBigQueryLogger()
         self.scorer = ConfidenceScorer()
-        self.msi_logger = MsiEventLogger(processor=self) if MSI_ENGINE_ENABLED else None
+        self.msi_logger = MsiEventLogger(processor=self, vp_fetcher=vp_fetcher) if MSI_ENGINE_ENABLED else None
         self.msi_engines: Dict[str, MsiEngine] = {}
         self._msi_sink = None
         if MSI_ENGINE_ENABLED and self.msi_logger is not None:
             from orderflow_engine.msi_event_sink import MsiEventSink
-            self._msi_sink = MsiEventSink(self.msi_logger, self)
+            self._msi_sink = MsiEventSink(self.msi_logger, self, vp_fetcher=vp_fetcher)
         
         self.trades = defaultdict(lambda: deque(maxlen=20000))
-        # Bufor zamkniętych świec 1M z wolumenem (ts/low/high/volume) — źródło profilu VP wokół OB.
-        # self.trades nie sięga 120 min wstecz dla płynnych symboli, dlatego osobny bufor świecowy.
-        self.candle_vol_history: Dict[str, deque] = defaultdict(lambda: deque(maxlen=VP_HISTORY_MAXLEN))
-        self.vp_seed_status: Dict[str, str] = {}  # pending | ready | failed
-        self._vp_buf_lock = threading.Lock()
         self.tickers = {}
         self.liquidations = defaultdict(list)
         self.orderbook_snapshots = {}
@@ -139,6 +127,13 @@ class OrderFlowMetrics:
             trade_msg = "trade alerts ON" if msi_trade_enabled() else "trade alerts OFF"
             logger.info("[MSI] Engine enabled (1M structure + %s).", trade_msg)
 
+    def attach_vp_fetcher(self, vp_fetcher) -> None:
+        self.vp_fetcher = vp_fetcher
+        if self.msi_logger is not None:
+            self.msi_logger.set_vp_fetcher(vp_fetcher)
+        if self._msi_sink is not None:
+            self._msi_sink.set_vp_fetcher(vp_fetcher)
+
     def _get_msi_engine(self, symbol: str) -> Optional[MsiEngine]:
         if not MSI_ENGINE_ENABLED or self.msi_logger is None:
             return None
@@ -160,66 +155,8 @@ class OrderFlowMetrics:
         except Exception as e:
             logger.error("[MSI] on_candle_close failed symbol=%s: %s", symbol, e, exc_info=True)
 
-    def _vp_status(self, symbol: str) -> str:
-        sym = str(symbol).upper()
-        return self.vp_seed_status.get(sym, "pending")
-
-    def is_vp_seed_ready(self, symbol: str) -> bool:
-        return self._vp_status(symbol) == "ready"
-
-    def mark_vp_seed_ready(self, symbol: str) -> None:
-        sym = str(symbol).upper()
-        self.vp_seed_status[sym] = "ready"
-
-    def mark_vp_seed_failed(self, symbol: str) -> None:
-        sym = str(symbol).upper()
-        self.vp_seed_status[sym] = "failed"
-
-    def _set_vol_history_merged(self, symbol: str, merged: List[Dict[str, Any]]) -> None:
-        sym = str(symbol).upper()
-        with self._vp_buf_lock:
-            self.candle_vol_history[sym] = deque(merged, maxlen=VP_HISTORY_MAXLEN)
-
-    def merge_live_vol_candle(self, symbol: str, candle: dict) -> None:
-        """Live zamknięta świeca 1M — merge z REST seedem (dedupe po ts)."""
-        sym = str(symbol).upper()
-        row = normalize_vol_candle(candle)
-        with self._vp_buf_lock:
-            existing = list(self.candle_vol_history[sym])
-            merged = merge_vol_candles(existing, [row])
-            self.candle_vol_history[sym] = deque(merged, maxlen=VP_HISTORY_MAXLEN)
-
-    def seed_vp_buffer(self, symbol: str, rows: List[dict]) -> bool:
-        """
-        Bulk-load ostatnich VP_HISTORY_MAXLEN świec M1 z REST (nie 1000×append).
-        Merge z live już zebranymi od startu WS. Zwraca True gdy bufor spełnia próg seedu.
-        """
-        sym = str(symbol).upper()
-        if not rows:
-            return False
-        tail = rows[-VP_HISTORY_MAXLEN:]
-        incoming = [normalize_vol_candle(c) for c in tail]
-        with self._vp_buf_lock:
-            existing = list(self.candle_vol_history[sym])
-            merged = merge_vol_candles(existing, incoming)
-            self.candle_vol_history[sym] = deque(merged, maxlen=VP_HISTORY_MAXLEN)
-            buf = list(self.candle_vol_history[sym])
-        n_with_vol = sum(1 for c in buf if float(c.get("volume", 0.0) or 0.0) > 0.0)
-        if len(buf) >= VP_LOOKBACK_CANDLES and n_with_vol >= VP_MIN_CANDLES:
-            self.vp_seed_status[sym] = "ready"
-            logger.info(
-                "[VP-SEED] %s ready buf=%d with_volume=%d",
-                sym, len(buf), n_with_vol,
-            )
-            return True
-        logger.warning(
-            "[VP-SEED] %s insufficient after bulk buf=%d with_volume=%d (need >=%d)",
-            sym, len(buf), n_with_vol, VP_LOOKBACK_CANDLES,
-        )
-        return False
-
     def bootstrap_msi_structure(self, symbol: str, history_m1: List[dict], history_d1: List[dict]) -> None:
-        """Replay MSI / market structure — bez dotykania bufora VP (już zaseedowanego)."""
+        """Replay MSI / market structure z historii REST."""
         symbol = str(symbol).upper()
         engine = self.engines[symbol]
         if history_d1:
@@ -230,8 +167,7 @@ class OrderFlowMetrics:
             self._feed_msi_candle(symbol, c)
 
     def pre_load_history(self, symbol, history_m1, history_d1):
-        """Kompatybilność: VP bulk seed + MSI bootstrap."""
-        self.seed_vp_buffer(symbol, history_m1)
+        """Kompatybilność: MSI bootstrap z historii."""
         self.bootstrap_msi_structure(symbol, history_m1, history_d1)
 
     def process_trade(self, timestamp: int, symbol: str, side: str, qty: float, price: float):
@@ -248,7 +184,6 @@ class OrderFlowMetrics:
         if new_candle:
             self.engines[sym].update_candles(new_candle['open'], new_candle['high'], new_candle['low'], new_candle['close'], new_candle['ts'])
             self._feed_msi_candle(sym, new_candle)
-            self.merge_live_vol_candle(sym, new_candle)
         delta, _, _ = self._calculate_delta_window_volumes(sym, 300)
         self.delta_history[sym].append({'price': price, 'delta': delta, 'timestamp': timestamp})
 

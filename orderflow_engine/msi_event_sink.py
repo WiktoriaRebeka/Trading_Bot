@@ -21,9 +21,13 @@ logger = logging.getLogger(__name__)
 class MsiEventSink:
     """Sink dla MsiEngine: log + opcjonalnie trade alert na OB_NEW."""
 
-    def __init__(self, msi_logger: MsiEventLogger, processor):
+    def __init__(self, msi_logger: MsiEventLogger, processor, vp_fetcher=None):
         self._logger = msi_logger
         self._processor = processor
+        self._vp_fetcher = vp_fetcher
+
+    def set_vp_fetcher(self, vp_fetcher) -> None:
+        self._vp_fetcher = vp_fetcher
 
     def handle_event(self, event: StructureEvent, ob: Optional[OrderBlock] = None) -> None:
         """Spójny interfejs z MsiEventLogger — używany przez MsiEngine.on_event."""
@@ -65,7 +69,9 @@ class MsiEventSink:
     def _schedule_trade_alert(self, ob: OrderBlock, event: StructureEvent) -> None:
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(send_msi_ob_alert(ob, event, self._processor))
+            loop.create_task(
+                send_msi_ob_alert(ob, event, self._processor, vp_fetcher=self._vp_fetcher)
+            )
         except RuntimeError:
             logger.warning(
                 "[MSI-TRADE] Brak running event loop — OB alert nie wysłany symbol=%s chain=%s",

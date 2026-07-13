@@ -12,7 +12,7 @@ from orderflow_engine.bot_sender import send_alert_to_bot
 from orderflow_engine.msi_engine import OrderBlock, StructureEvent
 from orderflow_engine.ob_orderflow_snapshot import (
     collect_ob_orderflow_features,
-    build_ob_vp_context,
+    empty_dual_vp_context,
 )
 from orderflow_engine.settings import get_trading_session
 from shared_lib.ob_execution import build_ob_trade_setup
@@ -34,6 +34,7 @@ def build_msi_ob_alert(
     ob: OrderBlock,
     event: StructureEvent,
     processor: Any,
+    vp_ctx: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Buduje payload alertu dla bot_service z OB + filtr entry/SL."""
     sym = str(event.symbol).upper().replace(".P", "")
@@ -49,9 +50,7 @@ def build_msi_ob_alert(
     risk_pct = (sl_distance / setup.entry_limit * 100.0) if setup.entry_limit > 0 else 0.0
 
     market_features: Dict[str, Any] = collect_ob_orderflow_features(processor, sym, setup.direction)
-    vp_features: Dict[str, Any] = build_ob_vp_context(
-        processor, sym, ob.ob_high, ob.ob_low, ob.candle.ts
-    )
+    vp_features: Dict[str, Any] = vp_ctx if vp_ctx is not None else empty_dual_vp_context()
 
     return {
         "event_id": event_id,
@@ -95,16 +94,30 @@ async def send_msi_ob_alert(
     ob: OrderBlock,
     event: StructureEvent,
     processor: Any,
+    vp_fetcher: Any = None,
 ) -> bool:
     if not MSI_TRADE_ENABLED:
         logger.debug("[MSI-TRADE] MSI_TRADE_ENABLED=false — pomijam alert OB")
         return False
 
-    alert = build_msi_ob_alert(ob, event, processor)
+    vp_ctx = empty_dual_vp_context()
+    sym = str(event.symbol).upper().replace(".P", "")
+    if vp_fetcher is not None:
+        try:
+            vp_ctx = await vp_fetcher.fetch_dual_vp(sym, ob.detected_at_ts, ob)
+        except Exception as e:
+            logger.error(
+                "[MSI-TRADE][VP] fetch failed symbol=%s chain=%s: %s",
+                sym,
+                ob.chain_id,
+                e,
+                exc_info=True,
+            )
+
+    alert = build_msi_ob_alert(ob, event, processor, vp_ctx=vp_ctx)
     if alert is None:
         return False
 
-    sym = alert["symbol"]
     logger.info(
         "[MSI-TRADE] Wysyłam OB limit alert %s %s chain=%s entry=%s sl=%s tp=%s event_id=%s",
         sym,
