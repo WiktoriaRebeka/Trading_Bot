@@ -10,6 +10,7 @@ sys.path.insert(0, str(ROOT))
 
 from orderflow_engine.msi_engine import MsiCandle, OrderBlock, StructureEvent
 from orderflow_engine.msi_trade_signal import build_msi_ob_alert, msi_order_event_id
+from shared_lib.ob_execution import compute_ob_tp
 
 
 def _ob(direction: str, low: float, high: float) -> OrderBlock:
@@ -35,7 +36,7 @@ def test_long_alert_geometry():
     assert alert["time_in_force"] == "GTC"
     assert alert["entry"] == 100.5
     assert alert["sl"] == 100.0
-    assert math.isclose(alert["tp"], 101.5)
+    assert math.isclose(alert["tp"], compute_ob_tp(alert["entry"], alert["raw_context"]["risk_ob"], "LONG"))
     assert alert["event_id"] == msi_order_event_id(ob.chain_id)
 
 
@@ -46,7 +47,7 @@ def test_short_alert_geometry():
     assert alert is not None
     assert alert["entry"] == 99.0
     assert alert["sl"] == 99.8
-    assert math.isclose(alert["tp"], 97.4)
+    assert math.isclose(alert["tp"], compute_ob_tp(alert["entry"], alert["raw_context"]["risk_ob"], "SHORT"))
 
 
 def test_tight_ob_rejected():

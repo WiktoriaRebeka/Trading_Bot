@@ -75,6 +75,14 @@ def test_compute_ob_tp_long_short():
     )
 
 
+def test_compute_ob_tp_canonical_ob_100_101():
+    """Kanoniczna geometria OB 100-101: entry/SL/risk i TP z fee adjustment."""
+    # LONG: entry=ob_high=101, SL=ob_low=100, risk=1
+    assert math.isclose(compute_ob_tp(101.0, 1.0, "LONG"), 103.07575)
+    # SHORT: entry=ob_low=100, SL=ob_high=101, risk=1
+    assert math.isclose(compute_ob_tp(100.0, 1.0, "SHORT"), 97.925)
+
+
 def test_sanity_rejects_bad_tp_order():
     ob = _make_ob("LONG", low=100.0, high=100.5)
     s = compute_ob_entry_sl(ob)
@@ -164,6 +172,7 @@ if __name__ == "__main__":
     test_long_entry_sl()
     test_short_entry_sl()
     test_compute_ob_tp_long_short()
+    test_compute_ob_tp_canonical_ob_100_101()
     test_sanity_rejects_bad_tp_order()
     test_sanity_rejects_wrong_side()
     test_min_height_filter()
