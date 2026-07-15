@@ -315,8 +315,9 @@ def compute_horizon_vp(
         or out.get(f"{prefix}sl_vp_ratio") is not None
         or out.get(f"{prefix}entry_vp_ratio") is not None
     )
+    # Twarda reguła: pełne okno albo reliable=false — nigdy „prawie” (np. 340/1440).
     out[f"{prefix}vp_reliable"] = (
-        n >= required_candles
+        n == required_candles
         and vp_median > 0.0
         and ratios_ok
     )

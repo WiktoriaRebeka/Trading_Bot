@@ -14,6 +14,11 @@ class FetchHistoryResult(NamedTuple):
     """Jawny status backfillu: rows + ok (True tylko przy sukcesie z niepustymi świecami)."""
     rows: List[dict[str, Any]]
     ok: bool
+    rate_limited: bool = False
+
+
+# Bybit: HTTP 429 lub retCode 10006 ("Too many visits") → retry u callera, nie „brak danych”.
+BYBIT_RATE_LIMIT_RETCODES = frozenset({10006})
 
 
 class HistoryBackfiller:
@@ -156,17 +161,29 @@ class HistoryBackfiller:
             logger.error(f"❌ Błąd backfillu dla {symbol}: {type(e).__name__}: {e}", exc_info=True)
         return FetchHistoryResult([], False)
 
+    def _partial_vp_rows(
+        self,
+        by_ts: dict[int, dict[str, Any]],
+        *,
+        end_ms: int,
+        total_candles: int,
+    ) -> List[dict[str, Any]]:
+        rows = sorted(by_ts.values(), key=lambda r: r["ts"])
+        return [r for r in rows if r["ts"] <= end_ms][-total_candles:]
+
     async def fetch_klines_1m_paginated(
         self,
         symbol: str,
         *,
         end_ms: int,
         total_candles: int,
+        rate_limiter: Any = None,
     ) -> FetchHistoryResult:
         """
         Świece 1M z volume, kończące się na end_ms (detected_at_ts).
         Paginacja gdy total_candles > 1000 (limit Bybit).
         Zwraca rows posortowane rosnąco; ok=True gdy len(rows) >= total_candles.
+        rate_limited=True przy HTTP 429 lub retCode 10006 — caller ma retry + backoff.
         """
         if self._session is None:
             raise RuntimeError("HistoryBackfiller wymaga async with przed fetch_klines_1m_paginated")
@@ -192,14 +209,18 @@ class HistoryBackfiller:
                 "end": cursor_end,
                 "limit": limit,
             }
+            if rate_limiter is not None:
+                await rate_limiter.acquire()
             try:
                 async with self._session.get(self.endpoint, params=params) as response:
                     if response.status == 429:
-                        logger.warning("[VP-FETCH] %s rate limit HTTP 429 end=%s", sym_api, cursor_end)
-                        return FetchHistoryResult(
-                            sorted(by_ts.values(), key=lambda r: r["ts"])[-total_candles:],
-                            False,
+                        n_partial = len(by_ts)
+                        logger.warning(
+                            "[VP-FETCH] %s rate limit HTTP 429 end=%s discarded_partial_n=%s",
+                            sym_api, cursor_end, n_partial,
                         )
+                        # Partial tylko do logu — caller dostaje puste rows + rate_limited.
+                        return FetchHistoryResult([], False, True)
                     if response.status != 200:
                         logger.error(
                             "[VP-FETCH] %s HTTP %s end=%s",
@@ -214,10 +235,20 @@ class HistoryBackfiller:
                 )
                 break
 
-            if data.get("retCode") != 0 or not data.get("result"):
+            ret_code = data.get("retCode")
+            if ret_code in BYBIT_RATE_LIMIT_RETCODES:
+                n_partial = len(by_ts)
+                logger.warning(
+                    "[VP-FETCH] %s rate limit retCode=%s retMsg=%s end=%s "
+                    "discarded_partial_n=%s",
+                    sym_api, ret_code, data.get("retMsg"), cursor_end, n_partial,
+                )
+                # Partial tylko do logu — caller dostaje puste rows + rate_limited.
+                return FetchHistoryResult([], False, True)
+            if ret_code != 0 or not data.get("result"):
                 logger.warning(
                     "[VP-FETCH] %s retCode=%s retMsg=%s",
-                    sym_api, data.get("retCode"), data.get("retMsg"),
+                    sym_api, ret_code, data.get("retMsg"),
                 )
                 break
 
@@ -248,7 +279,6 @@ class HistoryBackfiller:
                 break
             cursor_end = oldest_ts - 60_000
 
-        rows = sorted(by_ts.values(), key=lambda r: r["ts"])
-        rows = [r for r in rows if r["ts"] <= end_ms][-total_candles:]
+        rows = self._partial_vp_rows(by_ts, end_ms=end_ms, total_candles=total_candles)
         ok = len(rows) >= total_candles
         return FetchHistoryResult(rows, ok)

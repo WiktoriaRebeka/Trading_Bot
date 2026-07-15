@@ -77,23 +77,27 @@ async def _fetch_symbol_msi_bootstrap(
 
 
 async def run_msi_bootstrap_parallel(processor: OrderFlowMetrics) -> None:
-    """MSI bootstrap per symbol, równolegle z WS."""
+    """MSI bootstrap per symbol, równolegle z WS. Na koniec odblokowuje VP fetch."""
     symbols = ALL_SYMBOLS_FOR_WS
     logger.info(
         "[MSI-BOOTSTRAP] Start dla %s symboli (conc=%s, m1_limit=%s, retries=%s)",
         len(symbols), MSI_BOOTSTRAP_CONCURRENCY, MSI_BOOTSTRAP_M1_LIMIT, MSI_BOOTSTRAP_RETRIES,
     )
     semaphore = asyncio.Semaphore(MSI_BOOTSTRAP_CONCURRENCY)
-    async with HistoryBackfiller() as backfiller:
-        tasks = [
-            asyncio.create_task(_fetch_symbol_msi_bootstrap(sym, processor, backfiller, semaphore))
-            for sym in symbols
-        ]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-    for sym, res in zip(symbols, results):
-        if isinstance(res, BaseException):
-            logger.error("[MSI-BOOTSTRAP] task %s: %s: %s", sym, type(res).__name__, res, exc_info=res)
-    logger.info("[MSI-BOOTSTRAP] Zakończono total=%s", len(symbols))
+    try:
+        async with HistoryBackfiller() as backfiller:
+            tasks = [
+                asyncio.create_task(_fetch_symbol_msi_bootstrap(sym, processor, backfiller, semaphore))
+                for sym in symbols
+            ]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+        for sym, res in zip(symbols, results):
+            if isinstance(res, BaseException):
+                logger.error("[MSI-BOOTSTRAP] task %s: %s: %s", sym, type(res).__name__, res, exc_info=res)
+        logger.info("[MSI-BOOTSTRAP] Zakończono total=%s", len(symbols))
+    finally:
+        if VP_FETCHER is not None:
+            VP_FETCHER.mark_bootstrap_complete()
 
 
 @asynccontextmanager
@@ -110,6 +114,7 @@ async def lifespan(app: FastAPI):
         set_context_firestore_client(db)
         VP_FETCHER = VolumeProfileFetcher()
         await VP_FETCHER.start()
+        VP_FETCHER.begin_bootstrap_hold()
         METRICS_PROCESSOR = OrderFlowMetrics(firestore_client=db, vp_fetcher=VP_FETCHER)
         logger.info(
             "SIGNAL_MODE=%s | MSI engine=%s | footprint evaluate=%s",
@@ -123,8 +128,10 @@ async def lifespan(app: FastAPI):
 
         asyncio.create_task(run_msi_bootstrap_parallel(METRICS_PROCESSOR))
 
-        logger.info("✅ OrderFlow Engine startup complete (WS + MSI bootstrap równolegle)")
+        logger.info("✅ OrderFlow Engine startup complete (WS + MSI bootstrap równolegle; VP hold do końca bootstrap)")
     except Exception as e:
+        if VP_FETCHER is not None:
+            VP_FETCHER.mark_bootstrap_complete()
         logger.critical(f"💀 STARTUP FAILED: {e}", exc_info=True)
     yield
     logger.info("🛑 OrderFlow Engine shutting down")
