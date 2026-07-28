@@ -9,6 +9,7 @@ from typing import Optional
 
 from orderflow_engine.msi_engine import OrderBlock, StructureEvent
 from orderflow_engine.msi_event_logger import MsiEventLogger
+from orderflow_engine.msi_state_persister import MsiStatePersister
 from orderflow_engine.msi_trade_signal import (
     MSI_TRADE_ENABLED,
     build_msi_ob_alert,
@@ -16,6 +17,20 @@ from orderflow_engine.msi_trade_signal import (
 )
 
 logger = logging.getLogger(__name__)
+
+_STRUCTURAL_PERSIST_EVENTS = frozenset({
+    "OB_NEW",
+    "BOS",
+    "BOS_HIGH_SET",
+    "BOS_LOW_SET",
+    "CHOCH",
+    "LIQUIDITY",
+    "LIQUIDITY_GRAB",
+    "INITIAL_TREND",
+    "IC_SET",
+    "IC_RESET",
+    "HL_LH_CONFIRMED",
+})
 
 
 class MsiEventSink:
@@ -35,6 +50,20 @@ class MsiEventSink:
             self._logger.handle_event(event, ob)
         except Exception as e:
             logger.error("[MSI] logger.handle_event failed: %s", e, exc_info=True)
+
+        if event.event_type in _STRUCTURAL_PERSIST_EVENTS:
+            try:
+                sym = str(event.symbol).upper()
+                engine = self._processor.msi_engines.get(sym)
+                if engine is not None:
+                    MsiStatePersister.enqueue_snapshot(sym, engine.export_state())
+            except Exception as e:
+                logger.warning(
+                    "[MSI] enqueue_snapshot failed symbol=%s event=%s: %s",
+                    event.symbol,
+                    event.event_type,
+                    e,
+                )
 
         if event.event_type == "OB_NEW" and ob is not None:
             if MSI_TRADE_ENABLED:

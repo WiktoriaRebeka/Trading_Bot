@@ -11,6 +11,7 @@ from orderflow_engine.metrics_processor import OrderFlowMetrics
 from orderflow_engine.config_symbols import ALL_SYMBOLS_FOR_WS
 from orderflow_engine.backfiller import HistoryBackfiller
 from orderflow_engine.volume_profile_fetcher import VolumeProfileFetcher
+from orderflow_engine.msi_state_persister import MsiStatePersister
 from orderflow_engine.integration import (
     SignalContextBuilder,
     get_global_context,
@@ -112,6 +113,7 @@ async def lifespan(app: FastAPI):
             raise RuntimeError("verify_firestore_connection() nie powiodło się")
         db = get_db()
         set_context_firestore_client(db)
+        MsiStatePersister.start()
         VP_FETCHER = VolumeProfileFetcher()
         await VP_FETCHER.start()
         VP_FETCHER.begin_bootstrap_hold()
@@ -135,6 +137,7 @@ async def lifespan(app: FastAPI):
         logger.critical(f"💀 STARTUP FAILED: {e}", exc_info=True)
     yield
     logger.info("🛑 OrderFlow Engine shutting down")
+    MsiStatePersister.stop()
     if ws_manager is not None:
         ws_manager.is_running = False
     if VP_FETCHER is not None:
