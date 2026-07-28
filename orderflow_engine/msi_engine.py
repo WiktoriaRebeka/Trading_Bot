@@ -62,6 +62,16 @@ class MsiCandle:
             volume=float(d.get("volume", 0.0)),
         )
 
+    def to_dict(self) -> dict:
+        return {
+            "ts": self.ts,
+            "open": self.open,
+            "high": self.high,
+            "low": self.low,
+            "close": self.close,
+            "volume": self.volume,
+        }
+
 
 @dataclass
 class OrderBlock:
@@ -86,6 +96,33 @@ class OrderBlock:
     @property
     def ob_height(self) -> float:
         return self.candle.high - self.candle.low
+
+    def to_dict(self) -> dict:
+        return {
+            "chain_id": self.chain_id,
+            "candle": self.candle.to_dict(),
+            "direction": self.direction,
+            "hl_lh_level": self.hl_lh_level,
+            "bos_level": self.bos_level,
+            "liquidity_level": self.liquidity_level,
+            "initial_trend": self.initial_trend,
+            "detected_at_ts": self.detected_at_ts,
+            "is_first": self.is_first,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> OrderBlock:
+        return cls(
+            chain_id=d["chain_id"],
+            candle=MsiCandle.from_dict(d["candle"]),
+            direction=d["direction"],
+            hl_lh_level=float(d["hl_lh_level"]),
+            bos_level=float(d["bos_level"]),
+            liquidity_level=float(d["liquidity_level"]),
+            initial_trend=d["initial_trend"],
+            detected_at_ts=int(d["detected_at_ts"]),
+            is_first=bool(d.get("is_first", False)),
+        )
 
 
 @dataclass
@@ -132,6 +169,78 @@ class _MsiState:
     pre_bos_phase: PreBosPhase = PreBosPhase.BUILDING
     cycle_swept_liquidity: Optional[float] = None  # V: poziom zgrabowany w bieżącym cyklu
 
+    def to_dict(self) -> dict:
+        return {
+            "phase": self.phase.value,
+            "initial_candle": self.initial_candle.to_dict() if self.initial_candle else None,
+            "initial_high": self.initial_high,
+            "initial_low": self.initial_low,
+            "initial_trend": self.initial_trend.value if self.initial_trend else None,
+            "temporary_high": self.temporary_high,
+            "temporary_low": self.temporary_low,
+            "temporary_liquidity": self.temporary_liquidity,
+            "liquidity": self.liquidity,
+            "bos_high": self.bos_high,
+            "bos_low": self.bos_low,
+            "temporary_higher_low": self.temporary_higher_low,
+            "temporary_lower_high": self.temporary_lower_high,
+            "confirmed_higher_low": self.confirmed_higher_low,
+            "confirmed_lower_high": self.confirmed_lower_high,
+            "hl_marking_candle": self.hl_marking_candle.to_dict() if self.hl_marking_candle else None,
+            "lh_marking_candle": self.lh_marking_candle.to_dict() if self.lh_marking_candle else None,
+            "previous_ob": self.previous_ob.to_dict() if self.previous_ob else None,
+            "current_ob": self.current_ob.to_dict() if self.current_ob else None,
+            "chain_seq": self.chain_seq,
+            "choch_candle": self.choch_candle.to_dict() if self.choch_candle else None,
+            "choch_mode": self.choch_mode.value,
+            "choch_low_intact": self.choch_low_intact,
+            "choch_high_intact": self.choch_high_intact,
+            "v_cycle": self.v_cycle.value,
+            "pre_bos_phase": self.pre_bos_phase.value,
+            "cycle_swept_liquidity": self.cycle_swept_liquidity,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> _MsiState:
+        def _candle(raw: Optional[dict]) -> Optional[MsiCandle]:
+            return MsiCandle.from_dict(raw) if raw is not None else None
+
+        def _ob(raw: Optional[dict]) -> Optional[OrderBlock]:
+            return OrderBlock.from_dict(raw) if raw is not None else None
+
+        def _trend(raw: Optional[str]) -> Optional[Trend]:
+            return Trend(raw) if raw is not None else None
+
+        return cls(
+            phase=MsiPhase(d.get("phase", MsiPhase.START.value)),
+            initial_candle=_candle(d.get("initial_candle")),
+            initial_high=d.get("initial_high"),
+            initial_low=d.get("initial_low"),
+            initial_trend=_trend(d.get("initial_trend")),
+            temporary_high=d.get("temporary_high"),
+            temporary_low=d.get("temporary_low"),
+            temporary_liquidity=d.get("temporary_liquidity"),
+            liquidity=d.get("liquidity"),
+            bos_high=d.get("bos_high"),
+            bos_low=d.get("bos_low"),
+            temporary_higher_low=d.get("temporary_higher_low"),
+            temporary_lower_high=d.get("temporary_lower_high"),
+            confirmed_higher_low=d.get("confirmed_higher_low"),
+            confirmed_lower_high=d.get("confirmed_lower_high"),
+            hl_marking_candle=_candle(d.get("hl_marking_candle")),
+            lh_marking_candle=_candle(d.get("lh_marking_candle")),
+            previous_ob=_ob(d.get("previous_ob")),
+            current_ob=_ob(d.get("current_ob")),
+            chain_seq=int(d.get("chain_seq", 0)),
+            choch_candle=_candle(d.get("choch_candle")),
+            choch_mode=ChochMode(d.get("choch_mode", ChochMode.NONE.value)),
+            choch_low_intact=bool(d.get("choch_low_intact", True)),
+            choch_high_intact=bool(d.get("choch_high_intact", True)),
+            v_cycle=VCyclePhase(d.get("v_cycle", VCyclePhase.WAIT_LIQ_GRAB.value)),
+            pre_bos_phase=PreBosPhase(d.get("pre_bos_phase", PreBosPhase.BUILDING.value)),
+            cycle_swept_liquidity=d.get("cycle_swept_liquidity"),
+        )
+
 
 EventSink = Callable[[StructureEvent, Optional[OrderBlock]], None]
 
@@ -145,6 +254,7 @@ class MsiEngine:
         self._state = _MsiState()
         self._all_obs: List[OrderBlock] = []
         self._candle_count = 0
+        self._last_processed_ts: Optional[int] = None
 
     @property
     def state(self) -> _MsiState:
@@ -179,6 +289,21 @@ class MsiEngine:
             "ob_count": len(self._all_obs),
         }
 
+    def export_state(self) -> dict:
+        return {
+            "symbol": self.symbol,
+            "candle_count": self._candle_count,
+            "last_processed_ts": self._last_processed_ts,
+            "all_obs_count": len(self._all_obs),
+            "state": self._state.to_dict(),
+            "schema_version": 1,
+        }
+
+    def import_state(self, d: dict) -> None:
+        self._state = _MsiState.from_dict(d["state"])
+        self._candle_count = int(d.get("candle_count", 0))
+        self._last_processed_ts = d.get("last_processed_ts")
+
     def replay_candles(self, candles: List[MsiCandle]) -> List[OrderBlock]:
         for c in candles:
             self.on_candle_close(c)
@@ -186,6 +311,7 @@ class MsiEngine:
 
     def on_candle_close(self, candle: MsiCandle) -> List[StructureEvent]:
         self._candle_count += 1
+        self._last_processed_ts = candle.ts
         events: List[StructureEvent] = []
 
         if self._state.initial_candle is not None and self._state.phase != MsiPhase.START:
