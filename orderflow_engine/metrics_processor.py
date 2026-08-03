@@ -162,9 +162,16 @@ class OrderFlowMetrics:
         if history_d1:
             engine.major_high = max([k["high"] for k in history_d1])
             engine.major_low = min([k["low"] for k in history_d1])
-        for c in history_m1:
-            engine.update_candles(c["open"], c["high"], c["low"], c["close"], c["ts"])
-            self._feed_msi_candle(symbol, c)
+        msi_engine = self._get_msi_engine(symbol)
+        if msi_engine is not None:
+            msi_engine.set_replay_mode(True)
+        try:
+            for c in history_m1:
+                engine.update_candles(c["open"], c["high"], c["low"], c["close"], c["ts"])
+                self._feed_msi_candle(symbol, c)
+        finally:
+            if msi_engine is not None:
+                msi_engine.set_replay_mode(False)
 
     def pre_load_history(self, symbol, history_m1, history_d1):
         """Kompatybilność: MSI bootstrap z historii."""

@@ -66,7 +66,13 @@ class MsiEventSink:
                 )
 
         if event.event_type == "OB_NEW" and ob is not None:
-            if MSI_TRADE_ENABLED:
+            sym = str(event.symbol).upper()
+            engine = self._processor.msi_engines.get(sym)
+            in_replay = engine.is_replay() if engine is not None else False
+            if in_replay:
+                # replay: struktura odtwarzana, NIE składamy zleceń na historyczne OB
+                self._log_dry_run_trade_setup(ob, event)
+            elif MSI_TRADE_ENABLED:
                 self._schedule_trade_alert(ob, event)
             else:
                 self._log_dry_run_trade_setup(ob, event)

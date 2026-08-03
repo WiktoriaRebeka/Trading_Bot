@@ -255,6 +255,13 @@ class MsiEngine:
         self._all_obs: List[OrderBlock] = []
         self._candle_count = 0
         self._last_processed_ts: Optional[int] = None
+        self._replay_mode: bool = False
+
+    def set_replay_mode(self, on: bool) -> None:
+        self._replay_mode = bool(on)
+
+    def is_replay(self) -> bool:
+        return self._replay_mode
 
     @property
     def state(self) -> _MsiState:
