@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
@@ -41,8 +42,91 @@ async def _fetch_symbol_msi_bootstrap(
     backfiller: HistoryBackfiller,
     semaphore: asyncio.Semaphore,
 ) -> None:
-    """Per-symbol: REST M1 + D1 → MSI bootstrap (bez bufora VP w pamięci)."""
+    """Per-symbol: wznowienie z msi_state albo REST M1+D1 bootstrap."""
     sym = str(symbol).upper()
+
+    # --- Etap 2B: spróbuj wznowić z migawki (per-symbol, niezależnie) ---
+    try:
+        async with semaphore:
+            def _read_msi_state():
+                return get_db().collection("msi_state").document(sym).get()
+
+            doc = await asyncio.to_thread(_read_msi_state)
+            if not doc.exists:
+                logger.info("[MSI-RESUME] %s brak migawki, bootstrap", sym)
+            else:
+                snapshot = doc.to_dict() or {}
+                last_ts = snapshot.get("last_processed_ts")
+                if not last_ts:
+                    logger.info("[MSI-RESUME] %s brak last_processed_ts, bootstrap", sym)
+                else:
+                    last_ts = int(last_ts)
+                    now_ms = int(time.time() * 1000)
+                    luka_min = (now_ms - last_ts) / 60000.0
+                    if luka_min > 240:
+                        logger.info(
+                            "[MSI-RESUME] %s migawka za stara (%.1f min > 240), bootstrap",
+                            sym,
+                            luka_min,
+                        )
+                    else:
+                        msi_engine = processor._get_msi_engine(sym)
+                        if msi_engine is None:
+                            raise RuntimeError("MSI engine unavailable (disabled?)")
+
+                        # Replay ON zanim cokolwiek mutuje stan / emituje eventy.
+                        msi_engine.set_replay_mode(True)
+                        try:
+                            msi_engine.import_state(snapshot)
+                            total = int((now_ms - last_ts) / 60000)
+                            fed = 0
+                            if total > 0:
+                                result = await backfiller.fetch_klines_1m_paginated(
+                                    sym,
+                                    end_ms=now_ms,
+                                    total_candles=total,
+                                )
+                                if result.rate_limited:
+                                    raise RuntimeError(
+                                        f"gap fill rate-limited n={len(result.rows)}"
+                                    )
+                                if not result.ok:
+                                    raise RuntimeError(
+                                        f"gap fill incomplete ok={result.ok} "
+                                        f"n={len(result.rows)} need={total}"
+                                    )
+                                for c in result.rows:
+                                    if c["ts"] > last_ts:
+                                        processor._feed_msi_candle(sym, c)
+                                        fed += 1
+                            logger.info(
+                                "[MSI-RESUME] %s wznowiono z migawki, dograno %s świec, "
+                                "luka=%.1f min",
+                                sym,
+                                fed,
+                                luka_min,
+                            )
+                        except Exception:
+                            # Błąd PO set_replay_mode(True): usuń silnik ZANIM
+                            # zdjęta zostanie flaga — zero okna "częściowy + replay OFF".
+                            processor.msi_engines.pop(sym, None)
+                            raise
+                        else:
+                            # Sukces: luka dograna → dopiero teraz OFF, potem return.
+                            msi_engine.set_replay_mode(False)
+                            return
+    except Exception as e:
+        logger.warning(
+            "[MSI-RESUME] %s wznowienie nie powiodło się: %s: %s — fallback bootstrap",
+            sym,
+            type(e).__name__,
+            e,
+            exc_info=True,
+        )
+        # Idempotentne: gdy błąd przed utworzeniem silnika / po już wykonanym pop.
+        processor.msi_engines.pop(sym, None)
+
+    # --- dotychczasowy bootstrap (fallback lub brak/stara migawka) ---
     for attempt in range(MSI_BOOTSTRAP_RETRIES):
         async with semaphore:
             try:

@@ -55,7 +55,7 @@ class MsiEventSink:
             try:
                 sym = str(event.symbol).upper()
                 engine = self._processor.msi_engines.get(sym)
-                if engine is not None:
+                if engine is not None and not engine.is_replay():
                     MsiStatePersister.enqueue_snapshot(sym, engine.export_state())
             except Exception as e:
                 logger.warning(
