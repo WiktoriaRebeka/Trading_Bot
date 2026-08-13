@@ -258,6 +258,8 @@ class MsiEngine:
         self._replay_mode: bool = False
 
     def set_replay_mode(self, on: bool) -> None:
+        # DIAG tymczasowy: śledzenie flagi replay (ON bez OFF = blokada enqueue_snapshot)
+        logger.info("REPLAY symbol=%s %s", self.symbol, "ON" if on else "OFF")
         self._replay_mode = bool(on)
 
     def is_replay(self) -> bool:

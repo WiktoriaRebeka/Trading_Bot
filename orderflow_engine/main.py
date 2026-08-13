@@ -34,6 +34,8 @@ MSI_BOOTSTRAP_RETRIES = int(os.environ.get("MSI_BOOTSTRAP_RETRIES", os.environ.g
 MSI_BOOTSTRAP_M1_LIMIT = int(os.environ.get("MSI_BOOTSTRAP_M1_LIMIT", os.environ.get("VP_SEED_M1_LIMIT", "280")))
 MSI_BOOTSTRAP_CONCURRENCY = int(os.environ.get("MSI_BOOTSTRAP_CONCURRENCY", os.environ.get("VP_SEED_CONCURRENCY", "4")))
 MSI_BOOTSTRAP_BACKOFF_SEC = [2, 5, 15, 30, 60]
+# Migawka pozostaje poprawna bez zdarzeń strukturalnych — 4h odrzucało zdrowe stany.
+MSI_RESUME_MAX_GAP_MIN = 1440
 
 
 async def _fetch_symbol_msi_bootstrap(
@@ -63,27 +65,32 @@ async def _fetch_symbol_msi_bootstrap(
                     last_ts = int(last_ts)
                     now_ms = int(time.time() * 1000)
                     luka_min = (now_ms - last_ts) / 60000.0
-                    if luka_min > 240:
+                    if luka_min > MSI_RESUME_MAX_GAP_MIN:
                         logger.info(
-                            "[MSI-RESUME] %s migawka za stara (%.1f min > 240), bootstrap",
+                            "[MSI-RESUME] %s migawka za stara (%.1f min > %s), bootstrap",
                             sym,
                             luka_min,
+                            MSI_RESUME_MAX_GAP_MIN,
                         )
                     else:
                         msi_engine = processor._get_msi_engine(sym)
                         if msi_engine is None:
                             raise RuntimeError("MSI engine unavailable (disabled?)")
 
+                        # Tylko zamknięte 1M: open bieżącej minuty − 60s (nie „teraz”).
+                        current_minute_open_ms = (now_ms // 60000) * 60000
+                        last_closed_open_ms = current_minute_open_ms - 60000
+
                         # Replay ON zanim cokolwiek mutuje stan / emituje eventy.
                         msi_engine.set_replay_mode(True)
                         try:
                             msi_engine.import_state(snapshot)
-                            total = int((now_ms - last_ts) / 60000)
+                            total = int((last_closed_open_ms - last_ts) / 60000)
                             fed = 0
                             if total > 0:
                                 result = await backfiller.fetch_klines_1m_paginated(
                                     sym,
-                                    end_ms=now_ms,
+                                    end_ms=last_closed_open_ms,
                                     total_candles=total,
                                 )
                                 if result.rate_limited:
@@ -96,7 +103,7 @@ async def _fetch_symbol_msi_bootstrap(
                                         f"n={len(result.rows)} need={total}"
                                     )
                                 for c in result.rows:
-                                    if c["ts"] > last_ts:
+                                    if c["ts"] > last_ts and c["ts"] < current_minute_open_ms:
                                         processor._feed_msi_candle(sym, c)
                                         fed += 1
                             logger.info(
@@ -106,9 +113,9 @@ async def _fetch_symbol_msi_bootstrap(
                                 fed,
                                 luka_min,
                             )
-                        except Exception:
-                            # Błąd PO set_replay_mode(True): usuń silnik ZANIM
-                            # zdjęta zostanie flaga — zero okna "częściowy + replay OFF".
+                        except BaseException:
+                            # Exception LUB CancelledError PO replay ON:
+                            # pop silnika przy ON — zero okna "częściowy + replay OFF".
                             processor.msi_engines.pop(sym, None)
                             raise
                         else:
