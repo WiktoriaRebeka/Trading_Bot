@@ -323,8 +323,14 @@ class MsiEngine:
         self._last_processed_ts = candle.ts
         events: List[StructureEvent] = []
 
-        if self._state.initial_candle is not None and self._state.phase != MsiPhase.START:
-            # PDF II (jedyny dozwolony reset): obie strony IC przebite naraz
+        if (
+            self._state.initial_candle is not None
+            and self._state.phase == MsiPhase.INITIAL_STRUCTURE
+            and self._state.initial_trend is None
+        ):
+            # PDF II (jedyny dozwolony reset): obie strony IC przebite naraz.
+            # Tylko faza rozbiegowa — Pine: not initial_up and not initial_down.
+            # Po ustaleniu trendu strukturę zmienia wyłącznie ChoCH.
             if self._ic_reset(candle):
                 ev = self._emit("IC_RESET", candle, reason="high_and_low_outside_ic")
                 events.append(ev)

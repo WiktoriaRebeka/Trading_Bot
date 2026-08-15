@@ -70,17 +70,29 @@ def run() -> None:
     assert eng3.state.initial_trend.value == "DOWN"
     print("OK  VI opcja B: CHOCH -> REVERSAL -> OB SHORT")
 
-    # --- IC_RESET jedyny reset ---
+    # --- IC_RESET NIE odpala po ustaleniu trendu ---
+    # Pine L15 bramkuje reset warunkiem "not initial_up and not initial_down",
+    # wiec w dojrzalej strukturze strukture zmienia wylacznie ChoCH.
     evs.clear()
     eng4 = MsiEngine("IC_RST", on_event=lambda e, _o: evs.append(e.event_type))
     _setup_second_ob_long(eng4)
-    eng4.on_candle_close(_c(50, 120.0, 95.0))  # H>IC_HIGH, L<IC_LOW (IC jeszcze [100,110] z ts12? )
-    # Po drugim OB IC = marking candle [96, 109] from ts12
-    ic = eng4.state.initial_candle
+    assert eng4.state.current_ob is not None
+    chain_before = eng4.state.current_ob.chain_id
+    ic = eng4.state.initial_candle  # po drugim OB IC = marking candle [96, 109] z ts12
     assert ic is not None
-    eng4.on_candle_close(_c(51, ic.high + 5, ic.low - 5))
-    assert "IC_RESET" in evs
-    print("OK  IC_RESET: jedyny pełny reset PDF II")
+
+    # Swieca pochlaniajaca swiece OB — w starej implementacji kasowala caly lancuch.
+    eng4.on_candle_close(_c(50, ic.high + 5, ic.low - 5))
+
+    assert "IC_RESET" not in evs
+    assert len(eng4.orderblocks) == 2
+    assert eng4.state.current_ob is not None
+    assert eng4.state.current_ob.chain_id == chain_before
+    assert eng4.state.phase == MsiPhase.HL_LH_CYCLE
+    assert eng4.state.initial_trend.value == "UP"
+    assert eng4.state.initial_high == ic.high
+    assert eng4.state.initial_low == ic.low
+    print("OK  VI: pochloniecie swiecy OB nie resetuje dojrzalej struktury")
 
     print("\nWszystkie testy sekcji VI przeszly.")
 

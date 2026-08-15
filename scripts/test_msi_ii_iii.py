@@ -62,7 +62,8 @@ def run() -> None:
     events_log.clear()
     eng3 = MsiEngine("TEST3", on_event=lambda ev, _ob: events_log.append(ev.event_type))
     eng3.on_candle_close(_c(20, 100.0, 90.0))
-    eng3.on_candle_close(_c(21, 105.0, 95.0))  # inside
+    eng3.on_candle_close(_c(21, 98.0, 92.0))   # inside IC [90,100] — trend NIE ustalony
+    assert eng3.state.initial_trend is None
     eng3.on_candle_close(_c(22, 120.0, 80.0))  # high>100 AND low<90
     assert events_log[-1] == "IC_RESET"
     assert eng3.state.initial_high == 120.0
