@@ -11,7 +11,7 @@ from typing import Any, Dict, Optional
 from orderflow_engine.bot_sender import send_alert_to_bot
 from orderflow_engine.msi_engine import OrderBlock, StructureEvent
 from orderflow_engine.ob_orderflow_snapshot import (
-    collect_ob_orderflow_features,
+    collect_ob_market_features,
     empty_dual_vp_context,
 )
 from orderflow_engine.settings import get_trading_session
@@ -49,7 +49,7 @@ def build_msi_ob_alert(
     planned_tp = setup.tp
     risk_pct = (sl_distance / setup.entry_limit * 100.0) if setup.entry_limit > 0 else 0.0
 
-    market_features: Dict[str, Any] = collect_ob_orderflow_features(processor, sym, setup.direction)
+    market_features: Dict[str, Any] = collect_ob_market_features(processor, sym, setup.direction)
     vp_features: Dict[str, Any] = vp_ctx if vp_ctx is not None else empty_dual_vp_context()
 
     return {
