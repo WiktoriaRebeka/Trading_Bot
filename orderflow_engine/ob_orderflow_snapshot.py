@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import statistics
+import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 # --- Volume Profile (log only, bez gate'u wejścia) ---
@@ -75,6 +76,137 @@ def collect_ob_orderflow_features(
     except Exception:
         pass
 
+    return out
+
+
+def collect_ob_market_features(
+    processor: Any,
+    symbol: str,
+    direction: str,
+) -> Dict[str, Any]:
+    """
+    Telemetria log-only pod MARKET_FEATURE_COLUMNS (market_structure_signals).
+
+    WYŁĄCZNIE odczyt wartości policzonych wcześniej w process_trade /
+    process_orderbook / process_ticker. Nie wpływa na decyzje ani geometrię MSI.
+    Każdy blok izolowany — brak danych daje None, nigdy wyjątek.
+    """
+    sym = str(symbol).upper().replace(".P", "")
+    dir_u = str(direction).upper()
+
+    # Klucze legacy zachowane — orderblock_bq_logger aliasuje obi/delta/dom_wall.
+    out: Dict[str, Any] = dict(collect_ob_orderflow_features(processor, sym, dir_u))
+
+    if processor is None:
+        return out
+
+    # --- DOM: snapshot policzony w process_orderbook ---
+    try:
+        snap = processor.get_dom_snapshot(sym) or {}
+        bids = snap.get("bids") or []
+        asks = snap.get("asks") or []
+        best_bid = snap.get("best_bid")
+        best_ask = snap.get("best_ask")
+
+        out["obi_value"] = float(snap["obi"]) if snap.get("obi") is not None else None
+        out["best_bid"] = float(best_bid) if best_bid is not None else None
+        out["best_ask"] = float(best_ask) if best_ask is not None else None
+        out["spread"] = (
+            round(float(best_ask) - float(best_bid), 8)
+            if best_bid is not None and best_ask is not None else None
+        )
+        out["bid_volume_top10"] = round(sum(float(p) * float(q) for p, q in bids[:10]), 6)
+        out["ask_volume_top10"] = round(sum(float(p) * float(q) for p, q in asks[:10]), 6)
+
+        mid = (
+            (float(best_bid) + float(best_ask)) / 2.0
+            if best_bid is not None and best_ask is not None else None
+        )
+        walls = (snap.get("bid_walls") if dir_u == "LONG" else snap.get("ask_walls")) or []
+        if walls and mid:
+            w = max(walls, key=lambda x: float(x.get("size", 0) or 0))
+            out["real_wall_detected"] = True
+            out["real_wall_price"] = float(w["price"])
+            out["real_wall_size"] = float(w["size"])
+            out["real_wall_distance_pct"] = round(
+                abs(float(w.get("distance_from_mid", 0) or 0)) / mid * 100.0, 6
+            )
+        else:
+            out["real_wall_detected"] = False
+    except Exception:
+        pass
+
+    # --- Delta: delta_history (maxlen 200) + cache okna z process_trade ---
+    try:
+        deltas = processor.get_recent_deltas(sym, limit=1)
+        out["delta_last"] = float(deltas[-1]["delta"]) if deltas else None
+    except Exception:
+        pass
+
+    try:
+        w = getattr(processor, "flow_window_300s", {}).get(sym) or {}
+        if w:
+            out["buy_volume_300s"] = round(float(w["buy"]), 6)
+            out["sell_volume_300s"] = round(float(w["sell"]), 6)
+    except Exception:
+        pass
+
+    try:
+        hist = list(getattr(processor, "delta_history", {}).get(sym, []))
+        if len(hist) >= 10:
+            dt_s = (int(hist[-1]["timestamp"]) - int(hist[-10]["timestamp"])) / 1000.0
+            if dt_s > 0:
+                out["delta_velocity"] = round(
+                    (float(hist[-1]["delta"]) - float(hist[-10]["delta"])) / dt_s, 6
+                )
+    except Exception:
+        pass
+
+    try:
+        div = processor._detect_delta_divergence(sym)
+        out["delta_divergence_real"] = bool(div.get("detected", False))
+        s = div.get("strength")
+        out["delta_divergence_strength"] = (
+            float(s) if div.get("detected") and s is not None else None
+        )
+    except Exception:
+        pass
+
+    # --- Likwidacje: bufor przycinany do 300 s w process_liquidation ---
+    try:
+        liqs = processor.get_recent_liquidations(sym, 300) or []
+        out["liq_volume_total"] = round(sum(float(l.get("volume_usd", 0)) for l in liqs), 6)
+        out["liq_event_count"] = len(liqs)
+        if liqs:
+            latest = max(liqs, key=lambda l: int(l.get("time", 0) or 0))
+            out["last_liq_side"] = str(latest.get("side"))
+            ts_ms = int(latest.get("time", 0) or 0)
+            if ts_ms > 0:
+                out["last_liq_age_s"] = round(max(0.0, time.time() - ts_ms / 1000.0), 3)
+    except Exception:
+        pass
+
+    # --- Ticker: process_ticker ---
+    try:
+        t = getattr(processor, "tickers", {}).get(sym) or {}
+        for src, dst in (
+            ("funding_rate", "funding_rate"),
+            ("open_interest", "open_interest"),
+            ("volume_24h", "volume_24h"),
+        ):
+            v = t.get(src)
+            out[dst] = float(v) if v not in (None, "", 0) else None
+    except Exception:
+        pass
+
+    try:
+        out["swing_strength"] = processor.engines[sym].get_swing_strength(dir_u)
+    except Exception:
+        pass
+
+    # Świadomie NULL: cvd (decyzja), trade_count_300s (O(n) — pominięte),
+    # dom_check_passed / sweep_depth_pct / distance_to_swing_pct (wymagają SignalContext),
+    # tp_was_capped / fallback_sl_used (risk_levels footprintu), confidence_score.
     return out
 
 
