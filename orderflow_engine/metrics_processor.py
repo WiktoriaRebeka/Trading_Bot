@@ -90,6 +90,10 @@ class OrderFlowMetrics:
         self.orderbook_snapshots = {}
         self.orderbook_levels_50: Dict[str, Tuple[List[Tuple[float, float]], List[Tuple[float, float]]]] = {}
         self.delta_history = defaultdict(lambda: deque(maxlen=200))
+        # Telemetria log-only: ostatnie okno 300 s policzone w process_trade.
+        # Wartości i tak są liczone przy każdym ticku — tu tylko je zachowujemy,
+        # żeby OB_NEW nie musiał ich przeliczać (O(n) po deque 20 000).
+        self.flow_window_300s: Dict[str, Dict[str, float]] = {}
         
         self.LIQUIDATION_CASCADE_THRESHOLD_USD = int(
             os.environ.get("LIQ_CASCADE_THRESHOLD_USD", "10000")
@@ -191,7 +195,8 @@ class OrderFlowMetrics:
         if new_candle:
             self.engines[sym].update_candles(new_candle['open'], new_candle['high'], new_candle['low'], new_candle['close'], new_candle['ts'])
             self._feed_msi_candle(sym, new_candle)
-        delta, _, _ = self._calculate_delta_window_volumes(sym, 300)
+        delta, buy_v, sell_v = self._calculate_delta_window_volumes(sym, 300)
+        self.flow_window_300s[sym] = {"buy": buy_v, "sell": sell_v, "ts": timestamp}
         self.delta_history[sym].append({'price': price, 'delta': delta, 'timestamp': timestamp})
 
     def process_ticker(self, symbol, price, funding_rate, open_interest, volume_24h):
