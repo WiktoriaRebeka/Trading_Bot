@@ -358,13 +358,10 @@ class MsiEngine:
 
         if self._state.phase == MsiPhase.HL_LH_CYCLE:
             events.extend(self._process_hl_lh_cycle(candle))
-            grab_this_bar = any(e.event_type == "LIQUIDITY_GRAB" for e in events)
-            if (
-                not grab_this_bar
-                and self._state.v_cycle != VCyclePhase.UPDATING_TEMP_HL
-                and self._state.choch_mode == ChochMode.NONE
-                and self._state.current_ob
-            ):
+            # PDF VI: LOW < Higher LOW (UP) / HIGH > Lower HIGH (DOWN) zawsze
+            # uruchamia CHOCH — także w UPDATING_TEMP_HL po liquidity grab
+            # i na tej samej świecy co grab (sekcja VI ma pierwszeństwo).
+            if self._state.choch_mode == ChochMode.NONE and self._state.current_ob:
                 choch = self._detect_choch(candle)
                 if choch:
                     events.append(choch)
@@ -759,6 +756,10 @@ class MsiEngine:
         self._state.temporary_higher_low = None
         self._state.hl_marking_candle = None
         self._state.cycle_swept_liquidity = None
+        # PDF VI no-reversal: po nowym OB/HL wracamy do normalnego cyklu —
+        # CHOCH znów względem Higher LOW nowego OB (nie wcześniej).
+        if self._state.choch_mode == ChochMode.NO_REVERSAL:
+            self._state.choch_mode = ChochMode.NONE
         return events
 
     def _v_cycle_down(self, candle: MsiCandle) -> List[StructureEvent]:
@@ -843,6 +844,10 @@ class MsiEngine:
         self._state.temporary_lower_high = None
         self._state.lh_marking_candle = None
         self._state.cycle_swept_liquidity = None
+        # PDF VI no-reversal: po nowym OB/LH wracamy do normalnego cyklu —
+        # CHOCH znów względem Lower HIGH nowego OB (nie wcześniej).
+        if self._state.choch_mode == ChochMode.NO_REVERSAL:
+            self._state.choch_mode = ChochMode.NONE
         return events
 
     # ------------------------------------------------------------------ #
