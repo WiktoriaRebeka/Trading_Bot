@@ -136,6 +136,7 @@ class MultiConnectionWSManager:
                         f"tickers.{s}",
                         f"orderbook.50.{s}",
                         f"allLiquidation.{s}",
+                        f"kline.1.{s}",
                     ])
 
                 SUBSCRIBE_CHUNK_SIZE = 10
@@ -222,6 +223,27 @@ class MultiConnectionWSManager:
                 except Exception as e:
                     logger.warning(f"[Conn-{connection_id}] Błąd przetwarzania ticku: {e} | dane: {t}")
                     continue
+
+        # 1b. KLINE 1M — tylko confirm=true → MSI (oficjalne OHLC Bybit)
+        elif topic.startswith("kline.1."):
+            from orderflow_engine.msi_kline_feed import parse_ws_kline_item
+
+            items = payload if isinstance(payload, list) else [payload]
+            for item in items:
+                candle = parse_ws_kline_item(item)
+                if candle is None:
+                    continue
+                try:
+                    await self.processor.process_closed_kline_1m(
+                        symbol, candle, source="ws"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "[Conn-%s] MSI kline feed failed %s: %s",
+                        connection_id,
+                        symbol,
+                        e,
+                    )
 
         # 2. LIQUIDATIONS (v5: allLiquidation.{symbol}, pola T,s,S,v,p)
         elif topic.startswith("allLiquidation."):

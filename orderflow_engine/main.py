@@ -121,6 +121,9 @@ async def _fetch_symbol_msi_bootstrap(
                         else:
                             # Sukces: luka dograna → dopiero teraz OFF, potem return.
                             msi_engine.set_replay_mode(False)
+                            # Ciągłość live kline: last_msi_ts = ostatnia zamknięta 1M.
+                            resume_last = last_closed_open_ms if fed > 0 else last_ts
+                            processor._msi_kline.mark_bootstrap_done(sym, int(resume_last))
                             return
     except Exception as e:
         logger.warning(

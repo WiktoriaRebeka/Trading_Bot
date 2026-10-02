@@ -19,6 +19,12 @@ from orderflow_engine.risk_levels import calculate_structure_risk_levels
 from orderflow_engine.settings import get_trading_session, settings
 from orderflow_engine.msi_engine import MsiCandle, MsiEngine
 from orderflow_engine.msi_event_logger import MsiEventLogger
+from orderflow_engine.msi_kline_feed import (
+    ContinuityKind,
+    MsiKlineFeedState,
+    classify_continuity,
+    fetch_gap_candles,
+)
 from shared_lib.signal_mode import (
     footprint_alerts_enabled,
     get_signal_mode,
@@ -83,6 +89,14 @@ class OrderFlowMetrics:
         if MSI_ENGINE_ENABLED and self.msi_logger is not None:
             from orderflow_engine.msi_event_sink import MsiEventSink
             self._msi_sink = MsiEventSink(self.msi_logger, self, vp_fetcher=vp_fetcher)
+        # Oficjalne kline Bybit → MSI (WS confirm + REST gap-fill). Nie z ticków.
+        self._msi_kline = MsiKlineFeedState()
+        self._msi_kline_locks: Dict[str, Any] = {}
+        try:
+            import asyncio
+            self._msi_kline_asyncio = asyncio
+        except Exception:
+            self._msi_kline_asyncio = None
         
         self.trades = defaultdict(lambda: deque(maxlen=20000))
         self.tickers = {}
@@ -176,10 +190,166 @@ class OrderFlowMetrics:
         finally:
             if msi_engine is not None:
                 msi_engine.set_replay_mode(False)
+        if history_m1:
+            self._msi_kline.mark_bootstrap_done(symbol, int(history_m1[-1]["ts"]))
 
     def pre_load_history(self, symbol, history_m1, history_d1):
         """Kompatybilność: MSI bootstrap z historii."""
         self.bootstrap_msi_structure(symbol, history_m1, history_d1)
+
+    def _msi_kline_lock(self, symbol: str):
+        asyncio = self._msi_kline_asyncio
+        if asyncio is None:
+            return None
+        sym = str(symbol).upper().replace(".P", "")
+        lock = self._msi_kline_locks.get(sym)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._msi_kline_locks[sym] = lock
+        return lock
+
+    def _rest_kline_deps(self) -> Tuple[Any, Any]:
+        """HistoryBackfiller + rate limiter współdzielone z VP (jeśli dostępne)."""
+        vp = self.vp_fetcher
+        if vp is None:
+            return None, None
+        backfiller = getattr(vp, "backfiller", None) or getattr(vp, "_backfiller", None)
+        limiter = getattr(vp, "rate_limiter", None) or getattr(vp, "_rate_limiter", None)
+        return backfiller, limiter
+
+    async def process_closed_kline_1m(self, symbol: str, candle: dict, *, source: str = "ws") -> None:
+        """
+        Zamknięta oficjalna świeca 1M Bybit → MSI.
+        Ciągłość: duplikat skip, late skip+warn, luka → REST gap-fill, potem bieżąca.
+        """
+        if not MSI_ENGINE_ENABLED:
+            return
+        sym = str(symbol).upper().replace(".P", "")
+        try:
+            ts = int(candle["ts"])
+        except (KeyError, TypeError, ValueError):
+            logger.warning("[MSI-KLINE] %s invalid candle dict: %s", sym, candle)
+            return
+
+        if not self._msi_kline.live_ready.get(sym):
+            logger.debug("[MSI-KLINE] %s skip ts=%s — bootstrap not ready", sym, ts)
+            return
+
+        lock = self._msi_kline_lock(sym)
+        if lock is not None:
+            async with lock:
+                await self._process_closed_kline_1m_locked(sym, candle, source=source)
+        else:
+            await self._process_closed_kline_1m_locked(sym, candle, source=source)
+
+    async def _process_closed_kline_1m_locked(
+        self, sym: str, candle: dict, *, source: str
+    ) -> None:
+        ts = int(candle["ts"])
+        last = self._msi_kline.last_ts.get(sym)
+        cont = classify_continuity(last, ts)
+
+        if cont.kind == ContinuityKind.DUPLICATE:
+            self._msi_kline.stats.duplicates += 1
+            logger.debug("[MSI-KLINE] %s duplicate skip ts=%s", sym, ts)
+            self._msi_kline.maybe_log_summary()
+            return
+
+        if cont.kind == ContinuityKind.LATE:
+            self._msi_kline.stats.late += 1
+            logger.warning(
+                "[MSI-KLINE] %s late candle skip ts=%s last_msi_ts=%s",
+                sym,
+                ts,
+                last,
+            )
+            self._msi_kline.maybe_log_summary()
+            return
+
+        if cont.kind == ContinuityKind.GAP:
+            self._msi_kline.stats.gaps += 1
+            backfiller, limiter = self._rest_kline_deps()
+            filled = 0
+            if backfiller is None:
+                logger.warning(
+                    "[MSI-KLINE] %s gap %s..%s but no REST backfiller — feeding current only",
+                    sym,
+                    cont.missing_start_ts,
+                    cont.missing_end_ts,
+                )
+            else:
+                try:
+                    gap_rows = await fetch_gap_candles(
+                        backfiller,
+                        sym,
+                        missing_start_ts=int(cont.missing_start_ts),
+                        missing_end_ts=int(cont.missing_end_ts),
+                        rate_limiter=limiter,
+                    )
+                except Exception as e:
+                    logger.error(
+                        "[MSI-KLINE] %s gap-fill failed: %s: %s",
+                        sym,
+                        type(e).__name__,
+                        e,
+                        exc_info=True,
+                    )
+                    gap_rows = []
+                for row in gap_rows:
+                    row_ts = int(row["ts"])
+                    if last is not None and row_ts <= int(last):
+                        continue
+                    self._feed_msi_candle(sym, row)
+                    self._msi_kline.last_ts[sym] = row_ts
+                    last = row_ts
+                    filled += 1
+                    self._msi_kline.stats.from_gap_fill += 1
+                    logger.debug(
+                        "[MSI-KLINE] %s feed source=gap_fill ts=%s o=%s h=%s l=%s c=%s",
+                        sym,
+                        row_ts,
+                        row.get("open"),
+                        row.get("high"),
+                        row.get("low"),
+                        row.get("close"),
+                    )
+                self._msi_kline.stats.gap_candles_filled += filled
+                logger.info(
+                    "[MSI-KLINE] %s gap-fill missing=%s..%s got=%s",
+                    sym,
+                    cont.missing_start_ts,
+                    cont.missing_end_ts,
+                    filled,
+                )
+            # Po gap-fill: jeśli nadal nie ciągłe względem bieżącej — ostrzeż, ale feeduj bieżącą
+            # tylko gdy ts > last (uniknij duplikatu / late po częściowym fillu).
+            last = self._msi_kline.last_ts.get(sym)
+            if last is not None and ts <= int(last):
+                logger.warning(
+                    "[MSI-KLINE] %s after gap-fill skip current ts=%s last=%s",
+                    sym,
+                    ts,
+                    last,
+                )
+                self._msi_kline.maybe_log_summary()
+                return
+
+        self._feed_msi_candle(sym, candle)
+        self._msi_kline.last_ts[sym] = ts
+        if source == "ws":
+            self._msi_kline.stats.from_ws += 1
+        logger.debug(
+            "[MSI-KLINE] %s feed source=%s ts=%s o=%s h=%s l=%s c=%s continuity=%s",
+            sym,
+            source,
+            ts,
+            candle.get("open"),
+            candle.get("high"),
+            candle.get("low"),
+            candle.get("close"),
+            cont.kind.value,
+        )
+        self._msi_kline.maybe_log_summary()
 
     def process_trade(self, timestamp: int, symbol: str, side: str, qty: float, price: float):
         sym = str(symbol).upper()
@@ -193,8 +363,9 @@ class OrderFlowMetrics:
         if not builder.symbol: builder.symbol = sym
         new_candle = builder.process_tick(price, qty, timestamp)
         if new_candle:
+            # MarketStructureEngine / orderflow nadal z CandleBuildera.
+            # MSI zasilane wyłącznie oficjalnym kline.1 (confirm) — nie stąd.
             self.engines[sym].update_candles(new_candle['open'], new_candle['high'], new_candle['low'], new_candle['close'], new_candle['ts'])
-            self._feed_msi_candle(sym, new_candle)
         delta, buy_v, sell_v = self._calculate_delta_window_volumes(sym, 300)
         self.flow_window_300s[sym] = {"buy": buy_v, "sell": sell_v, "ts": timestamp}
         self.delta_history[sym].append({'price': price, 'delta': delta, 'timestamp': timestamp})

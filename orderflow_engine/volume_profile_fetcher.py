@@ -87,6 +87,14 @@ class VolumeProfileFetcher:
         self._bootstrap_gate.set()
         logger.info("[VP-FETCH] bootstrap hold OFF — VP fetch odblokowany")
 
+    @property
+    def backfiller(self) -> HistoryBackfiller:
+        return self._backfiller
+
+    @property
+    def rate_limiter(self) -> AsyncRateLimiter:
+        return self._rate_limiter
+
     async def start(self) -> None:
         if not self._session_open:
             await self._backfiller.__aenter__()
