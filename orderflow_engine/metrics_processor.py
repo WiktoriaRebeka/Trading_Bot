@@ -108,6 +108,10 @@ class OrderFlowMetrics:
         # Wartości i tak są liczone przy każdym ticku — tu tylko je zachowujemy,
         # żeby OB_NEW nie musiał ich przeliczać (O(n) po deque 20 000).
         self.flow_window_300s: Dict[str, Dict[str, float]] = {}
+        # Inkrementalne okno 300 s (buy/sell notional) — bez skanu całego deque.
+        self._flow300_q: Dict[str, deque] = defaultdict(deque)
+        self._flow300_buy: Dict[str, float] = defaultdict(float)
+        self._flow300_sell: Dict[str, float] = defaultdict(float)
         
         self.LIQUIDATION_CASCADE_THRESHOLD_USD = int(
             os.environ.get("LIQ_CASCADE_THRESHOLD_USD", "10000")
@@ -358,7 +362,11 @@ class OrderFlowMetrics:
             s = "Buy"
         elif s.lower() == "sell":
             s = "Sell"
-        self.trades[sym].append({'timestamp': timestamp, 'side': s, 'qty': qty, 'price': price})
+        trade = {'timestamp': int(timestamp), 'side': s, 'qty': float(qty), 'price': float(price)}
+        dq = self.trades[sym]
+        # Przy maxlen: najstarszy wypada — jeśli nadal był w oknie 300 s, odejmij go.
+        dropped = dq[0] if (dq.maxlen is not None and len(dq) == dq.maxlen) else None
+        dq.append(trade)
         builder = self.builders[sym]
         if not builder.symbol: builder.symbol = sym
         new_candle = builder.process_tick(price, qty, timestamp)
@@ -366,7 +374,9 @@ class OrderFlowMetrics:
             # MarketStructureEngine / orderflow nadal z CandleBuildera.
             # MSI zasilane wyłącznie oficjalnym kline.1 (confirm) — nie stąd.
             self.engines[sym].update_candles(new_candle['open'], new_candle['high'], new_candle['low'], new_candle['close'], new_candle['ts'])
-        delta, buy_v, sell_v = self._calculate_delta_window_volumes(sym, 300)
+        delta, buy_v, sell_v = self._update_delta_window_incremental(
+            sym, trade, dropped=dropped, seconds=300
+        )
         self.flow_window_300s[sym] = {"buy": buy_v, "sell": sell_v, "ts": timestamp}
         self.delta_history[sym].append({'price': price, 'delta': delta, 'timestamp': timestamp})
 
@@ -633,13 +643,94 @@ class OrderFlowMetrics:
                         )
         except Exception as e: logger.error(f"❌ Błąd komunikacji async: {e}")
 
-    def _calculate_delta_window_volumes(self, symbol, seconds=300):
+    def _flow300_notional(self, trade: dict) -> float:
+        return float(trade["qty"]) * float(trade["price"])
+
+    def _flow300_is_buy(self, trade: dict) -> bool:
+        return str(trade["side"]).lower() == "buy"
+
+    def _flow300_subtract(self, sym: str, trade: dict) -> None:
+        notional = self._flow300_notional(trade)
+        if self._flow300_is_buy(trade):
+            self._flow300_buy[sym] -= notional
+        else:
+            self._flow300_sell[sym] -= notional
+
+    def _flow300_add(self, sym: str, trade: dict) -> None:
+        notional = self._flow300_notional(trade)
+        if self._flow300_is_buy(trade):
+            self._flow300_buy[sym] += notional
+        else:
+            self._flow300_sell[sym] += notional
+
+    def _update_delta_window_incremental(
+        self,
+        symbol: str,
+        trade: dict,
+        *,
+        dropped: Optional[dict] = None,
+        seconds: int = 300,
+    ) -> Tuple[float, float, float]:
+        """
+        Inkrementalne buy/sell w oknie `seconds` (domyślnie 300).
+        Wynik identyczny ze skanem całego deque przy tym samym cutoff = now-seconds.
+        """
+        sym = str(symbol).upper()
+        cutoff = int(time.time() * 1000) - (int(seconds) * 1000)
+        q = self._flow300_q[sym]
+
+        while q and int(q[0]["timestamp"]) <= cutoff:
+            old = q.popleft()
+            self._flow300_subtract(sym, old)
+
+        # Najstarszy wypadł z maxlen trades, ale nadal był w oknie → odejmij.
+        if dropped is not None and q and q[0] is dropped:
+            old = q.popleft()
+            self._flow300_subtract(sym, old)
+
+        if int(trade["timestamp"]) > cutoff:
+            self._flow300_add(sym, trade)
+            q.append(trade)
+
+        buy_v = self._flow300_buy[sym]
+        sell_v = self._flow300_sell[sym]
+        # Numeryczne śmieci float — dociągnięcie do zera przy pustym oknie.
+        if not q:
+            buy_v = 0.0
+            sell_v = 0.0
+            self._flow300_buy[sym] = 0.0
+            self._flow300_sell[sym] = 0.0
+        return buy_v - sell_v, buy_v, sell_v
+
+    def _calculate_delta_window_volumes_scan(self, symbol, seconds=300):
+        """Referencyjna O(n) wersja (testy tożsamości)."""
         sym = str(symbol).upper()
         cutoff = int(time.time() * 1000) - (seconds * 1000)
         recent = [t for t in self.trades[sym] if t['timestamp'] > cutoff]
         buy_v = sum(t['qty'] * t['price'] for t in recent if str(t['side']).lower() == 'buy')
         sell_v = sum(t['qty'] * t['price'] for t in recent if str(t['side']).lower() == 'sell')
         return buy_v - sell_v, buy_v, sell_v
+
+    def _calculate_delta_window_volumes(self, symbol, seconds=300):
+        """
+        Publiczny odczyt okna: używa stanu inkrementalnego gdy seconds==300
+        i stan już był aktualizowany przez process_trade; inaczej skan.
+        """
+        sym = str(symbol).upper()
+        if int(seconds) == 300 and sym in self._flow300_q:
+            # Odśwież eksmisje czasowe bez nowego ticka (np. odczyt później).
+            cutoff = int(time.time() * 1000) - (300 * 1000)
+            q = self._flow300_q[sym]
+            while q and int(q[0]["timestamp"]) <= cutoff:
+                old = q.popleft()
+                self._flow300_subtract(sym, old)
+            if not q:
+                self._flow300_buy[sym] = 0.0
+                self._flow300_sell[sym] = 0.0
+            buy_v = self._flow300_buy[sym]
+            sell_v = self._flow300_sell[sym]
+            return buy_v - sell_v, buy_v, sell_v
+        return self._calculate_delta_window_volumes_scan(symbol, seconds)
 
     def _calculate_delta_window(self, symbol, seconds):
         delta, _, _ = self._calculate_delta_window_volumes(symbol, seconds)
