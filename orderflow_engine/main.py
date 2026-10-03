@@ -4,6 +4,7 @@ import logging
 import os
 import time
 from contextlib import asynccontextmanager
+from typing import Any, Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
@@ -36,6 +37,78 @@ MSI_BOOTSTRAP_CONCURRENCY = int(os.environ.get("MSI_BOOTSTRAP_CONCURRENCY", os.e
 MSI_BOOTSTRAP_BACKOFF_SEC = [2, 5, 15, 30, 60]
 # Migawka pozostaje poprawna bez zdarzeń strukturalnych — 4h odrzucało zdrowe stany.
 MSI_RESUME_MAX_GAP_MIN = 1440
+MSI_RESUME_GAP_RETRIES = int(os.environ.get("MSI_RESUME_GAP_RETRIES", "5"))
+MSI_RESUME_GAP_BACKOFF_SEC = [2, 5, 15, 30, 60]
+
+
+def _log_resume_fallback(sym: str, reason: str, **extra: Any) -> None:
+    bits = " ".join(f"{k}={v}" for k, v in extra.items())
+    logger.warning(
+        "[MSI-RESUME] FALLBACK bootstrap symbol=%s reason=%s%s",
+        sym,
+        reason,
+        f" {bits}" if bits else "",
+    )
+
+
+async def _gap_fill_from_snapshot(
+    *,
+    sym: str,
+    processor: OrderFlowMetrics,
+    backfiller: HistoryBackfiller,
+    snapshot: dict,
+    last_ts: int,
+    luka_min: float,
+) -> tuple[int, int]:
+    """
+    Import + dociągnięcie zamkniętych 1M w replay_mode (bez alertów).
+    Zwraca (fed_count, last_msi_ts) — last_msi_ts = ostatnia dograna świeca
+    albo last_processed_ts ze snapshotu gdy fed=0.
+    """
+    msi_engine = processor._get_msi_engine(sym)
+    if msi_engine is None:
+        raise RuntimeError("MSI engine unavailable (disabled?)")
+
+    now_ms = int(time.time() * 1000)
+    current_minute_open_ms = (now_ms // 60000) * 60000
+    last_closed_open_ms = current_minute_open_ms - 60000
+
+    msi_engine.set_replay_mode(True)
+    try:
+        msi_engine.import_state(snapshot)
+        total = int((last_closed_open_ms - last_ts) / 60000)
+        fed = 0
+        last_fed_ts = int(last_ts)
+        if total > 0:
+            result = await backfiller.fetch_klines_1m_paginated(
+                sym,
+                end_ms=last_closed_open_ms,
+                total_candles=total,
+            )
+            if result.rate_limited:
+                raise RuntimeError(f"gap fill rate-limited n={len(result.rows)}")
+            if not result.ok:
+                raise RuntimeError(
+                    f"gap fill incomplete ok={result.ok} n={len(result.rows)} need={total}"
+                )
+            for c in result.rows:
+                if c["ts"] > last_ts and c["ts"] < current_minute_open_ms:
+                    processor._feed_msi_candle(sym, c)
+                    fed += 1
+                    last_fed_ts = int(c["ts"])
+        logger.info(
+            "[MSI-RESUME] OK wznowiono z migawki symbol=%s dograno=%s luka_min=%.1f "
+            "last_processed_ts=%s last_msi_ts=%s",
+            sym,
+            fed,
+            luka_min,
+            last_ts,
+            last_fed_ts,
+        )
+        return fed, last_fed_ts
+    except BaseException:
+        processor.msi_engines.pop(sym, None)
+        raise
 
 
 async def _fetch_symbol_msi_bootstrap(
@@ -44,99 +117,89 @@ async def _fetch_symbol_msi_bootstrap(
     backfiller: HistoryBackfiller,
     semaphore: asyncio.Semaphore,
 ) -> None:
-    """Per-symbol: wznowienie z msi_state albo REST M1+D1 bootstrap."""
+    """Per-symbol: resume z msi_state (domyślnie) albo REST M1+D1 bootstrap."""
     sym = str(symbol).upper()
+    fallback_reason: Optional[str] = None
+    fallback_extra: dict = {}
 
-    # --- Etap 2B: spróbuj wznowić z migawki (per-symbol, niezależnie) ---
+    def _read_msi_state():
+        return get_db().collection("msi_state").document(sym).get()
+
     try:
-        async with semaphore:
-            def _read_msi_state():
-                return get_db().collection("msi_state").document(sym).get()
-
-            doc = await asyncio.to_thread(_read_msi_state)
-            if not doc.exists:
-                logger.info("[MSI-RESUME] %s brak migawki, bootstrap", sym)
-            else:
-                snapshot = doc.to_dict() or {}
-                last_ts = snapshot.get("last_processed_ts")
-                if not last_ts:
-                    logger.info("[MSI-RESUME] %s brak last_processed_ts, bootstrap", sym)
-                else:
-                    last_ts = int(last_ts)
-                    now_ms = int(time.time() * 1000)
-                    luka_min = (now_ms - last_ts) / 60000.0
-                    if luka_min > MSI_RESUME_MAX_GAP_MIN:
-                        logger.info(
-                            "[MSI-RESUME] %s migawka za stara (%.1f min > %s), bootstrap",
-                            sym,
-                            luka_min,
-                            MSI_RESUME_MAX_GAP_MIN,
-                        )
-                    else:
-                        msi_engine = processor._get_msi_engine(sym)
-                        if msi_engine is None:
-                            raise RuntimeError("MSI engine unavailable (disabled?)")
-
-                        # Tylko zamknięte 1M: open bieżącej minuty − 60s (nie „teraz”).
-                        current_minute_open_ms = (now_ms // 60000) * 60000
-                        last_closed_open_ms = current_minute_open_ms - 60000
-
-                        # Replay ON zanim cokolwiek mutuje stan / emituje eventy.
-                        msi_engine.set_replay_mode(True)
-                        try:
-                            msi_engine.import_state(snapshot)
-                            total = int((last_closed_open_ms - last_ts) / 60000)
-                            fed = 0
-                            if total > 0:
-                                result = await backfiller.fetch_klines_1m_paginated(
-                                    sym,
-                                    end_ms=last_closed_open_ms,
-                                    total_candles=total,
-                                )
-                                if result.rate_limited:
-                                    raise RuntimeError(
-                                        f"gap fill rate-limited n={len(result.rows)}"
-                                    )
-                                if not result.ok:
-                                    raise RuntimeError(
-                                        f"gap fill incomplete ok={result.ok} "
-                                        f"n={len(result.rows)} need={total}"
-                                    )
-                                for c in result.rows:
-                                    if c["ts"] > last_ts and c["ts"] < current_minute_open_ms:
-                                        processor._feed_msi_candle(sym, c)
-                                        fed += 1
-                            logger.info(
-                                "[MSI-RESUME] %s wznowiono z migawki, dograno %s świec, "
-                                "luka=%.1f min",
-                                sym,
-                                fed,
-                                luka_min,
-                            )
-                        except BaseException:
-                            # Exception LUB CancelledError PO replay ON:
-                            # pop silnika przy ON — zero okna "częściowy + replay OFF".
-                            processor.msi_engines.pop(sym, None)
-                            raise
-                        else:
-                            # Sukces: luka dograna → dopiero teraz OFF, potem return.
-                            msi_engine.set_replay_mode(False)
-                            # Ciągłość live kline: last_msi_ts = ostatnia zamknięta 1M.
-                            resume_last = last_closed_open_ms if fed > 0 else last_ts
-                            processor._msi_kline.mark_bootstrap_done(sym, int(resume_last))
-                            return
+        doc = await asyncio.to_thread(_read_msi_state)
     except Exception as e:
+        fallback_reason = "firestore_read_failed"
+        fallback_extra = {"error": f"{type(e).__name__}: {e}"}
         logger.warning(
-            "[MSI-RESUME] %s wznowienie nie powiodło się: %s: %s — fallback bootstrap",
-            sym,
-            type(e).__name__,
-            e,
-            exc_info=True,
+            "[MSI-RESUME] %s odczyt msi_state failed: %s: %s",
+            sym, type(e).__name__, e, exc_info=True,
         )
-        # Idempotentne: gdy błąd przed utworzeniem silnika / po już wykonanym pop.
-        processor.msi_engines.pop(sym, None)
+        doc = None
 
-    # --- dotychczasowy bootstrap (fallback lub brak/stara migawka) ---
+    snapshot = None
+    last_ts = None
+    luka_min = 0.0
+    if fallback_reason is None:
+        if doc is None or not doc.exists:
+            fallback_reason = "brak_migawki"
+        else:
+            snapshot = doc.to_dict() or {}
+            last_ts = snapshot.get("last_processed_ts")
+            if not last_ts:
+                fallback_reason = "brak_last_processed_ts"
+            else:
+                last_ts = int(last_ts)
+                now_ms = int(time.time() * 1000)
+                luka_min = (now_ms - last_ts) / 60000.0
+                if luka_min > MSI_RESUME_MAX_GAP_MIN:
+                    fallback_reason = "migawka_za_stara"
+                    fallback_extra = {
+                        "luka_min": f"{luka_min:.1f}",
+                        "max_min": MSI_RESUME_MAX_GAP_MIN,
+                    }
+
+    if fallback_reason is None and snapshot is not None and last_ts is not None:
+        last_err: Optional[str] = None
+        for attempt in range(MSI_RESUME_GAP_RETRIES):
+            try:
+                async with semaphore:
+                    _fed, resume_last_msi_ts = await _gap_fill_from_snapshot(
+                        sym=sym,
+                        processor=processor,
+                        backfiller=backfiller,
+                        snapshot=snapshot,
+                        last_ts=last_ts,
+                        luka_min=luka_min,
+                    )
+                msi_engine = processor.msi_engines.get(sym)
+                if msi_engine is not None:
+                    msi_engine.set_replay_mode(False)
+                    # Ciągłość kline: last_msi_ts = last_processed_ts ze snapshotu
+                    # (lub ostatnia dograna świeca po gap-fill REST w replay_mode).
+                    processor._msi_kline.mark_bootstrap_done(sym, int(resume_last_msi_ts))
+                    processor.persist_msi_state(sym, immediate=True)
+                return
+            except BaseException as e:
+                last_err = f"{type(e).__name__}: {e}"
+                logger.warning(
+                    "[MSI-RESUME] %s dociągnięcie luki próba %s/%s: %s",
+                    sym, attempt + 1, MSI_RESUME_GAP_RETRIES, last_err,
+                    exc_info=True,
+                )
+                processor.msi_engines.pop(sym, None)
+            if attempt + 1 < MSI_RESUME_GAP_RETRIES:
+                backoff = MSI_RESUME_GAP_BACKOFF_SEC[
+                    min(attempt, len(MSI_RESUME_GAP_BACKOFF_SEC) - 1)
+                ]
+                await asyncio.sleep(backoff)
+        fallback_reason = "gap_fill_failed"
+        fallback_extra = {
+            "attempts": MSI_RESUME_GAP_RETRIES,
+            "error": last_err or "unknown",
+        }
+
+    _log_resume_fallback(sym, fallback_reason or "unknown", **fallback_extra)
+
     for attempt in range(MSI_BOOTSTRAP_RETRIES):
         async with semaphore:
             try:
@@ -155,8 +218,9 @@ async def _fetch_symbol_msi_bootstrap(
                         processor.bootstrap_msi_structure(symbol, r_m1.rows, [])
                         logger.warning("[MSI-BOOTSTRAP] %s D1 pominięty — MSI z samym M1", sym)
                     logger.info(
-                        "[MSI-BOOTSTRAP] %s OK M1=%d D1=%s",
+                        "[MSI-BOOTSTRAP] %s OK M1=%d D1=%s (po FALLBACK reason=%s) — zapisano msi_state",
                         sym, len(r_m1.rows), len(r_d1.rows) if r_d1.ok else 0,
+                        fallback_reason,
                     )
                     return
             except Exception as e:

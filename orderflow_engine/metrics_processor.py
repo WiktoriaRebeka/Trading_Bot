@@ -25,6 +25,7 @@ from orderflow_engine.msi_kline_feed import (
     classify_continuity,
     fetch_gap_candles,
 )
+from orderflow_engine.msi_state_persister import MsiStatePersister
 from shared_lib.signal_mode import (
     footprint_alerts_enabled,
     get_signal_mode,
@@ -168,6 +169,26 @@ class OrderFlowMetrics:
             )
         return self.msi_engines[sym]
 
+    def persist_msi_state(self, symbol: str, *, immediate: bool = False) -> None:
+        """Migawka msi_state — tylko live (nie replay). immediate = batch poza kolejką."""
+        sym = str(symbol).upper()
+        engine = self.msi_engines.get(sym)
+        if engine is None or engine.is_replay():
+            return
+        try:
+            snap = engine.export_state()
+            if immediate:
+                MsiStatePersister.write_snapshots_now([(sym, snap)])
+            else:
+                MsiStatePersister.enqueue_snapshot(sym, snap)
+        except Exception as e:
+            logger.warning(
+                "[MSI-STATE] persist failed symbol=%s immediate=%s: %s",
+                sym,
+                immediate,
+                e,
+            )
+
     def _feed_msi_candle(self, symbol: str, candle: dict) -> None:
         engine = self._get_msi_engine(symbol)
         if engine is None:
@@ -176,6 +197,9 @@ class OrderFlowMetrics:
             engine.on_candle_close(MsiCandle.from_dict(candle))
         except Exception as e:
             logger.error("[MSI] on_candle_close failed symbol=%s: %s", symbol, e, exc_info=True)
+            return
+        if not engine.is_replay():
+            self.persist_msi_state(symbol, immediate=False)
 
     def bootstrap_msi_structure(self, symbol: str, history_m1: List[dict], history_d1: List[dict]) -> None:
         """Replay MSI / market structure z historii REST."""
@@ -194,6 +218,7 @@ class OrderFlowMetrics:
         finally:
             if msi_engine is not None:
                 msi_engine.set_replay_mode(False)
+                self.persist_msi_state(symbol, immediate=True)
         if history_m1:
             self._msi_kline.mark_bootstrap_done(symbol, int(history_m1[-1]["ts"]))
 

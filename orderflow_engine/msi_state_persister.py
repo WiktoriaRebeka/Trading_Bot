@@ -1,5 +1,7 @@
 # orderflow_engine/msi_state_persister.py
-# Etap 2A: nieblokujący zapis migawek MSI do Firestore (kolekcja msi_state).
+# Nieblokujący zapis migawek MSI do Firestore (kolekcja msi_state).
+# Live 1M: kolejka + jeden batch na okno debounce (nie 66 osobnych set()).
+# Bootstrap/resume: write_snapshots_now — natychmiastowy batch.
 
 from __future__ import annotations
 
@@ -8,7 +10,8 @@ import math
 import os
 import queue
 import threading
-from typing import Any, Dict, Optional
+import time
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from shared_lib.firebase_client import get_db
 
@@ -16,6 +19,8 @@ logger = logging.getLogger(__name__)
 
 MSI_STATE_FS_COLLECTION = "msi_state"
 MSI_STATE_FS_QUEUE_MAX = int(os.environ.get("MSI_STATE_FS_QUEUE_MAX", "2000"))
+MSI_STATE_BATCH_DEBOUNCE_SEC = float(os.environ.get("MSI_STATE_BATCH_DEBOUNCE_SEC", "1.5"))
+_FS_BATCH_LIMIT = 500
 
 _write_queue: Optional[queue.Queue] = None
 _writer_thread: Optional[threading.Thread] = None
@@ -34,24 +39,69 @@ def _sanitize_for_firestore(obj: Any) -> Any:
     return obj
 
 
-def _msi_state_writer_main() -> None:
+def _commit_batch(pairs: List[Tuple[str, Dict[str, Any]]]) -> None:
+    if not pairs:
+        return
     from google.cloud import firestore as gcf
 
+    db = get_db()
+    batch = db.batch()
+    pending_ops = 0
+    n_ok = 0
+    for sym, snapshot in pairs:
+        payload = _sanitize_for_firestore(snapshot)
+        payload["updated_at"] = gcf.SERVER_TIMESTAMP
+        ref = db.collection(MSI_STATE_FS_COLLECTION).document(sym)
+        batch.set(ref, payload, merge=False)
+        pending_ops += 1
+        n_ok += 1
+        if pending_ops >= _FS_BATCH_LIMIT:
+            batch.commit()
+            batch = db.batch()
+            pending_ops = 0
+    if pending_ops:
+        batch.commit()
+    logger.debug("[MSI-STATE] batch write n=%s", n_ok)
+
+
+def _msi_state_writer_main() -> None:
+    assert _write_queue is not None
+    q = _write_queue
+    debounce = MSI_STATE_BATCH_DEBOUNCE_SEC
     while True:
-        item = _write_queue.get()
-        sym_log = item[0] if (item is not None and isinstance(item, tuple) and len(item) >= 1) else "?"
+        item = q.get()
+        if item is None:
+            q.task_done()
+            return
+        pending: Dict[str, Dict[str, Any]] = {item[0]: item[1]}
+        q.task_done()
+        deadline = time.monotonic() + debounce
+        sentinel = False
+        while True:
+            timeout = deadline - time.monotonic()
+            if timeout <= 0:
+                break
+            try:
+                nxt = q.get(timeout=timeout)
+            except queue.Empty:
+                break
+            if nxt is None:
+                q.task_done()
+                sentinel = True
+                break
+            pending[nxt[0]] = nxt[1]
+            q.task_done()
         try:
-            if item is None:
-                return
-            sym, snapshot = item
-            payload = _sanitize_for_firestore(snapshot)
-            payload["updated_at"] = gcf.SERVER_TIMESTAMP
-            doc_ref = get_db().collection(MSI_STATE_FS_COLLECTION).document(sym)
-            doc_ref.set(payload, merge=False)
+            _commit_batch(list(pending.items()))
         except Exception as e:
-            logger.warning("Firestore MSI state persist failed symbol=%s: %s", sym_log, e)
-        finally:
-            _write_queue.task_done()
+            logger.warning(
+                "Firestore MSI state batch failed n=%s: %s: %s",
+                len(pending),
+                type(e).__name__,
+                e,
+            )
+        if sentinel:
+            return
 
 
 class MsiStatePersister:
@@ -71,14 +121,16 @@ class MsiStatePersister:
             )
             _writer_thread.start()
             logger.info(
-                "Uruchomiono wątek zapisu MSI state do Firestore (kolekcja=%s, max_queue=%s).",
+                "Uruchomiono wątek zapisu MSI state do Firestore "
+                "(kolekcja=%s, max_queue=%s, debounce=%.2fs batch).",
                 MSI_STATE_FS_COLLECTION,
                 MSI_STATE_FS_QUEUE_MAX,
+                MSI_STATE_BATCH_DEBOUNCE_SEC,
             )
 
     @classmethod
     def stop(cls) -> None:
-        """Graceful shutdown: sentinel kończy writer."""
+        """Graceful shutdown: sentinel kończy writer po flushu kolejki."""
         global _write_queue, _writer_thread
         with _writer_lock:
             if _write_queue is None:
@@ -88,7 +140,7 @@ class MsiStatePersister:
             except queue.Full:
                 logger.warning("MSI state writer shutdown: kolejka pełna, pomijam flush")
             if _writer_thread is not None and _writer_thread.is_alive():
-                _writer_thread.join(timeout=5.0)
+                _writer_thread.join(timeout=8.0)
             _write_queue = None
             _writer_thread = None
 
@@ -104,4 +156,27 @@ class MsiStatePersister:
                 "Kolejka zapisu MSI state pełna (max=%s), pomijam persist symbol=%s",
                 MSI_STATE_FS_QUEUE_MAX,
                 sym,
+            )
+
+    @classmethod
+    def write_snapshots_now(
+        cls, items: Iterable[Tuple[str, Dict[str, Any]]]
+    ) -> None:
+        """Natychmiastowy batch (bootstrap / resume) — poza kolejką debounce."""
+        pairs = [(str(sym).upper(), snap) for sym, snap in items]
+        if not pairs:
+            return
+        try:
+            _commit_batch(pairs)
+            logger.info(
+                "[MSI-STATE] natychmiastowy zapis n=%s symbols=%s",
+                len(pairs),
+                ",".join(s for s, _ in pairs[:8]) + ("..." if len(pairs) > 8 else ""),
+            )
+        except Exception as e:
+            logger.warning(
+                "[MSI-STATE] natychmiastowy zapis failed n=%s: %s: %s",
+                len(pairs),
+                type(e).__name__,
+                e,
             )
