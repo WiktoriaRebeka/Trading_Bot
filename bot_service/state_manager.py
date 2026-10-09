@@ -153,11 +153,16 @@ def find_active_order_by_details(symbol: str, side: str, qty: float) -> Optional
 
 def get_pending_msi_limit_orders(symbol: str) -> list:
     """
-    Niewypełnione limity MSI (PLACED / PLACING / COOLDOWN_PENDING) dla symbolu.
-    Nie obejmuje pozycji OPEN — te zostają przy nowym OB.
+    Niewypełnione limity MSI (PLACED / PLACING / COOLDOWN_PENDING / DEFERRED_POSITION_OPEN)
+    dla symbolu. Nie obejmuje pozycji OPEN — te zostają przy nowym OB.
     """
     sym = str(symbol).upper().replace(".P", "")
-    pending_statuses = {"PLACED", "PLACING", "COOLDOWN_PENDING"}
+    pending_statuses = {
+        "PLACED",
+        "PLACING",
+        "COOLDOWN_PENDING",
+        "DEFERRED_POSITION_OPEN",
+    }
     results = []
     try:
         for doc in _collection_active_orders().stream():
@@ -172,6 +177,45 @@ def get_pending_msi_limit_orders(symbol: str) -> list:
             results.append(doc)
     except Exception as e:
         logger.exception("[state_manager] get_pending_msi_limit_orders failed for %s: %s", sym, e)
+    return results
+
+
+def get_msi_open_orders_for_symbol(symbol: str) -> list:
+    """Dokumenty MSI ze statusem OPEN dla symbolu (Firestore — fallback po restarcie)."""
+    sym = str(symbol).upper().replace(".P", "")
+    results = []
+    try:
+        for doc in _collection_active_orders().stream():
+            data = doc.to_dict() or {}
+            if data.get("signal_mode") != "msi_orderblock":
+                continue
+            if data.get("status") != "OPEN":
+                continue
+            doc_sym = str(data.get("symbol", "")).upper().replace(".P", "")
+            if doc_sym != sym:
+                continue
+            results.append(doc)
+    except Exception as e:
+        logger.exception("[state_manager] get_msi_open_orders_for_symbol failed for %s: %s", sym, e)
+    return results
+
+
+def get_deferred_msi_orders(symbol: Optional[str] = None) -> list:
+    """Odłożone OB (DEFERRED_POSITION_OPEN), opcjonalnie filtr po symbolu."""
+    sym_filter = str(symbol).upper().replace(".P", "") if symbol else None
+    results = []
+    try:
+        for doc in get_orders_by_status("DEFERRED_POSITION_OPEN"):
+            data = doc.to_dict() or {}
+            if data.get("signal_mode") != "msi_orderblock":
+                continue
+            if sym_filter is not None:
+                doc_sym = str(data.get("symbol", "")).upper().replace(".P", "")
+                if doc_sym != sym_filter:
+                    continue
+            results.append(doc)
+    except Exception as e:
+        logger.exception("[state_manager] get_deferred_msi_orders failed: %s", e)
     return results
 
 

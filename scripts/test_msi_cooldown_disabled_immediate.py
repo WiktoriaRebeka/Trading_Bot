@@ -119,6 +119,8 @@ def test_ob_new_places_limit_immediately_no_cooldown_pending():
         with patch.object(moh, "MSI_COOLDOWN_ENABLED", False), patch.object(
             moh, "_prepare_msi_order", new=AsyncMock(return_value=prepared)
         ), patch.object(
+            moh, "_symbol_has_open_position", new=AsyncMock(return_value=False)
+        ), patch.object(
             moh, "_cancel_superseded_msi_limits", new=AsyncMock(return_value=0)
         ), patch.object(
             moh, "_place_msi_limit_gtc", new=_fake_place
@@ -155,6 +157,8 @@ def test_cooldown_enabled_still_writes_pending():
     async def _run():
         with patch.object(moh, "MSI_COOLDOWN_ENABLED", True), patch.object(
             moh, "_prepare_msi_order", new=AsyncMock(return_value=prepared)
+        ), patch.object(
+            moh, "_symbol_has_open_position", new=AsyncMock(return_value=False)
         ), patch.object(
             moh, "_cancel_superseded_msi_limits", new=AsyncMock(return_value=0)
         ), patch.object(

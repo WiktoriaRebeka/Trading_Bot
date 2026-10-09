@@ -31,6 +31,7 @@ from bot_service.bot_logic import (
     call_with_retry,
     log_struct,
     round_price_by_tick,
+    safe_float,
 )
 from bot_service.bybit_executor import BybitExecutor
 from bot_service.orderblock_bq_logger import log_order_placed, log_rejected_failed_break
@@ -68,14 +69,53 @@ class MsiPreparedOrder:
     timestamp_signal: str
 
 
+async def _symbol_has_open_position(
+    executor: BybitExecutor,
+    symbol: str,
+) -> bool:
+    """
+    Czy na symbolu jest otwarta pozycja?
+    Źródło prawdy: Bybit /v5/position/list (przeżywa restart).
+    Fallback: Firestore status=OPEN (msi_orderblock) gdy API niedostępne.
+    """
+    sym = _normalize_symbol(symbol)
+    try:
+        pos = await asyncio.to_thread(executor.get_position_info, sym)
+        # Tylko prawdziwy dict z Bybit — unikaj fałszywych „OPEN” z MagicMock w testach.
+        if isinstance(pos, dict) and safe_float(pos.get("size")) > 0:
+            return True
+        return False
+    except Exception as e:
+        log_struct(
+            "warning",
+            "msi_defer",
+            f"Bybit position check failed — fallback Firestore OPEN: {e}",
+            symbol=sym,
+        )
+        docs = await asyncio.to_thread(state_manager.get_msi_open_orders_for_symbol, sym)
+        return bool(docs)
+
+
+def _sl_already_hit(*, direction: str, planned_sl: float, mark_price: float) -> bool:
+    """LONG: cena <= SL; SHORT: cena >= SL."""
+    is_long = str(direction).upper() == "LONG"
+    if is_long:
+        return mark_price <= planned_sl
+    return mark_price >= planned_sl
+
+
 async def _cancel_superseded_msi_limits(
     executor: BybitExecutor,
     symbol: str,
     new_event_id: str,
+    *,
+    only_deferred: bool = False,
 ) -> int:
     """
-    Nowy OB → anuluj poprzednie niewypełnione limity MSI dla tego symbolu.
-    COOLDOWN_PENDING: tylko update statusu (brak zlecenia na giełdzie).
+    Nowy OB → anuluj poprzednie niewypełnione limity / odłożone OB MSI dla symbolu.
+    COOLDOWN_PENDING / DEFERRED_POSITION_OPEN: tylko update statusu (brak zlecenia na giełdzie).
+    only_deferred=True: przy otwartej pozycji kasujemy wyłącznie starsze DEFERRED
+    (niewypełnionych limitów i OPEN nie ruszamy).
     """
     cancelled = 0
     sym = _normalize_symbol(symbol)
@@ -87,21 +127,29 @@ async def _cancel_superseded_msi_limits(
         data = doc.to_dict() or {}
         old_symbol = data.get("symbol") or symbol
         status = data.get("status")
+        if only_deferred and status != "DEFERRED_POSITION_OPEN":
+            continue
         try:
-            if status == "COOLDOWN_PENDING":
+            if status in ("COOLDOWN_PENDING", "DEFERRED_POSITION_OPEN"):
                 state_manager.update_active_order(old_event_id, {
                     "status": "CANCELLED_SUPERSEDED",
                     "cancelled_at": datetime.now(timezone.utc).isoformat(),
                     "superseded_by": new_event_id,
                 })
                 cancelled += 1
+                msg = (
+                    "Anulowano odłożony OB MSI (nowy OB)"
+                    if status == "DEFERRED_POSITION_OPEN"
+                    else "Anulowano karencję MSI (nowy OB)"
+                )
                 log_struct(
                     "info",
                     "msi_cancel",
-                    "Anulowano karencję MSI (nowy OB)",
+                    msg,
                     symbol=sym,
                     event_id=old_event_id,
                     superseded_by=new_event_id,
+                    old_status=status,
                 )
                 continue
 
@@ -142,6 +190,55 @@ async def _cancel_superseded_msi_limits(
                 event_id=old_event_id,
             )
     return cancelled
+
+
+async def _save_deferred_ob(
+    *,
+    prepared: MsiPreparedOrder,
+    payload: Dict[str, Any],
+    market_features: Dict[str, Any],
+) -> None:
+    """Zapamiętaj najnowszy OB na czas otwartej pozycji (DEFERRED_POSITION_OPEN)."""
+    now = datetime.now(timezone.utc)
+    state_payload = {
+        "symbol": prepared.symbol,
+        "status": "DEFERRED_POSITION_OPEN",
+        "direction": prepared.signal.direction,
+        "planned_qty": prepared.calculated_qty,
+        "params": prepared.order_params,
+        "event_id": prepared.event_id,
+        "signal_id": prepared.signal.signal_id,
+        "timestamp_signal": prepared.timestamp_signal,
+        "created_at": now.isoformat(),
+        "deferred_at": now.isoformat(),
+        "planned_entry_price": prepared.f_entry,
+        "planned_sl_price": prepared.f_sl,
+        "planned_tp_price": prepared.f_tp,
+        "planned_2r_price": prepared.f_tp,
+        "session": prepared.signal.session,
+        "tick_size": prepared.tick_size,
+        "signal_mode": "msi_orderblock",
+        "order_kind": "msi_deferred",
+        "chain_id": prepared.chain_id,
+        "risk_ob": prepared.risk_ob,
+        "alert_payload": payload,
+        "market_features": market_features,
+    }
+    await asyncio.to_thread(
+        state_manager.save_active_order_transactional, prepared.event_id, state_payload
+    )
+    log_struct(
+        "info",
+        "msi_defer",
+        "OB odłożony — pozycja już otwarta na symbolu (DEFERRED_POSITION_OPEN)",
+        symbol=prepared.symbol,
+        event_id=prepared.event_id,
+        chain_id=prepared.chain_id,
+        entry=prepared.f_entry,
+        sl=prepared.f_sl,
+        tp=prepared.f_tp,
+        direction=prepared.signal.direction,
+    )
 
 
 async def _prepare_msi_order(
@@ -521,7 +618,13 @@ async def handle_msi_ob_limit_signal(
     existing = await asyncio.to_thread(state_manager.get_active_order_by_id, event_id)
     if existing:
         st = existing.get("status")
-        if st in ("COOLDOWN_PENDING", "PLACING", "PLACED", "OPEN"):
+        if st in (
+            "COOLDOWN_PENDING",
+            "PLACING",
+            "PLACED",
+            "OPEN",
+            "DEFERRED_POSITION_OPEN",
+        ):
             log_struct(
                 "info",
                 "msi_cooldown",
@@ -535,17 +638,41 @@ async def handle_msi_ob_limit_signal(
     if prepared is None:
         return
 
+    mf = prepared.signal.market_features if isinstance(prepared.signal.market_features, dict) else {}
+
+    # Jedna pozycja na symbol: przy OPEN → odłóż OB (tylko najnowszy).
+    if await _symbol_has_open_position(executor, symbol):
+        n_superseded = await _cancel_superseded_msi_limits(
+            executor, symbol, event_id, only_deferred=True
+        )
+        if n_superseded:
+            log_struct(
+                "info",
+                "msi_defer",
+                f"Zastąpiono {n_superseded} wcześniejszy(ch) odłożony(ch) OB",
+                symbol=symbol,
+                event_id=event_id,
+            )
+        await _save_deferred_ob(prepared=prepared, payload=payload, market_features=mf)
+        elapsed_ms = (perf_counter() - start_total) * 1000.0
+        log_struct(
+            "info",
+            "msi_defer",
+            f"handle_msi_ob_limit_signal zakończone w {elapsed_ms:.1f} ms (deferred)",
+            symbol=symbol,
+            event_id=event_id,
+        )
+        return
+
     n_cancelled = await _cancel_superseded_msi_limits(executor, symbol, event_id)
     if n_cancelled:
         log_struct(
             "info",
             "msi_cancel",
-            f"Anulowano {n_cancelled} poprzedni(ych) limit(ów)/karencji MSI",
+            f"Anulowano {n_cancelled} poprzedni(ych) limit(ów)/karencji/odłożonych MSI",
             symbol=symbol,
             event_id=event_id,
         )
-
-    mf = prepared.signal.market_features if isinstance(prepared.signal.market_features, dict) else {}
 
     if not MSI_COOLDOWN_ENABLED:
         log_struct(
@@ -791,3 +918,150 @@ def process_msi_cooldown_queue(executor: BybitExecutor) -> None:
         asyncio.run(_process_msi_cooldown_queue_async(executor))
     except Exception as e:
         log_struct("error", "msi_cooldown", f"process_msi_cooldown_queue failed: {e}")
+
+
+async def _place_deferred_doc(
+    executor: BybitExecutor,
+    doc_id: str,
+    data: Dict[str, Any],
+) -> None:
+    """Po zamknięciu pozycji: place Limit dla odłożonego OB albo SKIPPED_SL_ALREADY_HIT."""
+    if data.get("status") != "DEFERRED_POSITION_OPEN":
+        return
+
+    symbol = _normalize_symbol(str(data.get("symbol", "")))
+    direction = str(data.get("direction", "LONG"))
+    planned_sl = safe_float(data.get("planned_sl_price"))
+    planned_entry = safe_float(data.get("planned_entry_price"))
+    chain_id = str(data.get("chain_id", doc_id))
+
+    if await _symbol_has_open_position(executor, symbol):
+        log_struct(
+            "debug",
+            "msi_defer",
+            "Odłożony OB czeka — pozycja nadal otwarta",
+            symbol=symbol,
+            event_id=doc_id,
+        )
+        return
+
+    mark_price = await asyncio.to_thread(_mark_price_for_symbol, executor, symbol)
+    if mark_price is not None and planned_sl > 0 and _sl_already_hit(
+        direction=direction, planned_sl=planned_sl, mark_price=mark_price
+    ):
+        now = datetime.now(timezone.utc)
+        state_manager.update_active_order(doc_id, {
+            "status": "SKIPPED_SL_ALREADY_HIT",
+            "skipped_at": now.isoformat(),
+            "skip_reason": "sl_already_hit_at_position_close",
+            "mark_price_at_skip": mark_price,
+        })
+        log_struct(
+            "info",
+            "msi_defer",
+            "SKIPPED_SL_ALREADY_HIT — cena już za SL odłożonego OB, nie składam Limitu",
+            symbol=symbol,
+            event_id=doc_id,
+            chain_id=chain_id,
+            direction=direction,
+            entry=planned_entry,
+            sl=planned_sl,
+            mark_price=mark_price,
+        )
+        return
+
+    alert_payload = data.get("alert_payload")
+    if not isinstance(alert_payload, dict):
+        log_struct(
+            "error",
+            "msi_defer",
+            "Brak alert_payload na DEFERRED — nie można złożyć limitu",
+            event_id=doc_id,
+            symbol=symbol,
+        )
+        state_manager.update_active_order(doc_id, {"status": "ERROR_DATA_MISSING"})
+        return
+
+    prepared = await _prepare_msi_order(alert_payload)
+    if prepared is None:
+        state_manager.update_active_order(
+            doc_id, {"status": "ERROR", "error": "prepare_failed_after_defer"}
+        )
+        return
+
+    mf = data.get("market_features") if isinstance(data.get("market_features"), dict) else {}
+    log_struct(
+        "info",
+        "msi_defer",
+        "Pozycja zamknięta — składam Limit GTC dla najnowszego odłożonego OB",
+        symbol=symbol,
+        event_id=doc_id,
+        chain_id=prepared.chain_id,
+        entry=prepared.f_entry,
+        sl=prepared.f_sl,
+        tp=prepared.f_tp,
+        mark_price=mark_price,
+    )
+    await _place_msi_limit_gtc(executor, prepared, market_features=mf)
+
+
+async def _process_msi_deferred_queue_async(executor: BybitExecutor) -> None:
+    """
+    Per symbol: tylko NAJNOWSZY DEFERRED (po created_at / deferred_at).
+    Starsze (gdyby zostały) → CANCELLED_SUPERSEDED.
+    """
+    docs = list(state_manager.get_deferred_msi_orders())
+    if not docs:
+        return
+
+    by_sym: Dict[str, List[Any]] = {}
+    for doc in docs:
+        data = doc.to_dict() or {}
+        sym = _normalize_symbol(str(data.get("symbol", "")))
+        if not sym:
+            continue
+        by_sym.setdefault(sym, []).append(doc)
+
+    log_struct("debug", "msi_defer", "Deferred queue", symbols=len(by_sym), count=len(docs))
+
+    for sym, sym_docs in by_sym.items():
+        def _defer_key(d):
+            dd = d.to_dict() or {}
+            return str(dd.get("deferred_at") or dd.get("created_at") or "")
+
+        ordered = sorted(sym_docs, key=_defer_key)
+        latest = ordered[-1]
+        for stale in ordered[:-1]:
+            state_manager.update_active_order(stale.id, {
+                "status": "CANCELLED_SUPERSEDED",
+                "cancelled_at": datetime.now(timezone.utc).isoformat(),
+                "superseded_by": latest.id,
+            })
+            log_struct(
+                "info",
+                "msi_defer",
+                "Stary DEFERRED zastąpiony nowszym (queue cleanup)",
+                symbol=sym,
+                event_id=stale.id,
+                superseded_by=latest.id,
+            )
+
+        data = latest.to_dict() or {}
+        try:
+            await _place_deferred_doc(executor, latest.id, data)
+        except Exception as e:
+            log_struct(
+                "error",
+                "msi_defer",
+                f"Błąd ewaluacji odłożonego OB: {e}",
+                event_id=latest.id,
+                symbol=sym,
+            )
+
+
+def process_msi_deferred_queue(executor: BybitExecutor) -> None:
+    """Wołane z update_filled_orders — po zamknięciu pozycji składa Limit dla DEFERRED."""
+    try:
+        asyncio.run(_process_msi_deferred_queue_async(executor))
+    except Exception as e:
+        log_struct("error", "msi_defer", f"process_msi_deferred_queue failed: {e}")
