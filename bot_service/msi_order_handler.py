@@ -42,6 +42,7 @@ def _normalize_symbol(symbol: str) -> str:
     return str(symbol).upper().replace(".P", "")
 
 from bot_service.msi_cooldown_logic import (
+    MSI_COOLDOWN_ENABLED,
     MSI_COOLDOWN_MINUTES,
     cooldown_failed_break,
     parse_signal_ts,
@@ -305,6 +306,22 @@ async def _place_msi_limit_gtc(
     f_tp = prepared.f_tp
 
     mark_price = await asyncio.to_thread(_mark_price_for_symbol, executor, symbol)
+    # Tylko log — bez blokady / odrzucenia, gdy Limit jest już „marketable”.
+    if mark_price is not None:
+        marketable = (
+            (prepared.is_long and mark_price <= f_entry)
+            or ((not prepared.is_long) and mark_price >= f_entry)
+        )
+        if marketable:
+            log_struct(
+                "info",
+                "msi_place",
+                "[MSI] limit marketable at placement",
+                symbol=symbol,
+                event_id=event_id,
+                entry=f_entry,
+                mark_price=mark_price,
+            )
     adjusted_sl = _ensure_sl_valid_for_bybit(
         f_sl, f_entry, prepared.is_long, prepared.tick_size, mark_price, event_id, symbol,
     )
@@ -482,7 +499,11 @@ async def handle_msi_ob_limit_signal(
     payload: Dict[str, Any],
     executor: BybitExecutor,
 ) -> None:
-    """Walidacja → COOLDOWN_PENDING (30 min) → place w cyklu update-orders."""
+    """
+    Walidacja → supersede starych limitów → Limit GTC.
+    Domyślnie (MSI_COOLDOWN_ENABLED=false): place od razu w tym samym cyklu alertu.
+    Gdy MSI_COOLDOWN_ENABLED=true: COOLDOWN_PENDING → failed-break w /update-orders.
+    """
     start_total = perf_counter()
     event_id = str(payload.get("event_id", "unknown"))
     symbol = _normalize_symbol(payload.get("symbol", "unknown"))
@@ -524,11 +545,36 @@ async def handle_msi_ob_limit_signal(
             event_id=event_id,
         )
 
+    mf = prepared.signal.market_features if isinstance(prepared.signal.market_features, dict) else {}
+
+    if not MSI_COOLDOWN_ENABLED:
+        log_struct(
+            "info",
+            "msi_place",
+            "Cooldown disabled — składam Limit GTC od razu po OB_NEW",
+            symbol=symbol,
+            event_id=event_id,
+            chain_id=prepared.chain_id,
+            entry=prepared.f_entry,
+            sl=prepared.f_sl,
+            tp=prepared.f_tp,
+            timestamp_signal=prepared.timestamp_signal,
+        )
+        await _place_msi_limit_gtc(executor, prepared, market_features=mf)
+        elapsed_ms = (perf_counter() - start_total) * 1000.0
+        log_struct(
+            "info",
+            "msi_place",
+            f"handle_msi_ob_limit_signal zakończone w {elapsed_ms:.1f} ms (immediate)",
+            symbol=symbol,
+            event_id=event_id,
+        )
+        return
+
+    # --- Stara ścieżka (MSI_COOLDOWN_ENABLED=true): karencja + failed-break ---
     signal_ts = parse_signal_ts(prepared.timestamp_signal)
     cooldown_until = signal_ts + timedelta(minutes=MSI_COOLDOWN_MINUTES)
     now = datetime.now(timezone.utc)
-
-    mf = prepared.signal.market_features if isinstance(prepared.signal.market_features, dict) else {}
 
     state_payload = {
         "symbol": symbol,

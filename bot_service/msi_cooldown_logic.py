@@ -7,6 +7,17 @@ import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
+# Domyślnie OFF: Limit GTC od razu po OB_NEW (bez 30 min / failed-break).
+# Ustaw MSI_COOLDOWN_ENABLED=true, żeby przywrócić starą ścieżkę COOLDOWN_PENDING.
+MSI_COOLDOWN_ENABLED = _env_bool("MSI_COOLDOWN_ENABLED", False)
 MSI_COOLDOWN_MINUTES = int(os.environ.get("MSI_COOLDOWN_MINUTES", "30"))
 M1_INTERVAL_MS = 60_000
 
