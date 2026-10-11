@@ -220,6 +220,7 @@ def get_deferred_msi_orders(symbol: Optional[str] = None) -> list:
 
 
 def get_latest_active_order_for_symbol(symbol: str, side: str) -> Optional[Dict[str, Any]]:
+    """Legacy: najnowszy active_order dla symbol+side (bez filtra statusu). Preferuj get_open_orders_for_symbol_side."""
     try:
         q = _collection_active_orders().where("symbol", "==", symbol).where("direction", "==", side).order_by("created_at", direction=firestore.Query.DESCENDING).limit(1)
         docs = list(q.stream())
@@ -231,6 +232,35 @@ def get_latest_active_order_for_symbol(symbol: str, side: str) -> Optional[Dict[
     except Exception as e:
         logger.exception(f"[state_manager] Failed to get latest active order for {symbol}: {e}")
         return None
+
+
+def get_open_orders_for_symbol_side(symbol: str, side: str) -> list:
+    """
+    Dokumenty active_orders ze statusem OPEN dla symbolu + kierunku (LONG/SHORT).
+    Przy regule jednej pozycji na symbol oczekiwany wynik: 0 lub 1.
+    """
+    sym = str(symbol or "").upper().replace(".P", "")
+    direction = str(side or "").upper()
+    results = []
+    if not sym or direction not in ("LONG", "SHORT"):
+        return results
+    try:
+        for doc in _collection_active_orders().stream():
+            data = doc.to_dict() or {}
+            if data.get("status") != "OPEN":
+                continue
+            doc_sym = str(data.get("symbol", "")).upper().replace(".P", "")
+            if doc_sym != sym:
+                continue
+            if str(data.get("direction", "")).upper() != direction:
+                continue
+            results.append(doc)
+    except Exception as e:
+        logger.exception(
+            "[state_manager] get_open_orders_for_symbol_side failed for %s %s: %s",
+            sym, direction, e,
+        )
+    return results
 
 
 # -------------------------

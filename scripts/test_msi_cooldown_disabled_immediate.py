@@ -185,17 +185,19 @@ def test_cooldown_enabled_still_writes_pending():
     assert save_calls[0]["order_kind"] == "msi_cooldown"
 
 
-def test_marketable_log_long_when_mark_at_or_below_entry():
-    """Log INFO bez blokady — wywołanie _place nadal idzie dalej."""
-    prepared = _FakePrepared(is_long=True, f_entry=100.5)
+def test_marketable_log_long_when_mark_in_ob_zone():
+    """Cena w strefie OB (między entry a SL) — log marketable, place idzie dalej."""
+    # LONG: entry=100.5, sl=100.0; mark=100.2 jest w strefie (nie za SL).
+    prepared = _FakePrepared(is_long=True, f_entry=100.5, f_sl=100.0)
     logs: List[str] = []
+    place_via_api: List[Any] = []
 
     def _capture(level, stage, msg, **fields):
         logs.append(msg)
 
     async def _run():
         with patch.object(moh, "log_struct", side_effect=_capture), patch.object(
-            moh, "_mark_price_for_symbol", return_value=100.0
+            moh, "_mark_price_for_symbol", return_value=100.2
         ), patch.object(
             moh, "_ensure_sl_valid_for_bybit", return_value=prepared.f_sl
         ), patch.object(
@@ -213,14 +215,98 @@ def test_marketable_log_long_when_mark_at_or_below_entry():
             moh.state_manager, "update_active_order"
         ):
             await moh._place_msi_limit_gtc(MagicMock(), prepared, market_features={})
+            place_via_api.append(True)
 
     asyncio.run(_run())
     assert "[MSI] limit marketable at placement" in logs
+    assert place_via_api == [True]
+    assert not any("SKIPPED_SL_ALREADY_HIT" in m for m in logs)
+
+
+def test_skip_long_when_mark_at_or_beyond_sl():
+    prepared = _FakePrepared(is_long=True, f_entry=100.5, f_sl=100.0)
+    saves: List[Dict[str, Any]] = []
+    place_api: List[Any] = []
+
+    async def _run():
+        with patch.object(moh, "_mark_price_for_symbol", return_value=99.9), patch.object(
+            moh.state_manager,
+            "save_active_order_transactional",
+            side_effect=lambda eid, payload: saves.append(dict(payload)),
+        ), patch.object(
+            moh, "async_call_with_retry",
+            new=AsyncMock(side_effect=lambda *a, **k: place_api.append(True)),
+        ):
+            await moh._place_msi_limit_gtc(MagicMock(), prepared, market_features={})
+
+    asyncio.run(_run())
+    assert place_api == []
+    assert saves and saves[0]["status"] == "SKIPPED_SL_ALREADY_HIT"
+
+
+def test_skip_short_when_mark_at_or_beyond_sl():
+    prepared = _FakePrepared(
+        is_long=False, f_entry=100.0, f_sl=100.5, signal=_fake_signal(direction="SHORT")
+    )
+    prepared.signal.direction = "SHORT"
+    saves: List[Dict[str, Any]] = []
+    place_api: List[Any] = []
+
+    async def _run():
+        with patch.object(moh, "_mark_price_for_symbol", return_value=100.6), patch.object(
+            moh.state_manager,
+            "save_active_order_transactional",
+            side_effect=lambda eid, payload: saves.append(dict(payload)),
+        ), patch.object(
+            moh, "async_call_with_retry",
+            new=AsyncMock(side_effect=lambda *a, **k: place_api.append(True)),
+        ):
+            await moh._place_msi_limit_gtc(MagicMock(), prepared, market_features={})
+
+    asyncio.run(_run())
+    assert place_api == []
+    assert saves and saves[0]["status"] == "SKIPPED_SL_ALREADY_HIT"
+
+
+def test_place_long_when_mark_above_entry():
+    """Cena przed wejściem (LONG: mark > entry) — składaj Limit, bez skip."""
+    prepared = _FakePrepared(is_long=True, f_entry=100.5, f_sl=100.0)
+    place_api: List[Any] = []
+    saves: List[Dict[str, Any]] = []
+
+    async def _run():
+        with patch.object(moh, "_mark_price_for_symbol", return_value=101.0), patch.object(
+            moh, "_ensure_sl_valid_for_bybit", return_value=prepared.f_sl
+        ), patch.object(
+            moh.state_manager,
+            "save_active_order_transactional",
+            side_effect=lambda eid, payload: saves.append(dict(payload)),
+        ), patch.object(
+            moh, "_build_signal_analysis_data", return_value={}
+        ), patch.object(
+            moh, "_submit_signal_analytics"
+        ), patch.object(
+            moh, "async_call_with_retry",
+            new=AsyncMock(return_value={"orderId": "oid-1"}),
+        ), patch.object(
+            moh, "log_order_placed"
+        ), patch.object(
+            moh.state_manager, "update_active_order"
+        ):
+            await moh._place_msi_limit_gtc(MagicMock(), prepared, market_features={})
+            place_api.append(True)
+
+    asyncio.run(_run())
+    assert place_api == [True]
+    assert not any(s.get("status") == "SKIPPED_SL_ALREADY_HIT" for s in saves)
 
 
 if __name__ == "__main__":
     test_flag_default_off()
     test_ob_new_places_limit_immediately_no_cooldown_pending()
     test_cooldown_enabled_still_writes_pending()
-    test_marketable_log_long_when_mark_at_or_below_entry()
+    test_marketable_log_long_when_mark_in_ob_zone()
+    test_skip_long_when_mark_at_or_beyond_sl()
+    test_skip_short_when_mark_at_or_beyond_sl()
+    test_place_long_when_mark_above_entry()
     print("OK — test_msi_cooldown_disabled_immediate")

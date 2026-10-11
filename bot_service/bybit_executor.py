@@ -212,14 +212,24 @@ class BybitExecutor:
             return False
 
     def find_sl_order_id(self, symbol: str, order_data: Dict[str, Any]) -> Optional[str]:
+        """Szuka aktywnego StopLoss po triggerPrice ≈ planned_sl_price (do zapisu slOrderId)."""
         try:
+            planned_raw = order_data.get("planned_sl_price")
+            if planned_raw is None:
+                return None
+            planned_sl = float(planned_raw)
             active_stop_orders = self.get_active_tp_sl_orders(symbol)
             for stop_order in active_stop_orders:
-                trigger_price = float(stop_order.get('triggerPrice', 0))
-                if stop_order.get('stopOrderType') == 'StopLoss' and math.isclose(trigger_price, order_data.get('planned_sl_price')):
-                    sl_order_id = stop_order.get('orderId')
+                if stop_order.get("stopOrderType") != "StopLoss":
+                    continue
+                trigger_price = float(stop_order.get("triggerPrice", 0) or 0)
+                if math.isclose(trigger_price, planned_sl, rel_tol=0.0, abs_tol=1e-8):
+                    sl_order_id = stop_order.get("orderId")
                     logger.info(f"[{symbol}] Znaleziono pasujące zlecenie SL o ID: {sl_order_id}")
                     return sl_order_id
+            logger.warning(
+                f"[{symbol}] Nie znaleziono aktywnego zlecenia SL pasującego do ceny {planned_sl}."
+            )
             return None
         except Exception as e:
             logger.warning(f"[{symbol}] Nie udało się pobrać ID zlecenia SL: {e}")
@@ -394,21 +404,6 @@ class BybitExecutor:
             
         except (RequestException, BybitAPIError) as e:
             logger.error(f"[{symbol}] Błąd podczas pobierania informacji o pozycji: {e}", exc_info=True)
-            return None
-
-    def find_sl_order_id(self, symbol: str, order_data: Dict[str, Any]) -> Optional[str]:
-        try:
-            active_stop_orders = self.get_active_tp_sl_orders(symbol)
-            for stop_order in active_stop_orders:
-                trigger_price = float(stop_order.get('triggerPrice', 0))
-                if stop_order.get('stopOrderType') == 'StopLoss' and math.isclose(trigger_price, order_data.get('planned_sl_price')):
-                    sl_order_id = stop_order.get('orderId')
-                    logger.info(f"[{symbol}] Znaleziono pasujące zlecenie SL o ID: {sl_order_id}")
-                    return sl_order_id
-            logger.warning(f"[{symbol}] Nie znaleziono aktywnego zlecenia SL pasującego do ceny {order_data.get('planned_sl_price')}.")
-            return None
-        except Exception as e:
-            logger.warning(f"[{symbol}] Nie udało się pobrać ID zlecenia SL: {e}")
             return None
 
     def get_klines_1m(

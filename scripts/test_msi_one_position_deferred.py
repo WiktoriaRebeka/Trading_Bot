@@ -264,6 +264,7 @@ def test_b_three_deferred_only_latest_places_after_close():
 
 
 def test_c_sl_already_hit_skips_place():
+    """Po zamknięciu pozycji: mark za SL → _place_msi_limit_gtc nie składa, SKIPPED."""
     doc = _FakeDoc(
         "evt-sl",
         {
@@ -278,30 +279,32 @@ def test_c_sl_already_hit_skips_place():
             "chain_id": "c-sl",
         },
     )
-    updates: List[Dict[str, Any]] = []
-    place_calls: List[Any] = []
-
-    async def _fake_place(*_a, **_k):
-        place_calls.append(True)
+    prepared = _FakePrepared(
+        event_id="evt-sl", is_long=True, f_entry=100.5, f_sl=100.0
+    )
+    saves: List[Dict[str, Any]] = []
+    place_api: List[Any] = []
 
     async def _run():
         with patch.object(
             moh, "_symbol_has_open_position", new=AsyncMock(return_value=False)
         ), patch.object(
+            moh, "_prepare_msi_order", new=AsyncMock(return_value=prepared)
+        ), patch.object(
             moh, "_mark_price_for_symbol", return_value=99.5  # za SL
         ), patch.object(
             moh.state_manager,
-            "update_active_order",
-            side_effect=lambda eid, payload: updates.append(dict(payload)),
+            "save_active_order_transactional",
+            side_effect=lambda eid, payload: saves.append(dict(payload)),
         ), patch.object(
-            moh, "_place_msi_limit_gtc", new=_fake_place
+            moh, "async_call_with_retry",
+            new=AsyncMock(side_effect=lambda *a, **k: place_api.append(True)),
         ):
             await moh._place_deferred_doc(MagicMock(), "evt-sl", doc.to_dict())
 
     asyncio.run(_run())
-    assert place_calls == []
-    assert updates[0]["status"] == "SKIPPED_SL_ALREADY_HIT"
-
+    assert place_api == []
+    assert saves and saves[0]["status"] == "SKIPPED_SL_ALREADY_HIT"
 
 def test_only_deferred_supersede_when_position_open():
     """Przy OPEN: tylko_deferred=True — nie kasujemy PLACED przez Bybit w tym teście."""

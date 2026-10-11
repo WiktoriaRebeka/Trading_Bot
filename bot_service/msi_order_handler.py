@@ -104,6 +104,53 @@ def _sl_already_hit(*, direction: str, planned_sl: float, mark_price: float) -> 
     return mark_price >= planned_sl
 
 
+async def _skip_sl_already_hit_at_placement(
+    *,
+    prepared: MsiPreparedOrder,
+    mark_price: float,
+    skip_reason: str = "sl_already_hit_at_placement",
+) -> None:
+    """Zapisz SKIPPED_SL_ALREADY_HIT — bez place Limit (mark już za SL)."""
+    now = datetime.now(timezone.utc)
+    state_payload = {
+        "symbol": prepared.symbol,
+        "status": "SKIPPED_SL_ALREADY_HIT",
+        "direction": prepared.signal.direction,
+        "event_id": prepared.event_id,
+        "signal_id": prepared.signal.signal_id,
+        "timestamp_signal": prepared.timestamp_signal,
+        "skipped_at": now.isoformat(),
+        "skip_reason": skip_reason,
+        "mark_price_at_skip": mark_price,
+        "planned_entry_price": prepared.f_entry,
+        "planned_sl_price": prepared.f_sl,
+        "planned_tp_price": prepared.f_tp,
+        "planned_2r_price": prepared.f_tp,
+        "session": prepared.signal.session,
+        "tick_size": prepared.tick_size,
+        "signal_mode": "msi_orderblock",
+        "order_kind": "msi_skipped_sl",
+        "chain_id": prepared.chain_id,
+        "risk_ob": prepared.risk_ob,
+    }
+    await asyncio.to_thread(
+        state_manager.save_active_order_transactional, prepared.event_id, state_payload
+    )
+    log_struct(
+        "info",
+        "msi_place",
+        "SKIPPED_SL_ALREADY_HIT — cena już za SL, nie składam Limitu",
+        symbol=prepared.symbol,
+        event_id=prepared.event_id,
+        chain_id=prepared.chain_id,
+        direction=prepared.signal.direction,
+        entry=prepared.f_entry,
+        sl=prepared.f_sl,
+        mark_price=mark_price,
+        skip_reason=skip_reason,
+    )
+
+
 async def _cancel_superseded_msi_limits(
     executor: BybitExecutor,
     symbol: str,
@@ -403,7 +450,18 @@ async def _place_msi_limit_gtc(
     f_tp = prepared.f_tp
 
     mark_price = await asyncio.to_thread(_mark_price_for_symbol, executor, symbol)
-    # Tylko log — bez blokady / odrzucenia, gdy Limit jest już „marketable”.
+    # Guard: mark już za SL → nie składaj (natychmiastowy fill+SL = strata ≈ fee).
+    # Ta sama cena (mark) co przy SKIPPED dla odłożonego OB.
+    if mark_price is not None and f_sl > 0 and _sl_already_hit(
+        direction=signal.direction, planned_sl=f_sl, mark_price=mark_price
+    ):
+        await _skip_sl_already_hit_at_placement(
+            prepared=prepared,
+            mark_price=mark_price,
+            skip_reason="sl_already_hit_at_placement",
+        )
+        return
+    # Tylko log — bez blokady, gdy Limit jest „marketable” (cena w strefie OB / za entry).
     if mark_price is not None:
         marketable = (
             (prepared.is_long and mark_price <= f_entry)
@@ -930,10 +988,6 @@ async def _place_deferred_doc(
         return
 
     symbol = _normalize_symbol(str(data.get("symbol", "")))
-    direction = str(data.get("direction", "LONG"))
-    planned_sl = safe_float(data.get("planned_sl_price"))
-    planned_entry = safe_float(data.get("planned_entry_price"))
-    chain_id = str(data.get("chain_id", doc_id))
 
     if await _symbol_has_open_position(executor, symbol):
         log_struct(
@@ -945,31 +999,7 @@ async def _place_deferred_doc(
         )
         return
 
-    mark_price = await asyncio.to_thread(_mark_price_for_symbol, executor, symbol)
-    if mark_price is not None and planned_sl > 0 and _sl_already_hit(
-        direction=direction, planned_sl=planned_sl, mark_price=mark_price
-    ):
-        now = datetime.now(timezone.utc)
-        state_manager.update_active_order(doc_id, {
-            "status": "SKIPPED_SL_ALREADY_HIT",
-            "skipped_at": now.isoformat(),
-            "skip_reason": "sl_already_hit_at_position_close",
-            "mark_price_at_skip": mark_price,
-        })
-        log_struct(
-            "info",
-            "msi_defer",
-            "SKIPPED_SL_ALREADY_HIT — cena już za SL odłożonego OB, nie składam Limitu",
-            symbol=symbol,
-            event_id=doc_id,
-            chain_id=chain_id,
-            direction=direction,
-            entry=planned_entry,
-            sl=planned_sl,
-            mark_price=mark_price,
-        )
-        return
-
+    # Mark i guard SL: wspólna brama w _place_msi_limit_gtc (mark z Bybit).
     alert_payload = data.get("alert_payload")
     if not isinstance(alert_payload, dict):
         log_struct(
@@ -1000,7 +1030,6 @@ async def _place_deferred_doc(
         entry=prepared.f_entry,
         sl=prepared.f_sl,
         tp=prepared.f_tp,
-        mark_price=mark_price,
     )
     await _place_msi_limit_gtc(executor, prepared, market_features=mf)
 

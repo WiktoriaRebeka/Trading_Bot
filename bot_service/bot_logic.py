@@ -770,13 +770,29 @@ def update_filled_orders(executor: BybitExecutor):
                 pos = call_with_retry(executor.get_position_info, symbol)
                 if pos and safe_float(pos.get('size')) > 0:
                     real_entry = _real_entry_from_position(pos)
-                    sl_id = executor.find_sl_order_id(symbol, data)
-                    state_manager.update_active_order(order_link_id, {
+                    # slOrderId potrzebne do match PnL (krok 2) — Bybit bywa opóźniony po fill.
+                    sl_id = None
+                    for sl_attempt in range(3):
+                        sl_id = call_with_retry(executor.find_sl_order_id, symbol, data)
+                        if sl_id:
+                            break
+                        if sl_attempt + 1 < 3:
+                            time.sleep(0.5)
+                    open_update = {
                         'status': 'OPEN',
-                        'slOrderId': sl_id,
                         'position_opened_at': datetime.now(timezone.utc).isoformat(),
                         'real_entry_price': real_entry if real_entry > 0 else None,
-                    })
+                    }
+                    if sl_id:
+                        open_update['slOrderId'] = sl_id
+                    else:
+                        log_struct(
+                            "warning", "updater",
+                            "OPEN bez slOrderId — retry w kolejnym cyklu (PnL match krok 2 może zawieść)",
+                            symbol=symbol, event_id=order_link_id,
+                            planned_sl=data.get("planned_sl_price"),
+                        )
+                    state_manager.update_active_order(order_link_id, open_update)
                     log_struct(
                         "info", "updater", "Order moved to OPEN",
                         symbol=symbol, event_id=order_link_id, slOrderId=sl_id,
@@ -813,7 +829,7 @@ def update_filled_orders(executor: BybitExecutor):
         except Exception as e:
             log_struct("error", "updater", "Failed to update placed order", event_id=order_link_id, error=str(e))
 
-    # --- CZĘŚĆ 2: Weryfikacja OPEN vs Bybit + retry trailingu (footprint only) ---
+    # --- CZĘŚĆ 2: Weryfikacja OPEN vs Bybit + retry trailingu (footprint) / slOrderId (MSI) ---
     open_docs = list(state_manager.get_orders_by_status('OPEN'))
     log_struct("debug", "updater", "Open orders trailing retry count", count=len(open_docs))
 
@@ -824,6 +840,30 @@ def update_filled_orders(executor: BybitExecutor):
         if not symbol:
             continue
         if str(data.get("signal_mode", "")).lower() == "msi_orderblock":
+            # MSI: bez trailingu; dograj slOrderId jeśli brakowało przy fill.
+            if not data.get("slOrderId"):
+                try:
+                    sl_id = call_with_retry(executor.find_sl_order_id, symbol, data)
+                    if sl_id:
+                        state_manager.update_active_order(order_link_id, {"slOrderId": sl_id})
+                        log_struct(
+                            "info", "updater",
+                            "Backfill slOrderId for MSI OPEN",
+                            symbol=symbol, event_id=order_link_id, slOrderId=sl_id,
+                        )
+                    else:
+                        log_struct(
+                            "warning", "updater",
+                            "MSI OPEN nadal bez slOrderId",
+                            symbol=symbol, event_id=order_link_id,
+                            planned_sl=data.get("planned_sl_price"),
+                        )
+                except Exception as e:
+                    log_struct(
+                        "warning", "updater",
+                        f"Backfill slOrderId failed: {e}",
+                        symbol=symbol, event_id=order_link_id,
+                    )
             continue
         try:
             pos = call_with_retry(executor.get_position_info, symbol)
@@ -955,7 +995,12 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
 
 
 def _find_matching_order(pnl_record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Dopasowuje rekord zamknięcia do zlecenia w Firestore."""
+    """
+    Dopasowuje rekord zamknięcia do zlecenia w Firestore.
+    1) orderLinkId (= event_id / doc id)
+    2) orderId zamknięcia = slOrderId na active_order
+    3) Fallback: dokładnie jeden OPEN dla symbol+side (bez „najnowszego” z innych statusów)
+    """
     # 1. Match by orderLinkId (event_id)
     link_id = pnl_record.get("orderLinkId")
     if link_id:
@@ -966,11 +1011,38 @@ def _find_matching_order(pnl_record: Dict[str, Any]) -> Optional[Dict[str, Any]]
     # 2. Match by sl order id
     closing_order_id = pnl_record.get("orderId")
     if closing_order_id:
-        match = state_manager.get_active_order_by_sl_order_id(closing_order_id)
+        match = state_manager.get_active_order_by_sl_order_id(str(closing_order_id))
         if match:
             return match
 
-    # 3. Fallback: latest active order for symbol & side
+    # 3. Fallback: tylko OPEN dla symbol + side (jedna pozycja → dokładnie 1)
     symbol = pnl_record.get("symbol")
     side = "LONG" if pnl_record.get("side") == "Sell" else "SHORT"
-    return state_manager.get_latest_active_order_for_symbol(symbol, side)
+    order_id_str = str(closing_order_id) if closing_order_id is not None else None
+    open_docs = list(state_manager.get_open_orders_for_symbol_side(symbol, side))
+    n = len(open_docs)
+    log_struct(
+        "info",
+        "pnl_logger",
+        "[PNL] fallback match used",
+        symbol=symbol,
+        side=side,
+        candidates=n,
+        orderId=order_id_str,
+    )
+    if n != 1:
+        log_struct(
+            "warning",
+            "pnl_logger",
+            "[PNL] fallback match ambiguous",
+            symbol=symbol,
+            side=side,
+            candidates=n,
+            orderId=order_id_str,
+        )
+        return None
+
+    doc = open_docs[0]
+    data = doc.to_dict() or {}
+    data["id"] = doc.id
+    return data
