@@ -130,6 +130,10 @@ def log_order_placed(
     session: Optional[str] = None,
     market_features: Optional[Dict[str, Any]] = None,
     tp: Optional[float] = None,
+    placed_marketable: Optional[bool] = None,
+    price_at_placement: Optional[float] = None,
+    bid_at_placement: Optional[float] = None,
+    ask_at_placement: Optional[float] = None,
 ) -> None:
     """ORDER_PLACED — faktyczne poziomy po tick rounding (bot_service)."""
     now = datetime.now(timezone.utc)
@@ -160,6 +164,10 @@ def log_order_placed(
             "trade_event_id": event_id,
             "order_id": order_id,
             "planned_tp_price": tp,
+            "placed_marketable": placed_marketable,
+            "price_at_placement": price_at_placement,
+            "bid_at_placement": bid_at_placement,
+            "ask_at_placement": ask_at_placement,
         }),
     }
     _submit_row(row)

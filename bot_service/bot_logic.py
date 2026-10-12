@@ -3,7 +3,7 @@ import asyncio
 import logging
 import json
 import time
-from typing import Dict, Any, Optional, List, Callable, Awaitable, TypeVar
+from typing import Dict, Any, Optional, List, Callable, Awaitable, TypeVar, Tuple
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal, ROUND_DOWN, ROUND_UP, getcontext
 from concurrent.futures import ThreadPoolExecutor
@@ -171,22 +171,69 @@ def _price_api_str(value: float) -> str:
     return text or "0"
 
 
-def _mark_price_for_symbol(executor: BybitExecutor, symbol: str) -> Optional[float]:
-    """Aktualna cena rynkowa (mark) — Bybit waliduje SL względem base_price przy Market order."""
+def _ticker_lookup_keys(symbol: str) -> List[str]:
+    """Kandydaci kluczy w mapie z get_latest_prices (BTCUSDT / BTCUSDT.P)."""
+    raw = str(symbol or "").upper()
+    base = raw.replace(".P", "")
+    keys: List[str] = []
+    for k in (raw, base, f"{base}.P"):
+        if k and k not in keys:
+            keys.append(k)
+    return keys
+
+
+def _get_ticker_for_symbol(
+    executor: BybitExecutor, symbol: str
+) -> Optional[Dict[str, Any]]:
+    """Ticker Bybit dla symbolu — obsługa obu form klucza (z/bez .P)."""
     try:
         prices = executor.get_latest_prices([symbol])
-        ticker = prices.get(symbol) or prices.get(symbol.replace(".P", ""))
-        if not ticker:
+        if not prices:
             return None
-        for key in ("markPrice", "lastPrice", "indexPrice"):
-            raw = ticker.get(key)
-            if raw is not None:
-                val = safe_float(raw, 0.0)
-                if val > 0:
-                    return val
+        for key in _ticker_lookup_keys(symbol):
+            ticker = prices.get(key)
+            if ticker:
+                return ticker
     except Exception as e:
-        logger.warning(f"[{symbol}] Nie udało się pobrać mark price: {e}")
+        logger.warning(f"[{symbol}] Nie udało się pobrać tickera: {e}")
     return None
+
+
+def _ticker_float(ticker: Optional[Dict[str, Any]], *keys: str) -> Optional[float]:
+    if not ticker:
+        return None
+    for key in keys:
+        raw = ticker.get(key)
+        if raw is None or raw == "":
+            continue
+        val = safe_float(raw, 0.0)
+        if val > 0:
+            return val
+    return None
+
+
+def _mark_price_for_symbol(executor: BybitExecutor, symbol: str) -> Optional[float]:
+    """Mark/last/index — Bybit waliduje SL względem base_price przy niektórych orderach."""
+    ticker = _get_ticker_for_symbol(executor, symbol)
+    return _ticker_float(ticker, "markPrice", "lastPrice", "indexPrice")
+
+
+def _placement_prices_for_symbol(
+    executor: BybitExecutor, symbol: str
+) -> Dict[str, Optional[float]]:
+    """
+    Snapshot cen przy składaniu MSI Limit:
+    - lastPrice — guard SL (Bybit SL domyślnie LastPrice; nie wysyłamy slTriggerBy)
+    - ask1Price / bid1Price — marketable Limit
+    - markPrice — walidacja odległości SL w _ensure_sl_valid_for_bybit
+    """
+    ticker = _get_ticker_for_symbol(executor, symbol)
+    return {
+        "last": _ticker_float(ticker, "lastPrice"),
+        "ask": _ticker_float(ticker, "ask1Price"),
+        "bid": _ticker_float(ticker, "bid1Price"),
+        "mark": _ticker_float(ticker, "markPrice", "lastPrice", "indexPrice"),
+    }
 
 
 def _ensure_sl_valid_for_bybit(
@@ -722,6 +769,132 @@ def _mark_order_closed_reconciled(
     )
 
 
+MSI_CLOSED_STALE_MIN_AGE = timedelta(minutes=10)
+
+
+def _parse_iso_utc(raw: Any) -> Optional[datetime]:
+    if raw is None:
+        return None
+    if isinstance(raw, datetime):
+        dt = raw
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    s = str(raw).strip()
+    if not s:
+        return None
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _msi_open_age_eligible(
+    data: Dict[str, Any],
+    *,
+    now: Optional[datetime] = None,
+    min_age: timedelta = MSI_CLOSED_STALE_MIN_AGE,
+) -> Tuple[bool, Optional[str]]:
+    """
+    CLOSED_STALE tylko gdy OPEN starsze niż min_age od przejścia na OPEN.
+    Zwraca (eligible, skip_reason|None).
+    """
+    opened = _parse_iso_utc(data.get("position_opened_at"))
+    if opened is None:
+        return False, "missing_position_opened_at"
+    ref = now or datetime.now(timezone.utc)
+    if opened > ref:
+        return False, "position_opened_at_in_future"
+    if (ref - opened) < min_age:
+        return False, "open_younger_than_min_age"
+    return True, None
+
+
+def _mark_order_closed_stale(
+    order_link_id: str,
+    reason: str,
+    *,
+    symbol: Optional[str] = None,
+    stage: str = "stale_reconcile",
+) -> None:
+    """MSI: OPEN bez pozycji na Bybit → CLOSED_STALE (bez kasowania dokumentu)."""
+    state_manager.update_active_order(order_link_id, {
+        "status": "CLOSED_STALE",
+        "closed_at": datetime.now(timezone.utc).isoformat(),
+        "closed_reason": reason,
+    })
+    log_struct(
+        "info", stage,
+        "[MSI] CLOSED_STALE",
+        event_id=order_link_id,
+        symbol=symbol,
+        reason=reason,
+    )
+
+
+def _resolve_entry_order_id(
+    executor: BybitExecutor,
+    symbol: str,
+    data: Dict[str, Any],
+    order_link_id: str,
+) -> Optional[str]:
+    """entryOrderId z doc (orderId/entryOrderId) albo z Bybit po orderLinkId."""
+    existing = data.get("entryOrderId") or data.get("orderId")
+    if existing:
+        return str(existing)
+    try:
+        details = call_with_retry(
+            executor.find_order_details_by_link_id, symbol, order_link_id
+        )
+        if details and details.get("orderId"):
+            return str(details["orderId"])
+    except Exception:
+        pass
+    return None
+
+
+def _collect_open_order_ids(
+    executor: BybitExecutor,
+    symbol: str,
+    data: Dict[str, Any],
+    order_link_id: str,
+    *,
+    retries: int = 3,
+) -> Dict[str, str]:
+    """
+    Zbiera entryOrderId / slOrderId / tpOrderId do zapisu przy OPEN / backfill.
+    Nie zmienia logiki handlu — tylko metadane dopasowania PnL.
+    """
+    out: Dict[str, str] = {}
+    entry_id = _resolve_entry_order_id(executor, symbol, data, order_link_id)
+    if entry_id:
+        out["entryOrderId"] = entry_id
+
+    need_sl = not data.get("slOrderId")
+    need_tp = not data.get("tpOrderId")
+    if not need_sl and not need_tp:
+        return out
+
+    sl_id: Optional[str] = None
+    tp_id: Optional[str] = None
+    for attempt in range(max(1, retries)):
+        sl_id, tp_id = call_with_retry(executor.find_sl_tp_order_ids, symbol, data)
+        if (not need_sl or sl_id) and (not need_tp or tp_id):
+            break
+        if attempt + 1 < retries:
+            time.sleep(0.5)
+    if need_sl and sl_id:
+        out["slOrderId"] = sl_id
+    if need_tp and tp_id:
+        out["tpOrderId"] = tp_id
+    return out
+
+
 def update_filled_orders(executor: BybitExecutor):
     """Cykl zarządzania otwartymi zleceniami i Trailing Stopem."""
     log_struct("debug", "updater", "Cycle started")
@@ -770,32 +943,37 @@ def update_filled_orders(executor: BybitExecutor):
                 pos = call_with_retry(executor.get_position_info, symbol)
                 if pos and safe_float(pos.get('size')) > 0:
                     real_entry = _real_entry_from_position(pos)
-                    # slOrderId potrzebne do match PnL (krok 2) — Bybit bywa opóźniony po fill.
-                    sl_id = None
-                    for sl_attempt in range(3):
-                        sl_id = call_with_retry(executor.find_sl_order_id, symbol, data)
-                        if sl_id:
-                            break
-                        if sl_attempt + 1 < 3:
-                            time.sleep(0.5)
+                    # entry/sl/tp OrderId → niezawodny match PnL (krok 2); Bybit bywa opóźniony po fill.
+                    id_fields = _collect_open_order_ids(
+                        executor, symbol, data, order_link_id, retries=3,
+                    )
                     open_update = {
                         'status': 'OPEN',
                         'position_opened_at': datetime.now(timezone.utc).isoformat(),
                         'real_entry_price': real_entry if real_entry > 0 else None,
                     }
-                    if sl_id:
-                        open_update['slOrderId'] = sl_id
-                    else:
+                    open_update.update(id_fields)
+                    if not id_fields.get("slOrderId"):
                         log_struct(
                             "warning", "updater",
                             "OPEN bez slOrderId — retry w kolejnym cyklu (PnL match krok 2 może zawieść)",
                             symbol=symbol, event_id=order_link_id,
                             planned_sl=data.get("planned_sl_price"),
                         )
+                    if not id_fields.get("tpOrderId"):
+                        log_struct(
+                            "warning", "updater",
+                            "OPEN bez tpOrderId — retry w kolejnym cyklu (wyjście na TP bez matcha SL)",
+                            symbol=symbol, event_id=order_link_id,
+                            planned_tp=data.get("planned_tp_price") or data.get("planned_2r_price"),
+                        )
                     state_manager.update_active_order(order_link_id, open_update)
                     log_struct(
                         "info", "updater", "Order moved to OPEN",
-                        symbol=symbol, event_id=order_link_id, slOrderId=sl_id,
+                        symbol=symbol, event_id=order_link_id,
+                        slOrderId=id_fields.get("slOrderId"),
+                        tpOrderId=id_fields.get("tpOrderId"),
+                        entryOrderId=id_fields.get("entryOrderId"),
                         real_entry=real_entry,
                     )
 
@@ -829,7 +1007,7 @@ def update_filled_orders(executor: BybitExecutor):
         except Exception as e:
             log_struct("error", "updater", "Failed to update placed order", event_id=order_link_id, error=str(e))
 
-    # --- CZĘŚĆ 2: Weryfikacja OPEN vs Bybit + retry trailingu (footprint) / slOrderId (MSI) ---
+    # --- CZĘŚĆ 2: Weryfikacja OPEN vs Bybit + retry trailingu (footprint) / IDs + stale (MSI) ---
     open_docs = list(state_manager.get_orders_by_status('OPEN'))
     log_struct("debug", "updater", "Open orders trailing retry count", count=len(open_docs))
 
@@ -840,28 +1018,106 @@ def update_filled_orders(executor: BybitExecutor):
         if not symbol:
             continue
         if str(data.get("signal_mode", "")).lower() == "msi_orderblock":
-            # MSI: bez trailingu; dograj slOrderId jeśli brakowało przy fill.
-            if not data.get("slOrderId"):
+            # MSI: bez trailingu; duchy → CLOSED_STALE (tylko API OK + size==0 + age≥10m).
+            try:
+                pos_check = call_with_retry(executor.check_linear_position, symbol)
+            except Exception as e:
+                log_struct(
+                    "warning", "updater",
+                    "MSI OPEN position check failed (skip stale)",
+                    symbol=symbol,
+                    event_id=order_link_id,
+                    error=str(e),
+                )
+                continue
+
+            if not isinstance(pos_check, dict) or not pos_check.get("ok"):
+                log_struct(
+                    "warning", "updater",
+                    "MSI OPEN position check inconclusive (skip stale)",
+                    symbol=symbol,
+                    event_id=order_link_id,
+                    error=(pos_check or {}).get("error") if isinstance(pos_check, dict) else "bad_response",
+                )
+                continue
+
+            size = safe_float(pos_check.get("size"), default=-1.0)
+            if size < 0:
+                log_struct(
+                    "warning", "updater",
+                    "MSI OPEN position size missing (skip stale)",
+                    symbol=symbol,
+                    event_id=order_link_id,
+                )
+                continue
+
+            if size == 0:
+                age_ok, age_skip = _msi_open_age_eligible(data)
+                if not age_ok:
+                    log_struct(
+                        "debug", "updater",
+                        "MSI OPEN flat but not eligible for CLOSED_STALE",
+                        symbol=symbol,
+                        event_id=order_link_id,
+                        skip_reason=age_skip,
+                    )
+                    continue
+                _mark_order_closed_stale(
+                    order_link_id,
+                    "no_bybit_position",
+                    symbol=symbol,
+                    stage="updater",
+                )
+                continue
+
+            pos = pos_check.get("position")
+            if not isinstance(pos, dict):
+                # size>0 bez dict — nie stale; nie backfilluj na ślepo
+                log_struct(
+                    "warning", "updater",
+                    "MSI OPEN size>0 but position payload missing",
+                    symbol=symbol,
+                    event_id=order_link_id,
+                    size=size,
+                )
+                continue
+
+            need_ids = (
+                not data.get("slOrderId")
+                or not data.get("tpOrderId")
+                or not (data.get("entryOrderId") or data.get("orderId"))
+            )
+            if need_ids:
                 try:
-                    sl_id = call_with_retry(executor.find_sl_order_id, symbol, data)
-                    if sl_id:
-                        state_manager.update_active_order(order_link_id, {"slOrderId": sl_id})
+                    id_fields = _collect_open_order_ids(
+                        executor, symbol, data, order_link_id, retries=1,
+                    )
+                    if id_fields:
+                        state_manager.update_active_order(order_link_id, id_fields)
                         log_struct(
                             "info", "updater",
-                            "Backfill slOrderId for MSI OPEN",
-                            symbol=symbol, event_id=order_link_id, slOrderId=sl_id,
+                            "Backfill entry/sl/tp OrderId for MSI OPEN",
+                            symbol=symbol, event_id=order_link_id,
+                            **id_fields,
                         )
-                    else:
+                    if not data.get("slOrderId") and not id_fields.get("slOrderId"):
                         log_struct(
                             "warning", "updater",
                             "MSI OPEN nadal bez slOrderId",
                             symbol=symbol, event_id=order_link_id,
                             planned_sl=data.get("planned_sl_price"),
                         )
+                    if not data.get("tpOrderId") and not id_fields.get("tpOrderId"):
+                        log_struct(
+                            "warning", "updater",
+                            "MSI OPEN nadal bez tpOrderId",
+                            symbol=symbol, event_id=order_link_id,
+                            planned_tp=data.get("planned_tp_price") or data.get("planned_2r_price"),
+                        )
                 except Exception as e:
                     log_struct(
                         "warning", "updater",
-                        f"Backfill slOrderId failed: {e}",
+                        f"Backfill MSI OrderId failed: {e}",
                         symbol=symbol, event_id=order_link_id,
                     )
             continue
@@ -960,7 +1216,7 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
             if state_manager.is_closed_pnl_record_logged(order_id_str):
                 continue
 
-            matched_order = _find_matching_order(rec)
+            matched_order = _find_matching_order(rec, executor=executor)
             try:
                 if log_real_trade_result(rec, matched_order):
                     processed += 1
@@ -994,42 +1250,135 @@ def log_closed_positions_pnl(executor: BybitExecutor) -> int:
         return 0
 
 
-def _find_matching_order(pnl_record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _pnl_close_time_ms(pnl_record: Dict[str, Any]) -> Optional[int]:
+    raw = pnl_record.get("updatedTime") or pnl_record.get("createdTime")
+    if raw is None:
+        return None
+    try:
+        return int(float(raw))
+    except (TypeError, ValueError):
+        return None
+
+
+def _log_pnl_match(method: str, *, symbol: Any = None, order_id: Any = None, **extra: Any) -> None:
+    log_struct(
+        "info",
+        "pnl_logger",
+        f"[PNL] match via {method}",
+        symbol=symbol,
+        orderId=order_id,
+        method=method,
+        **extra,
+    )
+
+
+def _match_via_bybit_bridge(
+    pnl_record: Dict[str, Any],
+    executor: Optional[BybitExecutor],
+) -> Optional[Dict[str, Any]]:
+    """
+    Most Bybit: wśród OPEN symbol+side znajdź dokładnie jedno wypełnione wejście
+    z orderLinkId = doc.id sprzed czasu zamknięcia closed-pnl.
+    """
+    if executor is None:
+        return None
+    symbol = pnl_record.get("symbol")
+    if not symbol:
+        return None
+    side = "LONG" if pnl_record.get("side") == "Sell" else "SHORT"
+    close_ms = _pnl_close_time_ms(pnl_record)
+    open_docs = list(state_manager.get_open_orders_for_symbol_side(symbol, side))
+    matches: List[Dict[str, Any]] = []
+    for doc in open_docs:
+        try:
+            details = executor.get_filled_entry_order_by_link_id(symbol, doc.id)
+        except Exception as e:
+            log_struct(
+                "warning",
+                "pnl_logger",
+                f"[PNL] bybit_bridge lookup failed: {e}",
+                symbol=symbol,
+                event_id=doc.id,
+            )
+            continue
+        if not details:
+            continue
+        fill_raw = details.get("updatedTime") or details.get("createdTime")
+        if close_ms is not None and fill_raw is not None:
+            try:
+                if int(float(fill_raw)) > close_ms:
+                    continue
+            except (TypeError, ValueError):
+                pass
+        data = doc.to_dict() or {}
+        data["id"] = doc.id
+        matches.append(data)
+
+    if len(matches) == 1:
+        return matches[0]
+    if matches:
+        log_struct(
+            "warning",
+            "pnl_logger",
+            "[PNL] bybit_bridge ambiguous",
+            symbol=symbol,
+            side=side,
+            candidates=len(matches),
+            orderId=pnl_record.get("orderId"),
+        )
+    return None
+
+
+def _find_matching_order(
+    pnl_record: Dict[str, Any],
+    executor: Optional[BybitExecutor] = None,
+) -> Optional[Dict[str, Any]]:
     """
     Dopasowuje rekord zamknięcia do zlecenia w Firestore.
     1) orderLinkId (= event_id / doc id)
-    2) orderId zamknięcia = slOrderId na active_order
-    3) Fallback: dokładnie jeden OPEN dla symbol+side (bez „najnowszego” z innych statusów)
+    2) orderId zamknięcia ∈ {slOrderId, tpOrderId}
+    3) most Bybit: filled entry po orderLinkId przed czasem zamknięcia
+    4) Fallback: dokładnie jeden OPEN dla symbol+side
     """
+    symbol = pnl_record.get("symbol")
+    closing_order_id = pnl_record.get("orderId")
+    order_id_str = str(closing_order_id) if closing_order_id is not None else None
+
     # 1. Match by orderLinkId (event_id)
     link_id = pnl_record.get("orderLinkId")
     if link_id:
         match = state_manager.get_active_order_by_id(link_id)
         if match:
+            _log_pnl_match("link", symbol=symbol, order_id=order_id_str, event_id=link_id)
             return match
 
-    # 2. Match by sl order id
-    closing_order_id = pnl_record.get("orderId")
+    # 2. Match by closing order id = SL or TP
     if closing_order_id:
-        match = state_manager.get_active_order_by_sl_order_id(str(closing_order_id))
+        oid = str(closing_order_id)
+        match = state_manager.get_active_order_by_sl_order_id(oid)
         if match:
+            _log_pnl_match("sl", symbol=symbol, order_id=order_id_str, event_id=match.get("id"))
+            return match
+        match = state_manager.get_active_order_by_tp_order_id(oid)
+        if match:
+            _log_pnl_match("tp", symbol=symbol, order_id=order_id_str, event_id=match.get("id"))
             return match
 
-    # 3. Fallback: tylko OPEN dla symbol + side (jedna pozycja → dokładnie 1)
-    symbol = pnl_record.get("symbol")
+    # 3. Bybit bridge: filled entry orderLinkId before close
+    bridge = _match_via_bybit_bridge(pnl_record, executor)
+    if bridge:
+        _log_pnl_match(
+            "bybit_bridge",
+            symbol=symbol,
+            order_id=order_id_str,
+            event_id=bridge.get("id"),
+        )
+        return bridge
+
+    # 4. Fallback: tylko OPEN dla symbol + side (jedna pozycja → dokładnie 1)
     side = "LONG" if pnl_record.get("side") == "Sell" else "SHORT"
-    order_id_str = str(closing_order_id) if closing_order_id is not None else None
     open_docs = list(state_manager.get_open_orders_for_symbol_side(symbol, side))
     n = len(open_docs)
-    log_struct(
-        "info",
-        "pnl_logger",
-        "[PNL] fallback match used",
-        symbol=symbol,
-        side=side,
-        candidates=n,
-        orderId=order_id_str,
-    )
     if n != 1:
         log_struct(
             "warning",
@@ -1045,4 +1394,12 @@ def _find_matching_order(pnl_record: Dict[str, Any]) -> Optional[Dict[str, Any]]
     doc = open_docs[0]
     data = doc.to_dict() or {}
     data["id"] = doc.id
+    _log_pnl_match(
+        "fallback",
+        symbol=symbol,
+        order_id=order_id_str,
+        event_id=doc.id,
+        candidates=1,
+        side=side,
+    )
     return data

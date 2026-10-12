@@ -25,6 +25,7 @@ from bot_service.bot_logic import (
     _build_signal_analysis_data,
     _ensure_sl_valid_for_bybit,
     _mark_price_for_symbol,
+    _placement_prices_for_symbol,
     _price_api_str,
     _submit_signal_analytics,
     async_call_with_retry,
@@ -96,21 +97,36 @@ async def _symbol_has_open_position(
         return bool(docs)
 
 
-def _sl_already_hit(*, direction: str, planned_sl: float, mark_price: float) -> bool:
-    """LONG: cena <= SL; SHORT: cena >= SL."""
+def _sl_already_hit(*, direction: str, planned_sl: float, last_price: float) -> bool:
+    """Guard SL wg lastPrice (Bybit SL: nie wysyłamy slTriggerBy → domyślnie LastPrice)."""
     is_long = str(direction).upper() == "LONG"
     if is_long:
-        return mark_price <= planned_sl
-    return mark_price >= planned_sl
+        return last_price <= planned_sl
+    return last_price >= planned_sl
+
+
+def _limit_is_marketable(
+    *,
+    is_long: bool,
+    entry: float,
+    ask: Optional[float],
+    bid: Optional[float],
+) -> bool:
+    """LONG: ask <= entry; SHORT: bid >= entry. Brak bid/ask → False (nie zgadujemy)."""
+    if is_long:
+        return ask is not None and ask <= entry
+    return bid is not None and bid >= entry
 
 
 async def _skip_sl_already_hit_at_placement(
     *,
     prepared: MsiPreparedOrder,
-    mark_price: float,
+    last_price: float,
     skip_reason: str = "sl_already_hit_at_placement",
+    bid: Optional[float] = None,
+    ask: Optional[float] = None,
 ) -> None:
-    """Zapisz SKIPPED_SL_ALREADY_HIT — bez place Limit (mark już za SL)."""
+    """Zapisz SKIPPED_SL_ALREADY_HIT — bez place Limit (lastPrice już za SL)."""
     now = datetime.now(timezone.utc)
     state_payload = {
         "symbol": prepared.symbol,
@@ -121,7 +137,10 @@ async def _skip_sl_already_hit_at_placement(
         "timestamp_signal": prepared.timestamp_signal,
         "skipped_at": now.isoformat(),
         "skip_reason": skip_reason,
-        "mark_price_at_skip": mark_price,
+        "last_price_at_skip": last_price,
+        "mark_price_at_skip": last_price,  # legacy alias
+        "bid_at_placement": bid,
+        "ask_at_placement": ask,
         "planned_entry_price": prepared.f_entry,
         "planned_sl_price": prepared.f_sl,
         "planned_tp_price": prepared.f_tp,
@@ -146,7 +165,7 @@ async def _skip_sl_already_hit_at_placement(
         direction=prepared.signal.direction,
         entry=prepared.f_entry,
         sl=prepared.f_sl,
-        mark_price=mark_price,
+        last_price=last_price,
         skip_reason=skip_reason,
     )
 
@@ -449,34 +468,55 @@ async def _place_msi_limit_gtc(
     f_sl = prepared.f_sl
     f_tp = prepared.f_tp
 
-    mark_price = await asyncio.to_thread(_mark_price_for_symbol, executor, symbol)
-    # Guard: mark już za SL → nie składaj (natychmiastowy fill+SL = strata ≈ fee).
-    # Ta sama cena (mark) co przy SKIPPED dla odłożonego OB.
-    if mark_price is not None and f_sl > 0 and _sl_already_hit(
-        direction=signal.direction, planned_sl=f_sl, mark_price=mark_price
+    prices = await asyncio.to_thread(_placement_prices_for_symbol, executor, symbol)
+    last_price = prices.get("last")
+    ask_price = prices.get("ask")
+    bid_price = prices.get("bid")
+    mark_price = prices.get("mark")  # do walidacji SL vs base_price Bybit
+
+    if last_price is None and ask_price is None and bid_price is None and mark_price is None:
+        log_struct(
+            "warning",
+            "msi_place",
+            "[MSI] price unavailable at placement",
+            symbol=symbol,
+            event_id=event_id,
+        )
+
+    # Guard: lastPrice już za SL → nie składaj (natychmiastowy fill+SL = strata ≈ fee).
+    if last_price is not None and f_sl > 0 and _sl_already_hit(
+        direction=signal.direction, planned_sl=f_sl, last_price=last_price
     ):
         await _skip_sl_already_hit_at_placement(
             prepared=prepared,
-            mark_price=mark_price,
+            last_price=last_price,
             skip_reason="sl_already_hit_at_placement",
+            bid=bid_price,
+            ask=ask_price,
         )
         return
-    # Tylko log — bez blokady, gdy Limit jest „marketable” (cena w strefie OB / za entry).
-    if mark_price is not None:
-        marketable = (
-            (prepared.is_long and mark_price <= f_entry)
-            or ((not prepared.is_long) and mark_price >= f_entry)
+
+    # Tylko log + flaga — bez blokady, gdy Limit jest marketable (ask/bid vs entry).
+    placed_marketable = _limit_is_marketable(
+        is_long=prepared.is_long,
+        entry=f_entry,
+        ask=ask_price,
+        bid=bid_price,
+    )
+    if placed_marketable:
+        log_struct(
+            "info",
+            "msi_place",
+            "[MSI] limit marketable at placement",
+            symbol=symbol,
+            event_id=event_id,
+            entry=f_entry,
+            last_price=last_price,
+            ask=ask_price,
+            bid=bid_price,
+            placed_marketable=True,
         )
-        if marketable:
-            log_struct(
-                "info",
-                "msi_place",
-                "[MSI] limit marketable at placement",
-                symbol=symbol,
-                event_id=event_id,
-                entry=f_entry,
-                mark_price=mark_price,
-            )
+
     adjusted_sl = _ensure_sl_valid_for_bybit(
         f_sl, f_entry, prepared.is_long, prepared.tick_size, mark_price, event_id, symbol,
     )
@@ -533,6 +573,12 @@ async def _place_msi_limit_gtc(
             return
         prepared.order_params["stopLoss"] = _price_api_str(f_sl)
 
+    placement_meta = {
+        "placed_marketable": bool(placed_marketable),
+        "price_at_placement": last_price,
+        "bid_at_placement": bid_price,
+        "ask_at_placement": ask_price,
+    }
     state_payload = {
         "symbol": symbol,
         "status": "PLACING",
@@ -553,6 +599,7 @@ async def _place_msi_limit_gtc(
         "chain_id": prepared.chain_id,
         "risk_ob": prepared.risk_ob,
         "cooldown_completed_at": datetime.now(timezone.utc).isoformat(),
+        **placement_meta,
     }
     await asyncio.to_thread(state_manager.save_active_order_transactional, event_id, state_payload)
 
@@ -591,7 +638,11 @@ async def _place_msi_limit_gtc(
             await asyncio.to_thread(
                 state_manager.update_active_order,
                 event_id,
-                {"status": "PLACED", "orderId": order_result.get("orderId")},
+                {
+                    "status": "PLACED",
+                    "orderId": order_result.get("orderId"),
+                    **placement_meta,
+                },
             )
             log_struct(
                 "info",
@@ -604,6 +655,7 @@ async def _place_msi_limit_gtc(
                 sl=f_sl,
                 tp=f_tp,
                 qty=prepared.calculated_qty,
+                placed_marketable=placed_marketable,
             )
             mf = market_features if isinstance(market_features, dict) else {}
             if not mf and isinstance(signal.market_features, dict):
@@ -620,6 +672,10 @@ async def _place_msi_limit_gtc(
                 order_id=order_result.get("orderId"),
                 session=signal.session,
                 market_features=mf,
+                placed_marketable=placed_marketable,
+                price_at_placement=last_price,
+                bid_at_placement=bid_price,
+                ask_at_placement=ask_price,
             )
         else:
             await asyncio.to_thread(

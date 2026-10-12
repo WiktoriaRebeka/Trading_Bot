@@ -131,6 +131,20 @@ def get_active_order_by_sl_order_id(sl_order_id: str) -> Optional[Dict[str, Any]
         return None
 
 
+def get_active_order_by_tp_order_id(tp_order_id: str) -> Optional[Dict[str, Any]]:
+    try:
+        q = _collection_active_orders().where("tpOrderId", "==", tp_order_id).limit(1)
+        docs = list(q.stream())
+        if docs:
+            data = docs[0].to_dict()
+            data["id"] = docs[0].id
+            return data
+        return None
+    except Exception as e:
+        logger.exception(f"[state_manager] Failed to get active order by tpOrderId {tp_order_id}: {e}")
+        return None
+
+
 def find_active_order_by_details(symbol: str, side: str, qty: float) -> Optional[Dict[str, Any]]:
     """
     Best-effort search by symbol/side/qty. This is heuristic and may return None.

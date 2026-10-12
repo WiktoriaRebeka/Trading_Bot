@@ -185,9 +185,8 @@ def test_cooldown_enabled_still_writes_pending():
     assert save_calls[0]["order_kind"] == "msi_cooldown"
 
 
-def test_marketable_log_long_when_mark_in_ob_zone():
-    """Cena w strefie OB (między entry a SL) — log marketable, place idzie dalej."""
-    # LONG: entry=100.5, sl=100.0; mark=100.2 jest w strefie (nie za SL).
+def test_marketable_log_long_when_ask_at_or_below_entry():
+    """ask <= entry — log marketable, place idzie dalej (last nie za SL)."""
     prepared = _FakePrepared(is_long=True, f_entry=100.5, f_sl=100.0)
     logs: List[str] = []
     place_via_api: List[Any] = []
@@ -197,7 +196,9 @@ def test_marketable_log_long_when_mark_in_ob_zone():
 
     async def _run():
         with patch.object(moh, "log_struct", side_effect=_capture), patch.object(
-            moh, "_mark_price_for_symbol", return_value=100.2
+            moh,
+            "_placement_prices_for_symbol",
+            return_value={"last": 100.2, "ask": 100.4, "bid": 100.1, "mark": 100.2},
         ), patch.object(
             moh, "_ensure_sl_valid_for_bybit", return_value=prepared.f_sl
         ), patch.object(
@@ -229,7 +230,11 @@ def test_skip_long_when_mark_at_or_beyond_sl():
     place_api: List[Any] = []
 
     async def _run():
-        with patch.object(moh, "_mark_price_for_symbol", return_value=99.9), patch.object(
+        with patch.object(
+            moh,
+            "_placement_prices_for_symbol",
+            return_value={"last": 99.9, "ask": 100.0, "bid": 99.8, "mark": 99.9},
+        ), patch.object(
             moh.state_manager,
             "save_active_order_transactional",
             side_effect=lambda eid, payload: saves.append(dict(payload)),
@@ -253,7 +258,11 @@ def test_skip_short_when_mark_at_or_beyond_sl():
     place_api: List[Any] = []
 
     async def _run():
-        with patch.object(moh, "_mark_price_for_symbol", return_value=100.6), patch.object(
+        with patch.object(
+            moh,
+            "_placement_prices_for_symbol",
+            return_value={"last": 100.6, "ask": 100.7, "bid": 100.5, "mark": 100.6},
+        ), patch.object(
             moh.state_manager,
             "save_active_order_transactional",
             side_effect=lambda eid, payload: saves.append(dict(payload)),
@@ -269,13 +278,21 @@ def test_skip_short_when_mark_at_or_beyond_sl():
 
 
 def test_place_long_when_mark_above_entry():
-    """Cena przed wejściem (LONG: mark > entry) — składaj Limit, bez skip."""
+    """Cena przed wejściem (LONG: ask > entry) — składaj Limit, bez marketable/skip."""
     prepared = _FakePrepared(is_long=True, f_entry=100.5, f_sl=100.0)
     place_api: List[Any] = []
     saves: List[Dict[str, Any]] = []
+    logs: List[str] = []
+
+    def _capture(level, stage, msg, **fields):
+        logs.append(msg)
 
     async def _run():
-        with patch.object(moh, "_mark_price_for_symbol", return_value=101.0), patch.object(
+        with patch.object(moh, "log_struct", side_effect=_capture), patch.object(
+            moh,
+            "_placement_prices_for_symbol",
+            return_value={"last": 101.0, "ask": 101.1, "bid": 100.9, "mark": 101.0},
+        ), patch.object(
             moh, "_ensure_sl_valid_for_bybit", return_value=prepared.f_sl
         ), patch.object(
             moh.state_manager,
@@ -299,13 +316,15 @@ def test_place_long_when_mark_above_entry():
     asyncio.run(_run())
     assert place_api == [True]
     assert not any(s.get("status") == "SKIPPED_SL_ALREADY_HIT" for s in saves)
+    assert "[MSI] limit marketable at placement" not in logs
+    assert saves and saves[0].get("placed_marketable") is False
 
 
 if __name__ == "__main__":
     test_flag_default_off()
     test_ob_new_places_limit_immediately_no_cooldown_pending()
     test_cooldown_enabled_still_writes_pending()
-    test_marketable_log_long_when_mark_in_ob_zone()
+    test_marketable_log_long_when_ask_at_or_below_entry()
     test_skip_long_when_mark_at_or_beyond_sl()
     test_skip_short_when_mark_at_or_beyond_sl()
     test_place_long_when_mark_above_entry()

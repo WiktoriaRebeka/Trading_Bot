@@ -213,27 +213,77 @@ class BybitExecutor:
 
     def find_sl_order_id(self, symbol: str, order_data: Dict[str, Any]) -> Optional[str]:
         """Szuka aktywnego StopLoss po triggerPrice ≈ planned_sl_price (do zapisu slOrderId)."""
+        sl_id, _ = self.find_sl_tp_order_ids(symbol, order_data)
+        return sl_id
+
+    def find_tp_order_id(self, symbol: str, order_data: Dict[str, Any]) -> Optional[str]:
+        """Szuka aktywnego TakeProfit po triggerPrice ≈ planned_tp_price (do zapisu tpOrderId)."""
+        _, tp_id = self.find_sl_tp_order_ids(symbol, order_data)
+        return tp_id
+
+    def find_sl_tp_order_ids(
+        self, symbol: str, order_data: Dict[str, Any]
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """Jedno zapytanie realtime StopOrder → (slOrderId, tpOrderId) po cenach planowanych."""
+        sl_id: Optional[str] = None
+        tp_id: Optional[str] = None
         try:
-            planned_raw = order_data.get("planned_sl_price")
-            if planned_raw is None:
-                return None
-            planned_sl = float(planned_raw)
+            planned_sl_raw = order_data.get("planned_sl_price")
+            planned_tp_raw = (
+                order_data.get("planned_tp_price")
+                or order_data.get("planned_2r_price")
+            )
+            planned_sl = float(planned_sl_raw) if planned_sl_raw is not None else None
+            planned_tp = float(planned_tp_raw) if planned_tp_raw is not None else None
+            if planned_sl is None and planned_tp is None:
+                return None, None
+
             active_stop_orders = self.get_active_tp_sl_orders(symbol)
             for stop_order in active_stop_orders:
-                if stop_order.get("stopOrderType") != "StopLoss":
-                    continue
+                stop_type = stop_order.get("stopOrderType")
                 trigger_price = float(stop_order.get("triggerPrice", 0) or 0)
-                if math.isclose(trigger_price, planned_sl, rel_tol=0.0, abs_tol=1e-8):
-                    sl_order_id = stop_order.get("orderId")
-                    logger.info(f"[{symbol}] Znaleziono pasujące zlecenie SL o ID: {sl_order_id}")
-                    return sl_order_id
-            logger.warning(
-                f"[{symbol}] Nie znaleziono aktywnego zlecenia SL pasującego do ceny {planned_sl}."
-            )
-            return None
+                oid = stop_order.get("orderId")
+                if not oid:
+                    continue
+                if (
+                    sl_id is None
+                    and stop_type == "StopLoss"
+                    and planned_sl is not None
+                    and math.isclose(trigger_price, planned_sl, rel_tol=0.0, abs_tol=1e-8)
+                ):
+                    sl_id = str(oid)
+                    logger.info(f"[{symbol}] Znaleziono pasujące zlecenie SL o ID: {sl_id}")
+                elif (
+                    tp_id is None
+                    and stop_type == "TakeProfit"
+                    and planned_tp is not None
+                    and math.isclose(trigger_price, planned_tp, rel_tol=0.0, abs_tol=1e-8)
+                ):
+                    tp_id = str(oid)
+                    logger.info(f"[{symbol}] Znaleziono pasujące zlecenie TP o ID: {tp_id}")
+            if planned_sl is not None and sl_id is None:
+                logger.warning(
+                    f"[{symbol}] Nie znaleziono aktywnego zlecenia SL pasującego do ceny {planned_sl}."
+                )
+            if planned_tp is not None and tp_id is None:
+                logger.warning(
+                    f"[{symbol}] Nie znaleziono aktywnego zlecenia TP pasującego do ceny {planned_tp}."
+                )
+            return sl_id, tp_id
         except Exception as e:
-            logger.warning(f"[{symbol}] Nie udało się pobrać ID zlecenia SL: {e}")
+            logger.warning(f"[{symbol}] Nie udało się pobrać ID zleceń SL/TP: {e}")
+            return None, None
+
+    def get_filled_entry_order_by_link_id(
+        self, symbol: str, order_link_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Order history/realtime: wypełnione zlecenie wejścia z naszym orderLinkId."""
+        details = self.find_order_details_by_link_id(symbol, order_link_id)
+        if not details:
             return None
+        if str(details.get("orderStatus", "")) != "Filled":
+            return None
+        return details
 
     def get_closed_pnl_history(
         self, start_time_ms: int, limit: int = 100
@@ -385,26 +435,71 @@ class BybitExecutor:
             logger.critical(f"[{api_symbol}] KRYTYCZNY BŁĄD podczas wysyłania awaryjnego zlecenia zamknięcia: {e}", exc_info=True)
             return False
 
-    def get_position_info(self, symbol: str) -> Optional[Dict[str, Any]]:
-        api_symbol = symbol.replace('.P', '')
-        
+    def check_linear_position(self, symbol: str) -> Dict[str, Any]:
+        """
+        Jednoznaczna odpowiedź pozycji (do CLOSED_STALE / guardów).
+
+        Sukces API z listą:
+          {"ok": True, "size": float, "position": dict|None}
+        Błąd API / timeout / brak pola list:
+          {"ok": False, "error": str, "size": None, "position": None}
+        """
+        api_symbol = symbol.replace(".P", "")
         params = {"category": "linear", "settleCoin": "USDT"}
-        
         try:
             result = self._send_request("GET", "/v5/position/list", params=params)
-            
-            if result and result.get('list'):
-                for position_data in result['list']:
-                    if position_data.get('symbol') == api_symbol and float(position_data.get("size", "0")) > 0:
-                        logger.debug(f"[{symbol}] Znaleziono aktywną pozycję dla {api_symbol} na liście pozycji USDT.")
-                        return position_data
-            
-            logger.debug(f"[{symbol}] Nie znaleziono aktywnej pozycji dla symbolu {api_symbol} na liście wszystkich otwartych pozycji USDT.")
-            return None
-            
+            if result is None or "list" not in result:
+                return {
+                    "ok": False,
+                    "error": "incomplete_position_list_response",
+                    "size": None,
+                    "position": None,
+                }
+            pos_list = result.get("list") or []
+            for position_data in pos_list:
+                if position_data.get("symbol") != api_symbol:
+                    continue
+                try:
+                    size = float(position_data.get("size", "0") or 0)
+                except (TypeError, ValueError):
+                    return {
+                        "ok": False,
+                        "error": "invalid_size_in_position",
+                        "size": None,
+                        "position": None,
+                    }
+                if size > 0:
+                    logger.debug(
+                        f"[{symbol}] Znaleziono aktywną pozycję dla {api_symbol} "
+                        f"(size={size}) na liście pozycji USDT."
+                    )
+                    return {"ok": True, "size": size, "position": position_data}
+            logger.debug(
+                f"[{symbol}] Brak otwartej pozycji {api_symbol} "
+                f"(API OK, size=0)."
+            )
+            return {"ok": True, "size": 0.0, "position": None}
         except (RequestException, BybitAPIError) as e:
-            logger.error(f"[{symbol}] Błąd podczas pobierania informacji o pozycji: {e}", exc_info=True)
+            logger.error(
+                f"[{symbol}] Błąd podczas pobierania informacji o pozycji: {e}",
+                exc_info=True,
+            )
+            return {"ok": False, "error": str(e), "size": None, "position": None}
+        except Exception as e:
+            logger.error(
+                f"[{symbol}] Nieoczekiwany błąd pozycji: {e}",
+                exc_info=True,
+            )
+            return {"ok": False, "error": str(e), "size": None, "position": None}
+
+    def get_position_info(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Aktywna pozycja (size>0) albo None. Błąd API też → None (legacy)."""
+        check = self.check_linear_position(symbol)
+        if not check.get("ok"):
             return None
+        if float(check.get("size") or 0) > 0:
+            return check.get("position")
+        return None
 
     def get_klines_1m(
         self,
@@ -472,8 +567,12 @@ class BybitExecutor:
             price_data = {}
             if result and result.get('list'):
                 for ticker in result['list']:
-                    full_symbol = f"{ticker.get('symbol')}.P"
-                    price_data[full_symbol] = ticker
+                    api_sym = str(ticker.get("symbol") or "").upper()
+                    if not api_sym:
+                        continue
+                    # Obie formy klucza — caller może szukać BTCUSDT albo BTCUSDT.P
+                    price_data[api_sym] = ticker
+                    price_data[f"{api_sym}.P"] = ticker
                 logger.debug(f"Pobrano aktualne ceny dla {len(price_data)}/{len(symbols)} symboli.")
                 return price_data
             return {}

@@ -108,11 +108,11 @@ class _FakeDoc:
 
 
 def test_sl_already_hit_helpers():
-    assert moh._sl_already_hit(direction="LONG", planned_sl=100.0, mark_price=99.0) is True
-    assert moh._sl_already_hit(direction="LONG", planned_sl=100.0, mark_price=100.0) is True
-    assert moh._sl_already_hit(direction="LONG", planned_sl=100.0, mark_price=100.1) is False
-    assert moh._sl_already_hit(direction="SHORT", planned_sl=100.0, mark_price=100.5) is True
-    assert moh._sl_already_hit(direction="SHORT", planned_sl=100.0, mark_price=99.5) is False
+    assert moh._sl_already_hit(direction="LONG", planned_sl=100.0, last_price=99.0) is True
+    assert moh._sl_already_hit(direction="LONG", planned_sl=100.0, last_price=100.0) is True
+    assert moh._sl_already_hit(direction="LONG", planned_sl=100.0, last_price=100.1) is False
+    assert moh._sl_already_hit(direction="SHORT", planned_sl=100.0, last_price=100.5) is True
+    assert moh._sl_already_hit(direction="SHORT", planned_sl=100.0, last_price=99.5) is False
 
 
 def test_a_ob_while_position_open_defers_no_place():
@@ -249,8 +249,6 @@ def test_b_three_deferred_only_latest_places_after_close():
         ), patch.object(
             moh, "_symbol_has_open_position", new=AsyncMock(return_value=False)
         ), patch.object(
-            moh, "_mark_price_for_symbol", return_value=101.0  # powyżej SL
-        ), patch.object(
             moh, "_prepare_msi_order", new=AsyncMock(return_value=prepared)
         ), patch.object(
             moh, "_place_msi_limit_gtc", new=_fake_place
@@ -264,7 +262,7 @@ def test_b_three_deferred_only_latest_places_after_close():
 
 
 def test_c_sl_already_hit_skips_place():
-    """Po zamknięciu pozycji: mark za SL → _place_msi_limit_gtc nie składa, SKIPPED."""
+    """Po zamknięciu pozycji: lastPrice za SL → _place_msi_limit_gtc nie składa, SKIPPED."""
     doc = _FakeDoc(
         "evt-sl",
         {
@@ -291,7 +289,9 @@ def test_c_sl_already_hit_skips_place():
         ), patch.object(
             moh, "_prepare_msi_order", new=AsyncMock(return_value=prepared)
         ), patch.object(
-            moh, "_mark_price_for_symbol", return_value=99.5  # za SL
+            moh,
+            "_placement_prices_for_symbol",
+            return_value={"last": 99.5, "ask": 99.6, "bid": 99.4, "mark": 99.5},
         ), patch.object(
             moh.state_manager,
             "save_active_order_transactional",
