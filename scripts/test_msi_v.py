@@ -17,7 +17,8 @@ def _c(ts: int, high: float, low: float) -> MsiCandle:
 
 
 def _first_ob_up(eng: MsiEngine) -> None:
-    eng.on_candle_close(_c(1, 110.0, 100.0))
+    # IC low=95, żeby późniejsze Temp HL (98→96) nie odpalały CHOCH (VI)
+    eng.on_candle_close(_c(1, 110.0, 95.0))
     eng.on_candle_close(_c(2, 115.0, 105.0))
     eng.on_candle_close(_c(3, 120.0, 106.0))
 

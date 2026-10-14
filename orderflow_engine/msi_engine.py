@@ -161,10 +161,16 @@ class _MsiState:
     current_ob: Optional[OrderBlock] = None
     chain_seq: int = 0
 
+    # Świeca z ekstremum w zakresie aktualnego OB:
+    # LONG → najwyższy HIGH; SHORT → najniższy LOW (od powstania OB).
+    ob_range_extreme_candle: Optional[MsiCandle] = None
+    # Legacy CHOCH fields — tylko kompatybilność starych snapshotów / migracja.
     choch_candle: Optional[MsiCandle] = None
+    bos_marking_candle: Optional[MsiCandle] = None
     choch_mode: ChochMode = ChochMode.NONE
-    choch_low_intact: bool = True   # VI opcja A: wszystkie LOW >= CHOCH LOW (UP)
-    choch_high_intact: bool = True  # VI opcja A: wszystkie HIGH <= CHOCH HIGH (DOWN)
+    choch_low_intact: bool = True
+    choch_high_intact: bool = True
+    choch_rev_building: bool = False
     v_cycle: VCyclePhase = VCyclePhase.WAIT_LIQ_GRAB
     pre_bos_phase: PreBosPhase = PreBosPhase.BUILDING
     cycle_swept_liquidity: Optional[float] = None  # V: poziom zgrabowany w bieżącym cyklu
@@ -191,10 +197,13 @@ class _MsiState:
             "previous_ob": self.previous_ob.to_dict() if self.previous_ob else None,
             "current_ob": self.current_ob.to_dict() if self.current_ob else None,
             "chain_seq": self.chain_seq,
+            "ob_range_extreme_candle": self.ob_range_extreme_candle.to_dict() if self.ob_range_extreme_candle else None,
             "choch_candle": self.choch_candle.to_dict() if self.choch_candle else None,
+            "bos_marking_candle": self.bos_marking_candle.to_dict() if self.bos_marking_candle else None,
             "choch_mode": self.choch_mode.value,
             "choch_low_intact": self.choch_low_intact,
             "choch_high_intact": self.choch_high_intact,
+            "choch_rev_building": self.choch_rev_building,
             "v_cycle": self.v_cycle.value,
             "pre_bos_phase": self.pre_bos_phase.value,
             "cycle_swept_liquidity": self.cycle_swept_liquidity,
@@ -232,10 +241,13 @@ class _MsiState:
             previous_ob=_ob(d.get("previous_ob")),
             current_ob=_ob(d.get("current_ob")),
             chain_seq=int(d.get("chain_seq", 0)),
+            ob_range_extreme_candle=_candle(d.get("ob_range_extreme_candle")),
             choch_candle=_candle(d.get("choch_candle")),
+            bos_marking_candle=_candle(d.get("bos_marking_candle")) or _candle(d.get("choch_candle")),
             choch_mode=ChochMode(d.get("choch_mode", ChochMode.NONE.value)),
             choch_low_intact=bool(d.get("choch_low_intact", True)),
             choch_high_intact=bool(d.get("choch_high_intact", True)),
+            choch_rev_building=bool(d.get("choch_rev_building", False)),
             v_cycle=VCyclePhase(d.get("v_cycle", VCyclePhase.WAIT_LIQ_GRAB.value)),
             pre_bos_phase=PreBosPhase(d.get("pre_bos_phase", PreBosPhase.BUILDING.value)),
             cycle_swept_liquidity=d.get("cycle_swept_liquidity"),
@@ -312,6 +324,14 @@ class MsiEngine:
         self._state = _MsiState.from_dict(d["state"])
         self._candle_count = int(d.get("candle_count", 0))
         self._last_processed_ts = d.get("last_processed_ts")
+        # Legacy CHOCH_PENDING → gotowość do nowej reguły zmiany trendu
+        if self._state.phase == MsiPhase.CHOCH_PENDING:
+            self._migrate_choch_pending()
+        elif (
+            self._state.ob_range_extreme_candle is None
+            and self._state.current_ob is not None
+        ):
+            self._state.ob_range_extreme_candle = self._state.current_ob.candle
 
     def replay_candles(self, candles: List[MsiCandle]) -> List[OrderBlock]:
         for c in candles:
@@ -345,6 +365,14 @@ class MsiEngine:
             return events
 
         if self._state.phase == MsiPhase.INITIAL_STRUCTURE:
+            # Po trend-change mamy już current_ob — sprawdzaj odwrócenie także tu
+            if self._state.current_ob is not None:
+                self._update_ob_range_extreme(candle)
+                tc = self._try_trend_change(candle)
+                if tc:
+                    events.extend(tc)
+                    self._dispatch(events, None)
+                    return events
             ev = self._try_initial_trend(candle)
             if ev:
                 events.append(ev)
@@ -352,24 +380,30 @@ class MsiEngine:
             return events
 
         if self._state.phase == MsiPhase.PRE_FIRST_OB:
+            if self._state.current_ob is not None:
+                self._update_ob_range_extreme(candle)
+                tc = self._try_trend_change(candle)
+                if tc:
+                    events.extend(tc)
+                    self._dispatch(events, None)
+                    return events
             events.extend(self._process_pre_first_ob(candle))
             self._dispatch(events, None)
             return events
 
-        if self._state.phase == MsiPhase.HL_LH_CYCLE:
-            events.extend(self._process_hl_lh_cycle(candle))
-            # PDF VI: LOW < Higher LOW (UP) / HIGH > Lower HIGH (DOWN) zawsze
-            # uruchamia CHOCH — także w UPDATING_TEMP_HL po liquidity grab
-            # i na tej samej świecy co grab (sekcja VI ma pierwszeństwo).
-            if self._state.choch_mode == ChochMode.NONE and self._state.current_ob:
-                choch = self._detect_choch(candle)
-                if choch:
-                    events.append(choch)
-            self._dispatch(events, None)
-            return events
-
+        # Migracja starych snapshotów CHOCH_PENDING → HL_LH_CYCLE
         if self._state.phase == MsiPhase.CHOCH_PENDING:
-            events.extend(self._process_choch(candle))
+            self._migrate_choch_pending()
+
+        if self._state.phase == MsiPhase.HL_LH_CYCLE:
+            self._update_ob_range_extreme(candle)
+            # Zmiana trendu ma pierwszeństwo przed cyklem V (grab/BOS)
+            tc = self._try_trend_change(candle)
+            if tc:
+                events.extend(tc)
+                self._dispatch(events, None)
+                return events
+            events.extend(self._process_hl_lh_cycle(candle))
             self._dispatch(events, None)
             return events
 
@@ -418,11 +452,15 @@ class MsiEngine:
         PDF III: UP gdy HIGH > Initial HIGH; DOWN gdy LOW < Initial LOW.
         Breaking Candle ustawia Temporary HIGH/LOW + Temporary Liquidity.
         Świece bez przełamania → ignoruj (return None).
+        Po trend-change kierunek jest już znany — akceptuj tylko break w tym kierunku.
         """
         assert self._state.initial_high is not None
         assert self._state.initial_low is not None
+        locked = self._state.current_ob is not None and self._state.initial_trend is not None
 
         if candle.high > self._state.initial_high:
+            if locked and self._state.initial_trend != Trend.UP:
+                return None
             self._state.initial_trend = Trend.UP
             self._state.temporary_high = candle.high
             self._state.temporary_liquidity = candle.low
@@ -440,6 +478,8 @@ class MsiEngine:
             )
 
         if candle.low < self._state.initial_low:
+            if locked and self._state.initial_trend != Trend.DOWN:
+                return None
             self._state.initial_trend = Trend.DOWN
             self._state.temporary_low = candle.low
             self._state.temporary_liquidity = candle.high
@@ -496,6 +536,12 @@ class MsiEngine:
             )
         return events
 
+    def _ob_already_is_initial_candle(self) -> bool:
+        """Po trend-change OB_NEW już istnieje na IC — nie emituj drugiego OB_NEW."""
+        ob = self._state.current_ob
+        ic = self._state.initial_candle
+        return ob is not None and ic is not None and ob.candle.ts == ic.ts
+
     def _mark_first_ob_up(self, candle: MsiCandle, th: float, tl: float) -> List[StructureEvent]:
         """PDF str. 8–9: promocja LIQUIDITY, BOS, HIGHER LOW, pierwszy OB = Initial Candle."""
         events: List[StructureEvent] = []
@@ -520,16 +566,26 @@ class MsiEngine:
             )
         )
 
-        ob = self._create_ob(
-            candle=self._state.initial_candle,  # type: ignore[arg-type]
-            direction="LONG",
-            hl_lh_level=float(self._state.confirmed_higher_low),
-            bos_level=bos_level,
-            liquidity_level=promoted_liquidity,
-            is_first=True,
-            trigger_candle=candle,
-        )
-        events.append(self._emit_ob_new(ob, candle))
+        if not self._ob_already_is_initial_candle():
+            ob = self._create_ob(
+                candle=self._state.initial_candle,  # type: ignore[arg-type]
+                direction="LONG",
+                hl_lh_level=float(self._state.confirmed_higher_low),
+                bos_level=bos_level,
+                liquidity_level=promoted_liquidity,
+                is_first=True,
+                trigger_candle=candle,
+            )
+            events.append(self._emit_ob_new(ob, candle))
+        else:
+            # Trend-change OB już na IC — zaktualizuj poziomy pod cykl V
+            ob = self._state.current_ob
+            assert ob is not None
+            ob.hl_lh_level = float(self._state.confirmed_higher_low)
+            ob.bos_level = bos_level
+            ob.liquidity_level = promoted_liquidity
+            self._state.ob_range_extreme_candle = ob.candle
+
         self._state.phase = MsiPhase.HL_LH_CYCLE
         self._state.pre_bos_phase = PreBosPhase.BUILDING
         self._state.v_cycle = VCyclePhase.WAIT_LIQ_GRAB
@@ -588,16 +644,25 @@ class MsiEngine:
             )
         )
 
-        ob = self._create_ob(
-            candle=self._state.initial_candle,  # type: ignore[arg-type]
-            direction="SHORT",
-            hl_lh_level=float(self._state.confirmed_lower_high),
-            bos_level=bos_level,
-            liquidity_level=promoted_liquidity,
-            is_first=True,
-            trigger_candle=candle,
-        )
-        events.append(self._emit_ob_new(ob, candle))
+        if not self._ob_already_is_initial_candle():
+            ob = self._create_ob(
+                candle=self._state.initial_candle,  # type: ignore[arg-type]
+                direction="SHORT",
+                hl_lh_level=float(self._state.confirmed_lower_high),
+                bos_level=bos_level,
+                liquidity_level=promoted_liquidity,
+                is_first=True,
+                trigger_candle=candle,
+            )
+            events.append(self._emit_ob_new(ob, candle))
+        else:
+            ob = self._state.current_ob
+            assert ob is not None
+            ob.hl_lh_level = float(self._state.confirmed_lower_high)
+            ob.bos_level = bos_level
+            ob.liquidity_level = promoted_liquidity
+            self._state.ob_range_extreme_candle = ob.candle
+
         self._state.phase = MsiPhase.HL_LH_CYCLE
         self._state.pre_bos_phase = PreBosPhase.BUILDING
         self._state.v_cycle = VCyclePhase.WAIT_LIQ_GRAB
@@ -851,218 +916,201 @@ class MsiEngine:
         return events
 
     # ------------------------------------------------------------------ #
-    # Sekcja VI — CHOCH (Change of Character)
-    # PDF: LOW < Higher LOW (UP) / HIGH > Lower HIGH (DOWN) bieżącego OB.
-    # Opcja A: kontynuacja. Opcja B: odwrócenie → nowy OB przeciwny.
+    # Zmiana trendu (zastępuje CHOCH_PENDING / no-reversal / reversal)
+    # DOWN: HIGH > OB SHORT.high → UP, OB LONG = świeca z najniższym LOW
+    # UP:   LOW  < OB LONG.low  → DOWN, OB SHORT = świeca z najwyższym HIGH
     # ------------------------------------------------------------------ #
 
-    def _detect_choch(self, candle: MsiCandle) -> Optional[StructureEvent]:
+    def _migrate_choch_pending(self) -> None:
+        """Stary snapshot CHOCH_PENDING → HL_LH_CYCLE pod nową regułę zmiany trendu."""
+        if self._state.phase != MsiPhase.CHOCH_PENDING:
+            return
+        self._state.phase = MsiPhase.HL_LH_CYCLE
+        self._state.choch_mode = ChochMode.NONE
+        self._state.choch_rev_building = False
+        self._state.choch_low_intact = True
+        self._state.choch_high_intact = True
+        # Ekstremum: zapisane pole → OB → choch/bos_marking (najlepszy dostępny fallback)
+        if self._state.ob_range_extreme_candle is None:
+            if self._state.current_ob is not None:
+                self._state.ob_range_extreme_candle = self._state.current_ob.candle
+            elif self._state.bos_marking_candle is not None:
+                self._state.ob_range_extreme_candle = self._state.bos_marking_candle
+            elif self._state.choch_candle is not None:
+                self._state.ob_range_extreme_candle = self._state.choch_candle
+        self._state.choch_candle = None
+        self._state.bos_marking_candle = None
+        # Stary PENDING nie ma spójnego cyklu V — bezpieczny start: czekaj na grab.
+        self._state.v_cycle = VCyclePhase.WAIT_LIQ_GRAB
+        self._state.temporary_higher_low = None
+        self._state.temporary_lower_high = None
+        self._state.hl_marking_candle = None
+        self._state.lh_marking_candle = None
+        self._state.cycle_swept_liquidity = None
+        if self._state.liquidity is None and self._state.current_ob is not None:
+            self._state.liquidity = self._state.current_ob.liquidity_level
+        logger.info("[%s] migrate CHOCH_PENDING -> HL_LH_CYCLE (trend-change rule)", self.symbol)
+
+    def _update_ob_range_extreme(self, candle: MsiCandle) -> None:
+        """Aktualizuj świecę ekstremum od powstania current_ob (włącznie z bieżącą)."""
         ob = self._state.current_ob
         if ob is None:
-            return None
-
-        if self._state.initial_trend == Trend.UP and candle.low < ob.hl_lh_level:
-            self._state.choch_candle = candle
-            self._state.choch_mode = ChochMode.PENDING
-            self._state.choch_low_intact = True
-            self._state.phase = MsiPhase.CHOCH_PENDING
-            self._state.bos_high = candle.high
-            self._state.temporary_high = candle.high
-            return self._emit(
-                "CHOCH",
-                candle,
-                mode="PENDING",
-                hl_lh_level=ob.hl_lh_level,
-                trend="UP",
-                bos_high=candle.high,
-            )
-
-        if self._state.initial_trend == Trend.DOWN and candle.high > ob.hl_lh_level:
-            self._state.choch_candle = candle
-            self._state.choch_mode = ChochMode.PENDING
-            self._state.choch_high_intact = True
-            self._state.phase = MsiPhase.CHOCH_PENDING
-            self._state.bos_low = candle.low
-            self._state.temporary_low = candle.low
-            return self._emit(
-                "CHOCH",
-                candle,
-                mode="PENDING",
-                hl_lh_level=ob.hl_lh_level,
-                trend="DOWN",
-                bos_low=candle.low,
-            )
-
-        return None
-
-    def _process_choch(self, candle: MsiCandle) -> List[StructureEvent]:
-        events: List[StructureEvent] = []
-        if self._state.choch_mode != ChochMode.PENDING or self._state.choch_candle is None:
-            return events
-
-        if self._state.initial_trend == Trend.UP:
-            events.extend(self._choch_up(candle))
+            return
+        cur = self._state.ob_range_extreme_candle
+        if ob.direction == "LONG":
+            # Trend UP → przy odwróceniu potrzebny najwyższy HIGH
+            if cur is None or candle.high > cur.high:
+                self._state.ob_range_extreme_candle = candle
         else:
-            events.extend(self._choch_down(candle))
-        return events
+            # Trend DOWN → przy odwróceniu potrzebny najniższy LOW
+            if cur is None or candle.low < cur.low:
+                self._state.ob_range_extreme_candle = candle
 
-    def _choch_up(self, candle: MsiCandle) -> List[StructureEvent]:
-        events: List[StructureEvent] = []
-        choch = self._state.choch_candle
-        assert choch is not None
-        bos_h = self._state.bos_high
-        assert bos_h is not None
-
-        if candle.low < choch.low:
-            self._state.choch_low_intact = False
-
-        if self._state.choch_low_intact and candle.high > bos_h:
-            self._state.choch_mode = ChochMode.NO_REVERSAL
-            self._state.phase = MsiPhase.HL_LH_CYCLE
-            self._state.temporary_higher_low = choch.low
-            self._state.hl_marking_candle = choch
-            self._state.v_cycle = VCyclePhase.UPDATING_TEMP_HL
-            self._state.choch_candle = None
-            events.append(
-                self._emit(
-                    "CHOCH",
-                    candle,
-                    mode="NO_REVERSAL",
-                    trend="UP",
-                    temporary_higher_low=choch.low,
-                )
-            )
-            return events
-
-        rev = self._try_choch_reversal_down(candle)
-        if rev:
-            events.extend(rev)
-        return events
-
-    def _choch_down(self, candle: MsiCandle) -> List[StructureEvent]:
-        events: List[StructureEvent] = []
-        choch = self._state.choch_candle
-        assert choch is not None
-        bos_l = self._state.bos_low
-        assert bos_l is not None
-
-        if candle.high > choch.high:
-            self._state.choch_high_intact = False
-
-        if self._state.choch_high_intact and candle.low < bos_l:
-            self._state.choch_mode = ChochMode.NO_REVERSAL
-            self._state.phase = MsiPhase.HL_LH_CYCLE
-            self._state.temporary_lower_high = choch.high
-            self._state.lh_marking_candle = choch
-            self._state.v_cycle = VCyclePhase.UPDATING_TEMP_HL
-            self._state.choch_candle = None
-            events.append(
-                self._emit(
-                    "CHOCH",
-                    candle,
-                    mode="NO_REVERSAL",
-                    trend="DOWN",
-                    temporary_lower_high=choch.high,
-                )
-            )
-            return events
-
-        rev = self._try_choch_reversal_up(candle)
-        if rev:
-            events.extend(rev)
-        return events
-
-    def _try_choch_reversal_down(self, candle: MsiCandle) -> List[StructureEvent]:
-        """Opcja B (UP → DOWN): po CHOCH, gdy LOW < CHOCH LOW → BOS HIGH → Lower HIGH → OB SHORT."""
-        choch = self._state.choch_candle
+    def _try_trend_change(self, candle: MsiCandle) -> List[StructureEvent]:
+        """Natychmiastowa zmiana trendu po przebiciu HIGH/LOW aktualnego OB (knoty)."""
         ob = self._state.current_ob
-        if choch is None or ob is None:
+        if ob is None:
             return []
 
-        if self._state.choch_low_intact:
-            return []
+        if ob.direction == "LONG" and candle.low < ob.ob_low:
+            extreme = self._state.ob_range_extreme_candle or ob.candle
+            return self._apply_trend_change(
+                extreme=extreme,
+                trigger=candle,
+                new_trend=Trend.DOWN,
+                broken_level=ob.ob_low,
+                broken_ob_chain_id=ob.chain_id,
+            )
 
-        bos_h = self._state.bos_high or choch.high
-        if candle.high <= bos_h:
-            return []
+        if ob.direction == "SHORT" and candle.high > ob.ob_high:
+            extreme = self._state.ob_range_extreme_candle or ob.candle
+            return self._apply_trend_change(
+                extreme=extreme,
+                trigger=candle,
+                new_trend=Trend.UP,
+                broken_level=ob.ob_high,
+                broken_ob_chain_id=ob.chain_id,
+            )
 
-        if candle.high <= ob.hl_lh_level:
-            return []
+        return []
 
-        self._state.choch_mode = ChochMode.REVERSAL
-        self._state.initial_trend = Trend.DOWN
-        self._state.confirmed_lower_high = candle.high
-        self._state.liquidity = choch.low
-        self._state.bos_low = bos_h
-
-        self._set_initial_candle(choch)
-        new_ob = self._create_ob(
-            candle=choch,
-            direction="SHORT",
-            hl_lh_level=candle.high,
-            bos_level=bos_h,
-            liquidity_level=choch.low,
-            is_first=False,
-            trigger_candle=candle,
-        )
-        self._state.phase = MsiPhase.HL_LH_CYCLE
-        self._state.v_cycle = VCyclePhase.WAIT_LIQ_GRAB
-        self._state.temporary_low = candle.low
-        self._state.temporary_liquidity = choch.high
+    def _apply_trend_change(
+        self,
+        extreme: MsiCandle,
+        trigger: MsiCandle,
+        new_trend: Trend,
+        broken_level: float,
+        broken_ob_chain_id: str,
+    ) -> List[StructureEvent]:
+        """
+        Nowy OB = świeca ekstremum (= nowa Initial Candle).
+        Potem budowa III/IV w nowym kierunku od zera — NIE WAIT_LIQ_GRAB
+        z liquidity=OB high/low (to blokowało kolejne OB w trendzie).
+        """
+        events: List[StructureEvent] = []
+        self._state.initial_trend = new_trend
+        self._set_initial_candle(extreme)
         self._state.choch_mode = ChochMode.NONE
         self._state.choch_candle = None
+        self._state.bos_marking_candle = None
+        self._state.choch_rev_building = False
         self._state.choch_low_intact = True
-
-        return [
-            self._emit_ob_new(new_ob, candle),
-            self._emit("CHOCH", candle, mode="REVERSAL", new_trend="DOWN", ob_chain_id=new_ob.chain_id),
-        ]
-
-    def _try_choch_reversal_up(self, candle: MsiCandle) -> List[StructureEvent]:
-        """Opcja B (DOWN → UP): symetrycznie."""
-        choch = self._state.choch_candle
-        ob = self._state.current_ob
-        if choch is None or ob is None:
-            return []
-
-        if self._state.choch_high_intact:
-            return []
-
-        bos_l = self._state.bos_low or choch.low
-        if candle.low >= bos_l:
-            return []
-
-        if candle.low >= ob.hl_lh_level:
-            return []
-
-        self._state.choch_mode = ChochMode.REVERSAL
-        self._state.initial_trend = Trend.UP
-        self._state.confirmed_higher_low = candle.low
-        self._state.liquidity = choch.high
-        self._state.bos_high = bos_l
-
-        self._set_initial_candle(choch)
-        new_ob = self._create_ob(
-            candle=choch,
-            direction="LONG",
-            hl_lh_level=candle.low,
-            bos_level=bos_l,
-            liquidity_level=choch.high,
-            is_first=False,
-            trigger_candle=candle,
-        )
-        self._state.phase = MsiPhase.HL_LH_CYCLE
-        self._state.v_cycle = VCyclePhase.WAIT_LIQ_GRAB
-        self._state.temporary_high = candle.high
-        self._state.temporary_liquidity = choch.low
-        self._state.choch_mode = ChochMode.NONE
-        self._state.choch_candle = None
         self._state.choch_high_intact = True
+        self._state.cycle_swept_liquidity = None
+        self._state.temporary_higher_low = None
+        self._state.temporary_lower_high = None
+        self._state.hl_marking_candle = None
+        self._state.lh_marking_candle = None
+        self._state.confirmed_higher_low = None
+        self._state.confirmed_lower_high = None
+        # Wyczyść liquidity/bos — struktura III/IV zbuduje je od nowa
+        self._state.liquidity = None
+        self._state.bos_high = None
+        self._state.bos_low = None
+        self._state.temporary_high = None
+        self._state.temporary_low = None
+        self._state.temporary_liquidity = None
+        self._state.pre_bos_phase = PreBosPhase.BUILDING
 
-        return [
-            self._emit_ob_new(new_ob, candle),
-            self._emit("CHOCH", candle, mode="REVERSAL", new_trend="UP", ob_chain_id=new_ob.chain_id),
-        ]
+        if new_trend == Trend.UP:
+            ob = self._create_ob(
+                candle=extreme,
+                direction="LONG",
+                hl_lh_level=extreme.low,
+                bos_level=extreme.high,
+                liquidity_level=extreme.low,
+                is_first=False,
+                trigger_candle=trigger,
+            )
+        else:
+            ob = self._create_ob(
+                candle=extreme,
+                direction="SHORT",
+                hl_lh_level=extreme.high,
+                bos_level=extreme.low,
+                liquidity_level=extreme.high,
+                is_first=False,
+                trigger_candle=trigger,
+            )
+
+        ob_ev = self._emit_ob_new(ob, trigger)
+        ob_ev.payload["from_trend_change"] = True
+        events.append(ob_ev)
+        events.append(
+            self._emit(
+                "CHOCH",
+                trigger,
+                mode="TREND_CHANGE",
+                new_trend=new_trend.value,
+                broken_level=broken_level,
+                broken_ob_chain_id=broken_ob_chain_id,
+                ob_chain_id=ob.chain_id,
+                extreme_ts=extreme.ts,
+                extreme_high=extreme.high,
+                extreme_low=extreme.low,
+            )
+        )
+
+        # PDF V.6: IC = świeca OB → budowa III/IV. Trigger może już być Breaking Candle.
+        if new_trend == Trend.UP and trigger.high > extreme.high:
+            self._state.temporary_high = trigger.high
+            self._state.temporary_liquidity = trigger.low
+            self._state.phase = MsiPhase.PRE_FIRST_OB
+            events.append(
+                self._emit(
+                    "INITIAL_TREND",
+                    trigger,
+                    trend="UP",
+                    breaking_candle_ts=trigger.ts,
+                    temporary_high=trigger.high,
+                    temporary_liquidity=trigger.low,
+                    initial_high=extreme.high,
+                    initial_low=extreme.low,
+                    after_trend_change=True,
+                )
+            )
+        elif new_trend == Trend.DOWN and trigger.low < extreme.low:
+            self._state.temporary_low = trigger.low
+            self._state.temporary_liquidity = trigger.high
+            self._state.phase = MsiPhase.PRE_FIRST_OB
+            events.append(
+                self._emit(
+                    "INITIAL_TREND",
+                    trigger,
+                    trend="DOWN",
+                    breaking_candle_ts=trigger.ts,
+                    temporary_low=trigger.low,
+                    temporary_liquidity=trigger.high,
+                    initial_high=extreme.high,
+                    initial_low=extreme.low,
+                    after_trend_change=True,
+                )
+            )
+        else:
+            # Czekaj na Breaking Candle sekcji III w znanym kierunku
+            self._state.phase = MsiPhase.INITIAL_STRUCTURE
+
+        return events
 
     # ------------------------------------------------------------------ #
     # OrderBlock helpers
@@ -1094,6 +1142,8 @@ class MsiEngine:
         self._state.previous_ob = self._state.current_ob
         self._state.current_ob = ob
         self._all_obs.append(ob)
+        # Reset ekstremum zakresu od powstania tego OB
+        self._state.ob_range_extreme_candle = candle
         return ob
 
     def _emit_ob_new(self, ob: OrderBlock, trigger: MsiCandle) -> StructureEvent:
