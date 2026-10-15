@@ -235,8 +235,10 @@ def test_marketable_long_logs_and_sets_flag():
             moh.state_manager,
             "update_active_order",
             side_effect=lambda eid, payload: updates.append(dict(payload)),
-        ):
-            await moh._place_msi_limit_gtc(MagicMock(), prepared, market_features={})
+        ), patch.object(moh.asyncio, "sleep", new=AsyncMock()):
+            ex = MagicMock()
+            ex.find_sl_tp_order_ids.return_value = ("sl-oid", "tp-oid")
+            await moh._place_msi_limit_gtc(ex, prepared, market_features={})
 
     asyncio.run(_run())
     assert "[MSI] limit marketable at placement" in logs
@@ -244,7 +246,11 @@ def test_marketable_long_logs_and_sets_flag():
     assert saves[0].get("ask_at_placement") == 100.4
     assert saves[0].get("bid_at_placement") == 100.1
     assert saves[0].get("price_at_placement") == 100.2
-    assert any(u.get("status") == "PLACED" and u.get("placed_marketable") is True for u in updates)
+    placed_u = [u for u in updates if u.get("status") == "PLACED"]
+    assert placed_u and placed_u[0].get("placed_marketable") is True
+    assert placed_u[0].get("slOrderId") == "sl-oid"
+    assert placed_u[0].get("tpOrderId") == "tp-oid"
+    assert placed_u[0].get("entryOrderId") == "oid-1"
     assert placed_bq and placed_bq[0].get("placed_marketable") is True
     assert placed_bq[0].get("ask_at_placement") == 100.4
 
@@ -285,8 +291,10 @@ def test_marketable_short_logs_and_sets_flag():
             moh, "log_order_placed"
         ), patch.object(
             moh.state_manager, "update_active_order"
-        ):
-            await moh._place_msi_limit_gtc(MagicMock(), prepared, market_features={})
+        ), patch.object(moh.asyncio, "sleep", new=AsyncMock()):
+            ex = MagicMock()
+            ex.find_sl_tp_order_ids.return_value = (None, None)
+            await moh._place_msi_limit_gtc(ex, prepared, market_features={})
 
     asyncio.run(_run())
     assert "[MSI] limit marketable at placement" in logs
@@ -323,8 +331,10 @@ def test_price_unavailable_warning_still_places():
             moh, "log_order_placed"
         ), patch.object(
             moh.state_manager, "update_active_order"
-        ):
-            await moh._place_msi_limit_gtc(MagicMock(), prepared, market_features={})
+        ), patch.object(moh.asyncio, "sleep", new=AsyncMock()):
+            ex = MagicMock()
+            ex.find_sl_tp_order_ids.return_value = (None, None)
+            await moh._place_msi_limit_gtc(ex, prepared, market_features={})
             place_api.append(True)
 
     asyncio.run(_run())

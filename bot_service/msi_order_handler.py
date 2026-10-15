@@ -635,14 +635,59 @@ async def _place_msi_limit_gtc(
         )
 
         if order_result and order_result.get("orderId"):
+            entry_oid = str(order_result.get("orderId"))
+            placed_update: Dict[str, Any] = {
+                "status": "PLACED",
+                "orderId": entry_oid,
+                "entryOrderId": entry_oid,
+                **placement_meta,
+            }
+            # SL/TP OrderId od razu po place — PnL match zanim updater zdąży → OPEN
+            # (krótkie pozycje 0–1 min zamykane przy dokumencie nadal PLACED).
+            sl_tp_lookup = {
+                "planned_sl_price": f_sl,
+                "planned_tp_price": f_tp,
+            }
+            sl_id: Optional[str] = None
+            tp_id: Optional[str] = None
+            for attempt in range(3):
+                try:
+                    sl_id, tp_id = await asyncio.to_thread(
+                        executor.find_sl_tp_order_ids, symbol, sl_tp_lookup
+                    )
+                except Exception as e:
+                    log_struct(
+                        "warning",
+                        "msi_place",
+                        f"find_sl_tp_order_ids failed: {e}",
+                        symbol=symbol,
+                        event_id=event_id,
+                        attempt=attempt + 1,
+                    )
+                    sl_id, tp_id = None, None
+                if sl_id and tp_id:
+                    break
+                if attempt + 1 < 3:
+                    await asyncio.sleep(0.5)
+            if sl_id:
+                placed_update["slOrderId"] = sl_id
+            if tp_id:
+                placed_update["tpOrderId"] = tp_id
+            if not sl_id or not tp_id:
+                log_struct(
+                    "warning",
+                    "msi_place",
+                    "PLACED bez pełnych SL/TP OrderId — updater dociągnie przy PLACED/OPEN",
+                    symbol=symbol,
+                    event_id=event_id,
+                    has_sl=bool(sl_id),
+                    has_tp=bool(tp_id),
+                )
+
             await asyncio.to_thread(
                 state_manager.update_active_order,
                 event_id,
-                {
-                    "status": "PLACED",
-                    "orderId": order_result.get("orderId"),
-                    **placement_meta,
-                },
+                placed_update,
             )
             log_struct(
                 "info",
@@ -650,12 +695,14 @@ async def _place_msi_limit_gtc(
                 "Limit GTC + SL + TP (2R) wysłany na Bybit demo",
                 symbol=symbol,
                 event_id=event_id,
-                order_id=order_result.get("orderId"),
+                order_id=entry_oid,
                 entry=f_entry,
                 sl=f_sl,
                 tp=f_tp,
                 qty=prepared.calculated_qty,
                 placed_marketable=placed_marketable,
+                slOrderId=sl_id,
+                tpOrderId=tp_id,
             )
             mf = market_features if isinstance(market_features, dict) else {}
             if not mf and isinstance(signal.market_features, dict):

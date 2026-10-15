@@ -253,15 +253,25 @@ def get_open_orders_for_symbol_side(symbol: str, side: str) -> list:
     Dokumenty active_orders ze statusem OPEN dla symbolu + kierunku (LONG/SHORT).
     Przy regule jednej pozycji na symbol oczekiwany wynik: 0 lub 1.
     """
+    return get_orders_for_symbol_side_statuses(symbol, side, ("OPEN",))
+
+
+def get_orders_for_symbol_side_statuses(
+    symbol: str,
+    side: str,
+    statuses: tuple = ("OPEN",),
+) -> list:
+    """active_orders dla symbol+side z dozwolonymi statusami (np. PnL match: OPEN/PLACED/PLACING)."""
     sym = str(symbol or "").upper().replace(".P", "")
     direction = str(side or "").upper()
+    allowed = {str(s).upper() for s in statuses}
     results = []
-    if not sym or direction not in ("LONG", "SHORT"):
+    if not sym or direction not in ("LONG", "SHORT") or not allowed:
         return results
     try:
         for doc in _collection_active_orders().stream():
             data = doc.to_dict() or {}
-            if data.get("status") != "OPEN":
+            if str(data.get("status", "")).upper() not in allowed:
                 continue
             doc_sym = str(data.get("symbol", "")).upper().replace(".P", "")
             if doc_sym != sym:
@@ -271,10 +281,20 @@ def get_open_orders_for_symbol_side(symbol: str, side: str) -> list:
             results.append(doc)
     except Exception as e:
         logger.exception(
-            "[state_manager] get_open_orders_for_symbol_side failed for %s %s: %s",
+            "[state_manager] get_orders_for_symbol_side_statuses failed for %s %s: %s",
             sym, direction, e,
         )
     return results
+
+
+# Statusy dokumentów, które mogą jeszcze reprezentować pozycję/wejście przy closed-PnL
+# (krótka pozycja bywa zamknięta zanim updater zdąży ustawić OPEN).
+PNL_MATCH_CANDIDATE_STATUSES = ("OPEN", "PLACED", "PLACING")
+
+
+def get_pnl_match_candidate_orders(symbol: str, side: str) -> list:
+    """Kandydaci do mostu Bybit / fallback PnL: OPEN oraz PLACED/PLACING."""
+    return get_orders_for_symbol_side_statuses(symbol, side, PNL_MATCH_CANDIDATE_STATUSES)
 
 
 # -------------------------

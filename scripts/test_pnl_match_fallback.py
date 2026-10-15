@@ -117,7 +117,7 @@ def test_a_single_open_matches():
     ), patch.object(
         bl.state_manager, "get_active_order_by_tp_order_id", return_value=None
     ), patch.object(
-        bl.state_manager, "get_open_orders_for_symbol_side", return_value=[open_doc]
+        bl.state_manager, "get_pnl_match_candidate_orders", return_value=[open_doc]
     ), patch.object(bl, "log_struct", side_effect=_capture):
         match = bl._find_matching_order(_pnl(), executor=None)
 
@@ -140,7 +140,7 @@ def test_b_open_plus_cancelled_picks_open():
     ), patch.object(
         bl.state_manager, "get_active_order_by_tp_order_id", return_value=None
     ), patch.object(
-        bl.state_manager, "get_open_orders_for_symbol_side", return_value=[open_doc]
+        bl.state_manager, "get_pnl_match_candidate_orders", return_value=[open_doc]
     ), patch.object(bl, "log_struct", side_effect=_capture):
         match = bl._find_matching_order(
             {"symbol": "COMPUSDT", "side": "Buy", "orderId": "oid-2", "orderLinkId": None},
@@ -161,7 +161,7 @@ def test_c_no_open_returns_none_with_warning():
     ), patch.object(
         bl.state_manager, "get_active_order_by_tp_order_id", return_value=None
     ), patch.object(
-        bl.state_manager, "get_open_orders_for_symbol_side", return_value=[]
+        bl.state_manager, "get_pnl_match_candidate_orders", return_value=[]
     ), patch.object(bl, "log_struct", side_effect=_capture):
         match = bl._find_matching_order(_pnl(order_id="oid-none"), executor=None)
 
@@ -184,7 +184,7 @@ def test_c2_two_opens_ambiguous():
     ), patch.object(
         bl.state_manager, "get_active_order_by_tp_order_id", return_value=None
     ), patch.object(
-        bl.state_manager, "get_open_orders_for_symbol_side", return_value=docs
+        bl.state_manager, "get_pnl_match_candidate_orders", return_value=docs
     ), patch.object(bl, "log_struct", side_effect=_capture):
         match = bl._find_matching_order(_pnl(), executor=None)
 
@@ -243,7 +243,7 @@ def test_e_match_via_bybit_bridge():
     ), patch.object(
         bl.state_manager, "get_active_order_by_tp_order_id", return_value=None
     ), patch.object(
-        bl.state_manager, "get_open_orders_for_symbol_side", return_value=[open_a, open_b]
+        bl.state_manager, "get_pnl_match_candidate_orders", return_value=[open_a, open_b]
     ), patch.object(bl, "log_struct", side_effect=_capture):
         # closed SHORT → side Buy
         match = bl._find_matching_order(
@@ -310,6 +310,109 @@ def test_collect_open_order_ids_sets_entry_sl_tp():
     assert out == {"entryOrderId": "entry-1", "slOrderId": "sl-1", "tpOrderId": "tp-1"}
 
 
+def test_g_placed_with_sl_matches_before_open():
+    """Pozycja zamknięta zanim updater → OPEN: dokument PLACED + slOrderId → match."""
+    logs, _capture = _capture_logs()
+    placed = {
+        "id": "evt-fast",
+        "symbol": "TAOUSDT",
+        "direction": "SHORT",
+        "status": "PLACED",
+        "slOrderId": "oid-sl-fast",
+        "tpOrderId": "oid-tp-fast",
+        "orderId": "oid-entry",
+        "chain_id": "TAOUSDT-1",
+        "planned_entry_price": 500.0,
+        "planned_sl_price": 505.0,
+        "planned_tp_price": 490.0,
+        "signal_mode": "msi_orderblock",
+    }
+
+    with patch.object(bl.state_manager, "get_active_order_by_id", return_value=None), patch.object(
+        bl.state_manager, "get_active_order_by_sl_order_id", return_value=placed
+    ), patch.object(
+        bl.state_manager, "get_active_order_by_tp_order_id", return_value=None
+    ), patch.object(bl, "log_struct", side_effect=_capture):
+        match = bl._find_matching_order(
+            {
+                "symbol": "TAOUSDT",
+                "side": "Buy",  # zamknięcie SHORT
+                "orderId": "oid-sl-fast",
+                "orderLinkId": None,
+                "updatedTime": "1700000100000",
+            },
+            executor=None,
+        )
+
+    assert match is placed
+    assert match["status"] == "PLACED"
+    assert any(m[1] == "[PNL] match via sl" for m in logs)
+
+
+def test_h_bridge_matches_placed_doc():
+    """Most Bybit: filled entry na PLACED (nie OPEN) przed czasem zamknięcia."""
+    placed = _FakeDoc(
+        "evt-placed",
+        {
+            "symbol": "AAVEUSDT",
+            "direction": "SHORT",
+            "status": "PLACED",
+            "orderId": "entry-1",
+        },
+    )
+    logs, _capture = _capture_logs()
+    executor = MagicMock()
+    executor.get_filled_entry_order_by_link_id.return_value = {
+        "orderStatus": "Filled",
+        "orderId": "entry-1",
+        "updatedTime": "1700000000000",
+    }
+
+    with patch.object(bl.state_manager, "get_active_order_by_id", return_value=None), patch.object(
+        bl.state_manager, "get_active_order_by_sl_order_id", return_value=None
+    ), patch.object(
+        bl.state_manager, "get_active_order_by_tp_order_id", return_value=None
+    ), patch.object(
+        bl.state_manager, "get_pnl_match_candidate_orders", return_value=[placed]
+    ), patch.object(bl, "log_struct", side_effect=_capture):
+        match = bl._find_matching_order(
+            {
+                "symbol": "AAVEUSDT",
+                "side": "Buy",
+                "orderId": "close-sl",
+                "orderLinkId": None,
+                "updatedTime": "1700000100000",
+            },
+            executor=executor,
+        )
+
+    assert match is not None
+    assert match["id"] == "evt-placed"
+    assert match["status"] == "PLACED"
+    assert any(m[1] == "[PNL] match via bybit_bridge" for m in logs)
+
+
+def test_i_pnl_candidates_include_placed():
+    from bot_service import state_manager as sm
+
+    open_d = _FakeDoc("o1", {"symbol": "DOTUSDT", "direction": "LONG", "status": "OPEN"})
+    placed_d = _FakeDoc("p1", {"symbol": "DOTUSDT", "direction": "LONG", "status": "PLACED"})
+    cancelled = _FakeDoc(
+        "c1", {"symbol": "DOTUSDT", "direction": "LONG", "status": "CANCELLED_SUPERSEDED"}
+    )
+
+    class _Coll:
+        def stream(self):
+            return [open_d, placed_d, cancelled]
+
+    with patch.object(sm, "_collection_active_orders", return_value=_Coll()):
+        docs = sm.get_pnl_match_candidate_orders("DOTUSDT", "LONG")
+        opens_only = sm.get_open_orders_for_symbol_side("DOTUSDT", "LONG")
+
+    assert {d.id for d in docs} == {"o1", "p1"}
+    assert len(opens_only) == 1 and opens_only[0].id == "o1"
+
+
 if __name__ == "__main__":
     test_a_single_open_matches()
     test_b_open_plus_cancelled_picks_open()
@@ -321,4 +424,7 @@ if __name__ == "__main__":
     test_f_match_via_link()
     test_get_open_orders_filters_cancelled()
     test_collect_open_order_ids_sets_entry_sl_tp()
+    test_g_placed_with_sl_matches_before_open()
+    test_h_bridge_matches_placed_doc()
+    test_i_pnl_candidates_include_placed()
     print("OK — test_pnl_match_fallback")

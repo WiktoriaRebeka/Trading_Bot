@@ -867,7 +867,7 @@ def _collect_open_order_ids(
     retries: int = 3,
 ) -> Dict[str, str]:
     """
-    Zbiera entryOrderId / slOrderId / tpOrderId do zapisu przy OPEN / backfill.
+    Zbiera entryOrderId / slOrderId / tpOrderId (place → PLACED, OPEN, backfill).
     Nie zmienia logiki handlu — tylko metadane dopasowania PnL.
     """
     out: Dict[str, str] = {}
@@ -1000,9 +1000,18 @@ def update_filled_orders(executor: BybitExecutor):
                 log_struct("info", "updater", "Order removed (cancelled/rejected)", symbol=symbol, event_id=order_link_id)
 
             else:
-                # ensure status field exists
-                if 'status' not in data:
-                    state_manager.update_active_order(order_link_id, {'status': 'PLACED'})
+                # Nadal PLACED (New / PartiallyFilled…): uzupełnij brakujące SL/TP IDs
+                # zanim pozycja zdąży się zamknąć (PnL match krok 2).
+                patch: Dict[str, Any] = {}
+                if "status" not in data:
+                    patch["status"] = "PLACED"
+                if not data.get("slOrderId") or not data.get("tpOrderId"):
+                    id_fields = _collect_open_order_ids(
+                        executor, symbol, data, order_link_id, retries=2,
+                    )
+                    patch.update(id_fields)
+                if patch:
+                    state_manager.update_active_order(order_link_id, patch)
 
         except Exception as e:
             log_struct("error", "updater", "Failed to update placed order", event_id=order_link_id, error=str(e))
@@ -1277,8 +1286,9 @@ def _match_via_bybit_bridge(
     executor: Optional[BybitExecutor],
 ) -> Optional[Dict[str, Any]]:
     """
-    Most Bybit: wśród OPEN symbol+side znajdź dokładnie jedno wypełnione wejście
-    z orderLinkId = doc.id sprzed czasu zamknięcia closed-pnl.
+    Most Bybit: wśród OPEN/PLACED/PLACING symbol+side znajdź dokładnie jedno
+    wypełnione wejście z orderLinkId = doc.id sprzed czasu zamknięcia closed-pnl.
+    (PLACED: pozycja zdążyła się zamknąć zanim updater ustawił OPEN.)
     """
     if executor is None:
         return None
@@ -1287,7 +1297,7 @@ def _match_via_bybit_bridge(
         return None
     side = "LONG" if pnl_record.get("side") == "Sell" else "SHORT"
     close_ms = _pnl_close_time_ms(pnl_record)
-    open_docs = list(state_manager.get_open_orders_for_symbol_side(symbol, side))
+    open_docs = list(state_manager.get_pnl_match_candidate_orders(symbol, side))
     matches: List[Dict[str, Any]] = []
     for doc in open_docs:
         try:
@@ -1375,9 +1385,9 @@ def _find_matching_order(
         )
         return bridge
 
-    # 4. Fallback: tylko OPEN dla symbol + side (jedna pozycja → dokładnie 1)
+    # 4. Fallback: dokładnie jeden kandydat OPEN/PLACED/PLACING dla symbol+side
     side = "LONG" if pnl_record.get("side") == "Sell" else "SHORT"
-    open_docs = list(state_manager.get_open_orders_for_symbol_side(symbol, side))
+    open_docs = list(state_manager.get_pnl_match_candidate_orders(symbol, side))
     n = len(open_docs)
     if n != 1:
         log_struct(
@@ -1401,5 +1411,6 @@ def _find_matching_order(
         event_id=doc.id,
         candidates=1,
         side=side,
+        doc_status=data.get("status"),
     )
     return data

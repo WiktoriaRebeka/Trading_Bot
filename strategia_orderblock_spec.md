@@ -121,7 +121,9 @@ Szczegóły BOS / HL / LH / pierwszego OB: kod `msi_engine.py` + PDF MSI
 | `CLOSED_STALE` | OPEN bez pozycji Bybit (API OK, size=0), OPEN ≥ 10 min od `position_opened_at` |
 | `CANCELLED_SUPERSEDED` | Zastąpiony nowszym OB / deferred |
 
-Match zamknięć PnL: `orderLinkId` → `slOrderId` / `tpOrderId` → most Bybit → fallback dokładnie 1× OPEN.
+Match zamknięć PnL: `orderLinkId` → `slOrderId` / `tpOrderId` (także przy statusie
+`PLACED`/`PLACING`) → most Bybit (OPEN+PLACED+PLACING) → fallback dokładnie 1× kandydat.
+`slOrderId`/`tpOrderId` zapisywane od razu po place (nie dopiero przy OPEN).
 
 ---
 
