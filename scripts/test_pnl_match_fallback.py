@@ -7,6 +7,8 @@ Testy dopasowania closed-PnL → active_orders (_find_matching_order):
 (d) match via sl / tp
 (e) match via bybit_bridge
 (f) match via link
+(j) CLOSED_UNVERIFIED + brak sl/tp → match via entry_price (AAVE)
+(k) entry_price: >1 kandydat → najnowszy przed wejściem
 """
 
 from __future__ import annotations
@@ -413,6 +415,145 @@ def test_i_pnl_candidates_include_placed():
     assert len(opens_only) == 1 and opens_only[0].id == "o1"
 
 
+def test_j_aave_closed_unverified_match_via_entry_price():
+    """
+    AAVEUSDT LONG 2026-10-16: CLOSED_UNVERIFIED, brak slOrderId/tpOrderId,
+    fallback candidates:0 → match via entry_price (160.83 ± 1 tick).
+    """
+    event_id = "AAVEUSDT-1792138620000-100"
+    unverified = _FakeDoc(
+        event_id,
+        {
+            "symbol": "AAVEUSDT",
+            "direction": "LONG",
+            "status": "CLOSED_UNVERIFIED",
+            "entryOrderId": "4e0723ae-entry",
+            "planned_entry_price": 160.83,
+            "planned_sl_price": 160.45,
+            "tick_size": "0.01",
+            "created_at": "2026-10-16T08:39:15+00:00",
+        },
+    )
+    # 2026-10-16 09:37:33 UTC
+    entry_ms = 1792143453000
+    logs, _capture = _capture_logs()
+
+    with patch.object(bl.state_manager, "get_active_order_by_id", return_value=None), patch.object(
+        bl.state_manager, "get_active_order_by_sl_order_id", return_value=None
+    ), patch.object(
+        bl.state_manager, "get_active_order_by_tp_order_id", return_value=None
+    ), patch.object(
+        bl.state_manager, "get_pnl_entry_price_match_candidates", return_value=[unverified]
+    ), patch.object(
+        bl.state_manager, "get_pnl_match_candidate_orders", return_value=[]
+    ), patch.object(bl, "log_struct", side_effect=_capture):
+        match = bl._find_matching_order(
+            {
+                "symbol": "AAVEUSDT",
+                "side": "Sell",
+                "orderId": "c871a810-8622-4c42-9887-cdf47e5c493d",
+                "orderLinkId": None,
+                "avgEntryPrice": "160.83",
+                "avgExitPrice": "160.64",
+                "closedPnl": "-1.12",
+                "createdTime": str(entry_ms),
+                "updatedTime": str(entry_ms),
+            },
+            executor=None,
+        )
+
+    assert match is not None
+    assert match["id"] == event_id
+    assert match["status"] == "CLOSED_UNVERIFIED"
+    assert any(m[1] == "[PNL] match via entry_price" for m in logs)
+    assert not any(m[1] == "[PNL] fallback match ambiguous" for m in logs)
+
+
+def test_k_entry_price_ambiguous_picks_newest_before_entry():
+    older = _FakeDoc(
+        "AAVE-old",
+        {
+            "symbol": "AAVEUSDT",
+            "direction": "LONG",
+            "status": "CANCELLED_SUPERSEDED",
+            "planned_entry_price": 160.83,
+            "tick_size": "0.01",
+            "created_at": "2026-10-16T07:00:00+00:00",
+        },
+    )
+    newer = _FakeDoc(
+        "AAVEUSDT-1792138620000-100",
+        {
+            "symbol": "AAVEUSDT",
+            "direction": "LONG",
+            "status": "CLOSED_UNVERIFIED",
+            "planned_entry_price": 160.83,
+            "tick_size": "0.01",
+            "created_at": "2026-10-16T08:39:15+00:00",
+        },
+    )
+    entry_ms = 1792143453000
+    logs, _capture = _capture_logs()
+
+    with patch.object(bl.state_manager, "get_active_order_by_id", return_value=None), patch.object(
+        bl.state_manager, "get_active_order_by_sl_order_id", return_value=None
+    ), patch.object(
+        bl.state_manager, "get_active_order_by_tp_order_id", return_value=None
+    ), patch.object(
+        bl.state_manager,
+        "get_pnl_entry_price_match_candidates",
+        return_value=[older, newer],
+    ), patch.object(
+        bl.state_manager, "get_pnl_match_candidate_orders", return_value=[]
+    ), patch.object(bl, "log_struct", side_effect=_capture):
+        match = bl._find_matching_order(
+            {
+                "symbol": "AAVEUSDT",
+                "side": "Sell",
+                "orderId": "c871a810-close",
+                "orderLinkId": None,
+                "avgEntryPrice": "160.83",
+                "createdTime": str(entry_ms),
+                "updatedTime": str(entry_ms),
+            },
+            executor=None,
+        )
+
+    assert match is not None
+    assert match["id"] == "AAVEUSDT-1792138620000-100"
+    assert any(
+        m[1] == "[PNL] entry_price match ambiguous — picking newest before entry"
+        for m in logs
+    )
+    assert any(m[1] == "[PNL] match via entry_price" for m in logs)
+
+
+def test_l_entry_price_candidates_include_closed_unverified():
+    from bot_service import state_manager as sm
+
+    cu = _FakeDoc(
+        "cu1",
+        {"symbol": "AAVEUSDT", "direction": "LONG", "status": "CLOSED_UNVERIFIED"},
+    )
+    placed = _FakeDoc(
+        "p1", {"symbol": "AAVEUSDT", "direction": "LONG", "status": "PLACED"}
+    )
+    stale = _FakeDoc(
+        "s1", {"symbol": "AAVEUSDT", "direction": "LONG", "status": "CLOSED_STALE"}
+    )
+
+    class _Coll:
+        def stream(self):
+            return [cu, placed, stale]
+
+    with patch.object(sm, "_collection_active_orders", return_value=_Coll()):
+        docs = sm.get_pnl_entry_price_match_candidates("AAVEUSDT", "LONG")
+        fallback = sm.get_pnl_match_candidate_orders("AAVEUSDT", "LONG")
+
+    assert {d.id for d in docs} == {"cu1", "p1", "s1"}
+    assert {d.id for d in fallback} == {"p1"}
+
+
 if __name__ == "__main__":
     test_a_single_open_matches()
     test_b_open_plus_cancelled_picks_open()
@@ -427,4 +568,7 @@ if __name__ == "__main__":
     test_g_placed_with_sl_matches_before_open()
     test_h_bridge_matches_placed_doc()
     test_i_pnl_candidates_include_placed()
+    test_j_aave_closed_unverified_match_via_entry_price()
+    test_k_entry_price_ambiguous_picks_newest_before_entry()
+    test_l_entry_price_candidates_include_closed_unverified()
     print("OK — test_pnl_match_fallback")

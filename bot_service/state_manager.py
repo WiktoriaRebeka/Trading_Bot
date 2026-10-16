@@ -291,10 +291,25 @@ def get_orders_for_symbol_side_statuses(
 # (krótka pozycja bywa zamknięta zanim updater zdąży ustawić OPEN).
 PNL_MATCH_CANDIDATE_STATUSES = ("OPEN", "PLACED", "PLACING")
 
+# Rozszerzony zestaw pod match po cenie wejścia (wyścig fill/close/anulowanie).
+PNL_ENTRY_PRICE_MATCH_STATUSES = (
+    "OPEN",
+    "PLACED",
+    "PLACING",
+    "CLOSED_UNVERIFIED",
+    "CLOSED_STALE",
+    "CANCELLED_SUPERSEDED",
+)
+
 
 def get_pnl_match_candidate_orders(symbol: str, side: str) -> list:
     """Kandydaci do mostu Bybit / fallback PnL: OPEN oraz PLACED/PLACING."""
     return get_orders_for_symbol_side_statuses(symbol, side, PNL_MATCH_CANDIDATE_STATUSES)
+
+
+def get_pnl_entry_price_match_candidates(symbol: str, side: str) -> list:
+    """Kandydaci do matchu po avgEntryPrice vs planned_entry (szeroki zestaw statusów)."""
+    return get_orders_for_symbol_side_statuses(symbol, side, PNL_ENTRY_PRICE_MATCH_STATUSES)
 
 
 # -------------------------

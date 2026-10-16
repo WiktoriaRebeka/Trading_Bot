@@ -1281,6 +1281,100 @@ def _log_pnl_match(method: str, *, symbol: Any = None, order_id: Any = None, **e
     )
 
 
+def _doc_created_before_ms(data: Dict[str, Any]) -> Optional[int]:
+    """Czas utworzenia zapisu active_order (ms UTC) — do filtra „przed wejściem”."""
+    for key in ("created_at", "cooldown_completed_at", "timestamp_signal"):
+        dt = _parse_iso_utc(data.get(key))
+        if dt is not None:
+            return int(dt.timestamp() * 1000)
+    return None
+
+
+def _pnl_entry_time_ms(pnl_record: Dict[str, Any]) -> Optional[int]:
+    """Czas wejścia z closed-pnl (ms); przy braku — czas zamknięcia (trade 0 s)."""
+    for key in ("openTime", "entryTime", "createdTime", "updatedTime"):
+        raw = pnl_record.get(key)
+        if raw is None:
+            continue
+        try:
+            return int(float(raw))
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _match_via_entry_price(pnl_record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Match: symbol + kierunek + |avgEntryPrice − planned_entry| ≤ 1 tick,
+    dokument utworzony przed wejściem.
+    Statusy: PLACED/PLACING/OPEN/CLOSED_UNVERIFIED/CLOSED_STALE/CANCELLED_SUPERSEDED.
+    """
+    symbol = pnl_record.get("symbol")
+    if not symbol:
+        return None
+    try:
+        avg_entry = float(pnl_record.get("avgEntryPrice"))
+    except (TypeError, ValueError):
+        return None
+    if avg_entry <= 0:
+        return None
+
+    side = "LONG" if pnl_record.get("side") == "Sell" else "SHORT"
+    entry_ms = _pnl_entry_time_ms(pnl_record)
+    docs = list(state_manager.get_pnl_entry_price_match_candidates(symbol, side))
+    matches: List[Dict[str, Any]] = []
+
+    for doc in docs:
+        data = doc.to_dict() or {}
+        data["id"] = doc.id
+        try:
+            planned = float(
+                data.get("planned_entry_price")
+                if data.get("planned_entry_price") is not None
+                else (data.get("params") or {}).get("price")
+            )
+        except (TypeError, ValueError):
+            continue
+        if planned <= 0:
+            continue
+        try:
+            tick = float(_tick_size_for_order_data(data, symbol))
+        except ValueError:
+            continue
+        if tick <= 0:
+            continue
+        if abs(avg_entry - planned) > tick + 1e-12:
+            continue
+        created_ms = _doc_created_before_ms(data)
+        if entry_ms is not None and created_ms is not None and created_ms > entry_ms:
+            continue
+        matches.append(data)
+
+    if not matches:
+        return None
+    if len(matches) == 1:
+        return matches[0]
+
+    # >1: najnowszy zapis przed wejściem (max created_ms / fallback id)
+    def _sort_key(d: Dict[str, Any]) -> tuple:
+        cms = _doc_created_before_ms(d)
+        return (cms if cms is not None else -1, str(d.get("id") or ""))
+
+    matches.sort(key=_sort_key, reverse=True)
+    chosen = matches[0]
+    log_struct(
+        "warning",
+        "pnl_logger",
+        "[PNL] entry_price match ambiguous — picking newest before entry",
+        symbol=symbol,
+        side=side,
+        candidates=len(matches),
+        chosen_event_id=chosen.get("id"),
+        orderId=pnl_record.get("orderId"),
+    )
+    return chosen
+
+
 def _match_via_bybit_bridge(
     pnl_record: Dict[str, Any],
     executor: Optional[BybitExecutor],
@@ -1348,7 +1442,8 @@ def _find_matching_order(
     1) orderLinkId (= event_id / doc id)
     2) orderId zamknięcia ∈ {slOrderId, tpOrderId}
     3) most Bybit: filled entry po orderLinkId przed czasem zamknięcia
-    4) Fallback: dokładnie jeden OPEN dla symbol+side
+    4) cena wejścia: |avgEntryPrice − planned_entry| ≤ 1 tick (także CLOSED_UNVERIFIED)
+    5) Fallback: dokładnie jeden OPEN/PLACED/PLACING dla symbol+side
     """
     symbol = pnl_record.get("symbol")
     closing_order_id = pnl_record.get("orderId")
@@ -1385,7 +1480,21 @@ def _find_matching_order(
         )
         return bridge
 
-    # 4. Fallback: dokładnie jeden kandydat OPEN/PLACED/PLACING dla symbol+side
+    # 4. Match po cenie wejścia (CLOSED_UNVERIFIED / brak slOrderId po tpslMode Full)
+    entry_match = _match_via_entry_price(pnl_record)
+    if entry_match:
+        _log_pnl_match(
+            "entry_price",
+            symbol=symbol,
+            order_id=order_id_str,
+            event_id=entry_match.get("id"),
+            doc_status=entry_match.get("status"),
+            avgEntryPrice=pnl_record.get("avgEntryPrice"),
+            planned_entry=entry_match.get("planned_entry_price"),
+        )
+        return entry_match
+
+    # 5. Fallback: dokładnie jeden kandydat OPEN/PLACED/PLACING dla symbol+side
     side = "LONG" if pnl_record.get("side") == "Sell" else "SHORT"
     open_docs = list(state_manager.get_pnl_match_candidate_orders(symbol, side))
     n = len(open_docs)
