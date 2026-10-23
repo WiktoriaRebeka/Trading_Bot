@@ -63,7 +63,7 @@ def run() -> None:
     assert len(eng.orderblocks) == n_ob  # bez drugiego OB_NEW
     print("OK  po IV BOS: HL_LH_CYCLE WAIT_LIQ_GRAB, bez 2x OB_NEW")
 
-    # --- Kolejne OB w trendzie DOWN (grab + BOS) ---
+    # --- Kolejne OB w trendzie DOWN: grab + BOS → subsequent OB → III/IV restart ---
     liq = eng.state.liquidity
     assert liq is not None
     eng.on_candle_close(_c(7, liq + 1, 96.0))  # grab high > liq
@@ -73,7 +73,10 @@ def run() -> None:
     eng.on_candle_close(_c(8, 104.0, bos_l - 1))  # break BOS low → nowy SHORT OB
     assert len(eng.orderblocks) == n_ob + 1
     assert eng.orderblocks[-1].direction == "SHORT"
-    print("OK  kolejne OB SHORT w trendzie DOWN (sekcja V)")
+    # Po subsequent OB: budowa III/IV, nie WAIT_LIQ_GRAB na starej liq
+    assert eng.state.liquidity is None
+    assert eng.state.phase in (MsiPhase.INITIAL_STRUCTURE, MsiPhase.PRE_FIRST_OB)
+    print("OK  kolejne OB SHORT + restart III/IV (PDF V.6)")
 
     # --- Migracja CHOCH_PENDING ---
     choch = _c(1000, 108.0, 95.0)
@@ -110,6 +113,71 @@ def run() -> None:
     assert eng3.state.initial_trend == Trend.DOWN
     assert eng3.orderblocks[-1].direction == "SHORT"
     print("OK  migracja CHOCH_PENDING + trend-change")
+
+    # --- Migracja legacy WAIT_LIQ_GRAB po subsequent OB (Firestore schema < 2) ---
+    marking = _c(500, 112.0, 100.0)
+    ob_sub = OrderBlock(
+        chain_id="SUB-1",
+        candle=marking,
+        direction="LONG",
+        hl_lh_level=100.0,
+        bos_level=112.0,
+        liquidity_level=94.0,  # stara Liquidity z poprzedniego cyklu
+        initial_trend="UP",
+        detected_at_ts=500,
+        is_first=False,
+    )
+    raw_wait = {
+        "phase": "HL_LH_CYCLE",
+        "initial_trend": "UP",
+        "initial_candle": marking.to_dict(),
+        "initial_high": marking.high,
+        "initial_low": marking.low,
+        "current_ob": ob_sub.to_dict(),
+        "liquidity": 94.0,
+        "temporary_high": 120.0,
+        "temporary_liquidity": marking.low,
+        "bos_high": 120.0,
+        "v_cycle": "WAIT_LIQ_GRAB",
+        "pre_bos_phase": "BUILDING",
+        "chain_seq": 2,
+    }
+    eng4 = MsiEngine("MIG_WAIT")
+    eng4.import_state(
+        {
+            "state": raw_wait,
+            "candle_count": 10,
+            "schema_version": 1,  # legacy → migracja
+        }
+    )
+    assert eng4.state.phase == MsiPhase.INITIAL_STRUCTURE
+    assert eng4.state.liquidity is None
+    assert eng4.state.initial_candle is not None
+    assert eng4.state.initial_candle.ts == marking.ts
+    assert eng4.state.current_ob is not None
+    assert eng4.state.current_ob.chain_id == "SUB-1"
+    # Po migracji: Breaking Candle w kierunku UP → PRE_FIRST_OB
+    eng4.on_candle_close(_c(600, 113.0, 101.0))
+    assert eng4.state.phase == MsiPhase.PRE_FIRST_OB
+    assert eng4.state.temporary_high == 113.0
+    print("OK  migracja WAIT_LIQ_GRAB subsequent -> INITIAL_STRUCTURE + III")
+
+    # schema_version>=2: nie migruj ponownie poprawnego WAIT_LIQ_GRAB po IV
+    eng5 = MsiEngine("NO_MIG")
+    eng5.import_state(
+        {
+            "state": {
+                **raw_wait,
+                "liquidity": 101.0,  # świeżo z IV
+            },
+            "candle_count": 10,
+            "schema_version": 2,
+        }
+    )
+    assert eng5.state.phase == MsiPhase.HL_LH_CYCLE
+    assert eng5.state.v_cycle == VCyclePhase.WAIT_LIQ_GRAB
+    assert eng5.state.liquidity == 101.0
+    print("OK  schema_version=2: brak ponownej migracji WAIT_LIQ_GRAB")
 
     print("\nWszystkie testy zmiany trendu przeszly.")
 

@@ -256,11 +256,21 @@ class _MsiState:
 
 EventSink = Callable[[StructureEvent, Optional[OrderBlock]], None]
 
+# schema_version < 2: legacy WAIT_LIQ_GRAB po subsequent OB (stara Liquidity).
+# >= 2: po każdym OB_NEW → III/IV od OB jako IC (jak po zmianie trendu).
+MSI_SCHEMA_VERSION = 2
+
 
 class MsiEngine:
     """Silnik MSI 2.0 na zamkniętych świecach 1M. Używa wyłącznie high/low świecy."""
 
-    def __init__(self, symbol: str, on_event: Optional[EventSink] = None):
+    def __init__(
+        self,
+        symbol: str,
+        on_event: Optional[EventSink] = None,
+        *,
+        restart_structure_after_ob: bool = True,
+    ):
         self.symbol = str(symbol).upper()
         self._on_event = on_event
         self._state = _MsiState()
@@ -268,6 +278,9 @@ class MsiEngine:
         self._candle_count = 0
         self._last_processed_ts: Optional[int] = None
         self._replay_mode: bool = False
+        # True (PDF V.6): po każdym OB → nowa IC + III/IV.
+        # False: legacy — od razu WAIT_LIQ_GRAB na starej Liquidity (do backtestu).
+        self._restart_structure_after_ob = bool(restart_structure_after_ob)
 
     def set_replay_mode(self, on: bool) -> None:
         # DIAG tymczasowy: śledzenie flagi replay (ON bez OFF = blokada enqueue_snapshot)
@@ -317,13 +330,17 @@ class MsiEngine:
             "last_processed_ts": self._last_processed_ts,
             "all_obs_count": len(self._all_obs),
             "state": self._state.to_dict(),
-            "schema_version": 1,
+            "schema_version": MSI_SCHEMA_VERSION,
+            "restart_structure_after_ob": self._restart_structure_after_ob,
         }
 
     def import_state(self, d: dict) -> None:
         self._state = _MsiState.from_dict(d["state"])
         self._candle_count = int(d.get("candle_count", 0))
         self._last_processed_ts = d.get("last_processed_ts")
+        if "restart_structure_after_ob" in d:
+            self._restart_structure_after_ob = bool(d["restart_structure_after_ob"])
+        schema_ver = int(d.get("schema_version", 1))
         # Legacy CHOCH_PENDING → gotowość do nowej reguły zmiany trendu
         if self._state.phase == MsiPhase.CHOCH_PENDING:
             self._migrate_choch_pending()
@@ -332,6 +349,9 @@ class MsiEngine:
             and self._state.current_ob is not None
         ):
             self._state.ob_range_extreme_candle = self._state.current_ob.candle
+        # Stare snapshoty: subsequent OB → WAIT_LIQ_GRAB na starej Liquidity
+        if schema_ver < 2 and self._restart_structure_after_ob:
+            self._migrate_legacy_wait_liq_after_subsequent_ob()
 
     def replay_candles(self, candles: List[MsiCandle]) -> List[OrderBlock]:
         for c in candles:
@@ -537,7 +557,7 @@ class MsiEngine:
         return events
 
     def _ob_already_is_initial_candle(self) -> bool:
-        """Po trend-change OB_NEW już istnieje na IC — nie emituj drugiego OB_NEW."""
+        """Po trend-change / subsequent-OB restart OB_NEW już jest na IC — bez 2. OB_NEW."""
         ob = self._state.current_ob
         ic = self._state.initial_candle
         return ob is not None and ic is not None and ob.candle.ts == ic.ts
@@ -814,17 +834,23 @@ class MsiEngine:
         )
         events.append(self._emit_ob_new(ob, trigger))
 
-        self._state.temporary_high = trigger.high
-        self._state.temporary_liquidity = marking.low
-        self._state.bos_high = trigger.high
-        self._state.v_cycle = VCyclePhase.WAIT_LIQ_GRAB
-        self._state.temporary_higher_low = None
-        self._state.hl_marking_candle = None
-        self._state.cycle_swept_liquidity = None
-        # PDF VI no-reversal: po nowym OB/HL wracamy do normalnego cyklu —
-        # CHOCH znów względem Higher LOW nowego OB (nie wcześniej).
+        # PDF VI no-reversal: po nowym OB/HL wracamy do normalnego cyklu.
         if self._state.choch_mode == ChochMode.NO_REVERSAL:
             self._state.choch_mode = ChochMode.NONE
+
+        if self._restart_structure_after_ob:
+            # PDF V.6: OB = nowa IC → III/IV od zera (nie WAIT_LIQ_GRAB na starej liq).
+            events.extend(self._begin_iii_iv_from_ob_ic(marking, trigger, Trend.UP))
+        else:
+            # Legacy (pre-2026-10): od razu cykl V na poprzedniej Liquidity.
+            self._state.temporary_high = trigger.high
+            self._state.temporary_liquidity = marking.low
+            self._state.bos_high = trigger.high
+            self._state.v_cycle = VCyclePhase.WAIT_LIQ_GRAB
+            self._state.temporary_higher_low = None
+            self._state.hl_marking_candle = None
+            self._state.cycle_swept_liquidity = None
+            self._state.phase = MsiPhase.HL_LH_CYCLE
         return events
 
     def _v_cycle_down(self, candle: MsiCandle) -> List[StructureEvent]:
@@ -902,17 +928,20 @@ class MsiEngine:
         )
         events.append(self._emit_ob_new(ob, trigger))
 
-        self._state.temporary_low = trigger.low
-        self._state.temporary_liquidity = marking.high
-        self._state.bos_low = trigger.low
-        self._state.v_cycle = VCyclePhase.WAIT_LIQ_GRAB
-        self._state.temporary_lower_high = None
-        self._state.lh_marking_candle = None
-        self._state.cycle_swept_liquidity = None
-        # PDF VI no-reversal: po nowym OB/LH wracamy do normalnego cyklu —
-        # CHOCH znów względem Lower HIGH nowego OB (nie wcześniej).
         if self._state.choch_mode == ChochMode.NO_REVERSAL:
             self._state.choch_mode = ChochMode.NONE
+
+        if self._restart_structure_after_ob:
+            events.extend(self._begin_iii_iv_from_ob_ic(marking, trigger, Trend.DOWN))
+        else:
+            self._state.temporary_low = trigger.low
+            self._state.temporary_liquidity = marking.high
+            self._state.bos_low = trigger.low
+            self._state.v_cycle = VCyclePhase.WAIT_LIQ_GRAB
+            self._state.temporary_lower_high = None
+            self._state.lh_marking_candle = None
+            self._state.cycle_swept_liquidity = None
+            self._state.phase = MsiPhase.HL_LH_CYCLE
         return events
 
     # ------------------------------------------------------------------ #
@@ -920,6 +949,104 @@ class MsiEngine:
     # DOWN: HIGH > OB SHORT.high → UP, OB LONG = świeca z najniższym LOW
     # UP:   LOW  < OB LONG.low  → DOWN, OB SHORT = świeca z najwyższym HIGH
     # ------------------------------------------------------------------ #
+
+    def _begin_iii_iv_from_ob_ic(
+        self,
+        extreme: MsiCandle,
+        trigger: MsiCandle,
+        trend: Trend,
+        *,
+        after_trend_change: bool = False,
+    ) -> List[StructureEvent]:
+        """
+        PDF V.6 / VI-B: świeca OB = nowa IC → budowa Temporary HIGH/LOW + Temporary
+        Liquidity (III) i LIQUIDITY+BOS (IV) od zera. Nie emituje OB_NEW (już jest).
+        """
+        events: List[StructureEvent] = []
+        self._state.initial_trend = trend
+        self._state.cycle_swept_liquidity = None
+        self._state.temporary_higher_low = None
+        self._state.temporary_lower_high = None
+        self._state.hl_marking_candle = None
+        self._state.lh_marking_candle = None
+        self._state.confirmed_higher_low = None
+        self._state.confirmed_lower_high = None
+        self._state.liquidity = None
+        self._state.bos_high = None
+        self._state.bos_low = None
+        self._state.temporary_high = None
+        self._state.temporary_low = None
+        self._state.temporary_liquidity = None
+        self._state.pre_bos_phase = PreBosPhase.BUILDING
+
+        if trend == Trend.UP and trigger.high > extreme.high:
+            self._state.temporary_high = trigger.high
+            self._state.temporary_liquidity = trigger.low
+            self._state.phase = MsiPhase.PRE_FIRST_OB
+            events.append(
+                self._emit(
+                    "INITIAL_TREND",
+                    trigger,
+                    trend="UP",
+                    breaking_candle_ts=trigger.ts,
+                    temporary_high=trigger.high,
+                    temporary_liquidity=trigger.low,
+                    initial_high=extreme.high,
+                    initial_low=extreme.low,
+                    after_trend_change=after_trend_change,
+                    after_ob_restart=not after_trend_change,
+                )
+            )
+        elif trend == Trend.DOWN and trigger.low < extreme.low:
+            self._state.temporary_low = trigger.low
+            self._state.temporary_liquidity = trigger.high
+            self._state.phase = MsiPhase.PRE_FIRST_OB
+            events.append(
+                self._emit(
+                    "INITIAL_TREND",
+                    trigger,
+                    trend="DOWN",
+                    breaking_candle_ts=trigger.ts,
+                    temporary_low=trigger.low,
+                    temporary_liquidity=trigger.high,
+                    initial_high=extreme.high,
+                    initial_low=extreme.low,
+                    after_trend_change=after_trend_change,
+                    after_ob_restart=not after_trend_change,
+                )
+            )
+        else:
+            self._state.phase = MsiPhase.INITIAL_STRUCTURE
+        return events
+
+    def _migrate_legacy_wait_liq_after_subsequent_ob(self) -> None:
+        """
+        Snapshot Firestore: HL_LH_CYCLE + WAIT_LIQ_GRAB po subsequent OB (is_first=False,
+        OB == IC) — stara logika czekała na poprzednią Liquidity zamiast budować III/IV.
+        Przejście: liquidity=None, phase=INITIAL_STRUCTURE, IC=OB (bez nowego OB_NEW).
+        Nie rusza pierwszego OB (is_first=True) ani stanów po poprawnym IV.
+        """
+        st = self._state
+        if st.phase != MsiPhase.HL_LH_CYCLE:
+            return
+        if st.v_cycle != VCyclePhase.WAIT_LIQ_GRAB:
+            return
+        ob = st.current_ob
+        if ob is None or ob.is_first:
+            return
+        if not self._ob_already_is_initial_candle():
+            return
+        extreme = ob.candle
+        trend = Trend.UP if ob.direction == "LONG" else Trend.DOWN
+        self._set_initial_candle(extreme)
+        # Trigger = OB (brak świecy „breaking” w migracji) → INITIAL_STRUCTURE
+        self._begin_iii_iv_from_ob_ic(extreme, extreme, trend, after_trend_change=False)
+        logger.info(
+            "[%s] migrate legacy WAIT_LIQ_GRAB after subsequent OB → INITIAL_STRUCTURE "
+            "(IC=OB ts=%s, liquidity cleared)",
+            self.symbol,
+            extreme.ts,
+        )
 
     def _migrate_choch_pending(self) -> None:
         """Stary snapshot CHOCH_PENDING → HL_LH_CYCLE pod nową regułę zmiany trendu."""
@@ -1008,7 +1135,6 @@ class MsiEngine:
         z liquidity=OB high/low (to blokowało kolejne OB w trendzie).
         """
         events: List[StructureEvent] = []
-        self._state.initial_trend = new_trend
         self._set_initial_candle(extreme)
         self._state.choch_mode = ChochMode.NONE
         self._state.choch_candle = None
@@ -1016,21 +1142,6 @@ class MsiEngine:
         self._state.choch_rev_building = False
         self._state.choch_low_intact = True
         self._state.choch_high_intact = True
-        self._state.cycle_swept_liquidity = None
-        self._state.temporary_higher_low = None
-        self._state.temporary_lower_high = None
-        self._state.hl_marking_candle = None
-        self._state.lh_marking_candle = None
-        self._state.confirmed_higher_low = None
-        self._state.confirmed_lower_high = None
-        # Wyczyść liquidity/bos — struktura III/IV zbuduje je od nowa
-        self._state.liquidity = None
-        self._state.bos_high = None
-        self._state.bos_low = None
-        self._state.temporary_high = None
-        self._state.temporary_low = None
-        self._state.temporary_liquidity = None
-        self._state.pre_bos_phase = PreBosPhase.BUILDING
 
         if new_trend == Trend.UP:
             ob = self._create_ob(
@@ -1071,45 +1182,11 @@ class MsiEngine:
             )
         )
 
-        # PDF V.6: IC = świeca OB → budowa III/IV. Trigger może już być Breaking Candle.
-        if new_trend == Trend.UP and trigger.high > extreme.high:
-            self._state.temporary_high = trigger.high
-            self._state.temporary_liquidity = trigger.low
-            self._state.phase = MsiPhase.PRE_FIRST_OB
-            events.append(
-                self._emit(
-                    "INITIAL_TREND",
-                    trigger,
-                    trend="UP",
-                    breaking_candle_ts=trigger.ts,
-                    temporary_high=trigger.high,
-                    temporary_liquidity=trigger.low,
-                    initial_high=extreme.high,
-                    initial_low=extreme.low,
-                    after_trend_change=True,
-                )
+        events.extend(
+            self._begin_iii_iv_from_ob_ic(
+                extreme, trigger, new_trend, after_trend_change=True
             )
-        elif new_trend == Trend.DOWN and trigger.low < extreme.low:
-            self._state.temporary_low = trigger.low
-            self._state.temporary_liquidity = trigger.high
-            self._state.phase = MsiPhase.PRE_FIRST_OB
-            events.append(
-                self._emit(
-                    "INITIAL_TREND",
-                    trigger,
-                    trend="DOWN",
-                    breaking_candle_ts=trigger.ts,
-                    temporary_low=trigger.low,
-                    temporary_liquidity=trigger.high,
-                    initial_high=extreme.high,
-                    initial_low=extreme.low,
-                    after_trend_change=True,
-                )
-            )
-        else:
-            # Czekaj na Breaking Candle sekcji III w znanym kierunku
-            self._state.phase = MsiPhase.INITIAL_STRUCTURE
-
+        )
         return events
 
     # ------------------------------------------------------------------ #
